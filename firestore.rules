@@ -43,7 +43,7 @@ service cloud.firestore {
     }
 
     // Relationships: solo autenticados
-    match /relationships/follows/{userId} {
+    match /relationships/{userId} {
       match /followers/{followerId} {
         allow read: if true;
         allow create: if request.auth.uid == followerId;

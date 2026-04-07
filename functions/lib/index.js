@@ -36,8 +36,11 @@ exports.onLikeRemoved = functions.firestore
     }
 });
 // 2. Follows
+// Trigger source of truth:
+// relationships/{userId}/followers/{followerId}
+// -> followerId follows userId
 exports.onFollowAdded = functions.firestore
-    .document('relationships/follows/{userId}/followers/{followerId}')
+    .document('relationships/{userId}/followers/{followerId}')
     .onCreate(async (snap, context) => {
     const { userId, followerId } = context.params;
     try {
@@ -49,14 +52,14 @@ exports.onFollowAdded = functions.firestore
             'stats.followingCount': admin.firestore.FieldValue.increment(1)
         });
         await batch.commit();
-        console.log(`✅ Follow: ${followerId} → ${userId}`);
+        console.log(`Follow +1: ${followerId} -> ${userId}`);
     }
     catch (error) {
-        console.error(`❌ Follow increment failed`, error);
+        console.error(`Follow increment failed`, error);
     }
 });
 exports.onFollowRemoved = functions.firestore
-    .document('relationships/follows/{userId}/followers/{followerId}')
+    .document('relationships/{userId}/followers/{followerId}')
     .onDelete(async (snap, context) => {
     const { userId, followerId } = context.params;
     try {
@@ -68,9 +71,10 @@ exports.onFollowRemoved = functions.firestore
             'stats.followingCount': admin.firestore.FieldValue.increment(-1)
         });
         await batch.commit();
+        console.log(`Follow -1: ${followerId} -> ${userId}`);
     }
     catch (error) {
-        console.error(`❌ Unfollow decrement failed`, error);
+        console.error(`Unfollow decrement failed`, error);
     }
 });
 // 3. User Updates (Propagación desnormalizada)

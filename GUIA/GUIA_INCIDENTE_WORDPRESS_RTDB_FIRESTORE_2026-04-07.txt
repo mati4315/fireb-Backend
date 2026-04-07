@@ -1,0 +1,152 @@
+GUIA TECNICA - INCIDENTE DE TRIGGERS FIREBASE (WordPress -> RTDB -> Firestore)
+Proyecto: cdeluar-ddefc
+Fecha del incidente: 7 de abril de 2026
+
+===============================================================================
+1) RESUMEN EJECUTIVO
+===============================================================================
+El flujo de WordPress a Realtime Database funcionaba, pero la noticia no llegaba
+a Firestore y por eso no se mostraba en el frontend.
+
+Causa real:
+- El deploy de Functions no estaba quedando limpio.
+- Habia triggers de follows con una ruta Firestore invalida:
+  relationships/follows/{userId}/followers/{followerId}
+- Esa ruta tiene una estructura no valida para trigger de documento y Google
+  devolvia:
+  "INVALID_ARGUMENT ... Expected value ... to match regular expression ..."
+
+Efecto colateral:
+- Al fallar esa creacion, el deploy quedaba interrumpido y la funcion
+  onOfficialNewsReceived podia no quedar creada/actualizada correctamente.
+- Resultado visible: noticias en RTDB, pero sin transferencia a Firestore.
+
+
+===============================================================================
+2) ARQUITECTURA FINAL (FUNCIONANDO)
+===============================================================================
+Paso A:
+- WordPress escribe en RTDB:
+  /news/{newsId}
+
+Paso B:
+- Cloud Function onOfficialNewsReceived (1st Gen, us-central1) escucha:
+  ref.write en /news/{newsId}
+- La funcion transforma payload y hace set/merge en Firestore:
+  content/{newsId}
+- Campos clave para frontend:
+  module: "news"
+  isOficial: true
+
+Resultado:
+- El Home/Tab de noticias consume Firestore y la noticia ya aparece.
+
+
+===============================================================================
+3) CAMBIOS APLICADOS EN ESTE INCIDENTE
+===============================================================================
+ARCHIVO 1:
+- D:\FIREBASE\Backend\functions\src\index.ts
+
+Se reconstruyeron los triggers de follows con ruta valida:
+- onFollowAdded:
+  relationships/{userId}/followers/{followerId}
+- onFollowRemoved:
+  relationships/{userId}/followers/{followerId}
+
+ARCHIVO 2:
+- D:\FIREBASE\Backend\firestore.rules
+
+Se alinearon reglas a la misma estructura:
+- antes: match /relationships/follows/{userId}
+- ahora: match /relationships/{userId}
+
+ARCHIVO 3:
+- D:\FIREBASE\Backend\scripts\test-follow-triggers.js
+
+Nuevo test E2E para validar que los triggers de follow:
+1. incrementan followers/following al crear follow
+2. decrementan al borrar follow
+3. limpian datos de prueba
+
+ARCHIVO 4:
+- D:\FIREBASE\Backend\package.json
+
+Nuevo script:
+- npm run test:follow-triggers
+
+
+===============================================================================
+4) DESPLIEGUES EJECUTADOS
+===============================================================================
+Se desplego correctamente:
+- onOfficialNewsReceived
+- onFollowAdded
+- onFollowRemoved
+- firestore.rules
+
+Tambien se configuro policy de limpieza de artefactos para evitar error
+administrativo en deploy:
+- firebase functions:artifacts:setpolicy --location us-central1 --force
+
+
+===============================================================================
+5) COMANDOS DE RECUPERACION (RUNBOOK)
+===============================================================================
+IMPORTANTE: ejecutar desde:
+- D:\FIREBASE\Backend
+
+5.1 Build Functions
+- cd functions
+- npm run build
+- cd ..
+
+5.2 Deploy funciones criticas
+- D:\FIREBASE\Backend\node_modules\.bin\firebase.cmd deploy --only functions:onOfficialNewsReceived,functions:onFollowAdded,functions:onFollowRemoved --project cdeluar-ddefc
+
+5.3 Deploy reglas Firestore
+- D:\FIREBASE\Backend\node_modules\.bin\firebase.cmd deploy --only firestore:rules --project cdeluar-ddefc
+
+5.4 Ver funciones activas
+- D:\FIREBASE\Backend\node_modules\.bin\firebase.cmd functions:list --project cdeluar-ddefc
+
+5.5 Test E2E de follows
+- npm run test:follow-triggers
+
+
+===============================================================================
+6) CHECKLIST DE DIAGNOSTICO RAPIDO SI VUELVE A FALLAR
+===============================================================================
+[ ] Confirmar que WordPress escribe en RTDB /news/{newsId}
+[ ] Confirmar que onOfficialNewsReceived existe en functions:list
+[ ] Revisar logs de deploy por "INVALID_ARGUMENT" en cualquier trigger
+[ ] Verificar que NO exista ruta invalida tipo:
+    relationships/follows/{userId}/followers/{followerId}
+[ ] Validar reglas Firestore alineadas a estructura real
+[ ] Probar insercion manual de noticia y confirmar documento en content/{newsId}
+[ ] Confirmar que el frontend filtra module == "news"
+
+
+===============================================================================
+7) LECCIONES APRENDIDAS
+===============================================================================
+1. "Exit code 0" en una corrida previa no garantiza deploy limpio si hubo
+   errores en intentos anteriores o en funciones especificas.
+2. Un trigger roto puede bloquear el despliegue de otros triggers no relacionados.
+3. Siempre revisar:
+   - firebase-debug.log
+   - deploy_check*.log
+   buscando "failed to create function" e "INVALID_ARGUMENT".
+
+
+===============================================================================
+8) NOTA PARA FUTURO DESARROLLADOR
+===============================================================================
+Si se modifica el modelo de follows, mantener SIEMPRE consistencia entre:
+- Ruta en functions/src/index.ts
+- Ruta en firestore.rules
+- Estructura real escrita por app cliente
+
+Si esas tres capas divergen, el sistema puede desplegar incompleto o romper
+contadores.
+

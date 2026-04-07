@@ -4,7 +4,8 @@
     "export-mysql": "node scripts/export-mysql.js",
     "transform:data": "node scripts/transform-data.js",
     "import:firebase": "node scripts/import-firebase.js",
-    "validate:migration": "node scripts/validate-migration.js"
+    "validate:migration": "node scripts/validate-migration.js",
+    "test:follow-triggers": "node scripts/test-follow-triggers.js"
   },
   "dependencies": {
     "dotenv": "^17.4.1",
