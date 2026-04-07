@@ -40,6 +40,24 @@ service cloud.firestore {
              (!('isOficial' in request.resource.data) || request.resource.data.isOficial == false);
     }
 
+    function isValidAdEventCreate(data) {
+      return request.auth != null &&
+             data.adId is string &&
+             data.adId.size() > 0 &&
+             data.adId.size() <= 120 &&
+             data.eventType is string &&
+             data.eventType in ['impression', 'click'] &&
+             data.count is int &&
+             data.count >= 1 &&
+             data.count <= 10 &&
+             data.sessionId is string &&
+             data.sessionId.size() > 0 &&
+             data.sessionId.size() <= 120 &&
+             data.userId == request.auth.uid &&
+             (!('tab' in data) || (data.tab is string && data.tab in ['todo', 'news', 'post'])) &&
+             (!('clientAt' in data) || data.clientAt is string);
+    }
+
     // Usuarios: leer PRIVADO, escribir solo para sí mismo
     match /users/{userId} {
       allow read: if request.auth.uid == userId || isAdmin();
@@ -81,6 +99,21 @@ service cloud.firestore {
         allow create: if request.auth.uid == userId;
         allow delete: if request.auth.uid == userId || isAdmin();
       }
+    }
+
+    // Ads module
+    match /ads/{adId} {
+      allow read: if (resource.data.active == true) || isAdmin();
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    match /ad_events/{eventId} {
+      allow create: if isValidAdEventCreate(request.resource.data);
+      allow read: if isAdmin();
+      allow update: if false;
+      allow delete: if isAdmin();
     }
 
     // Sync control (admin only)

@@ -1,0 +1,84 @@
+================================================================================
+GUÍA DE FUNCIONAMIENTO: ECOSISTEMA FIREBASE + MYSQL (CDELUAR)
+================================================================================
+
+Este documento explica cómo funciona tu nueva arquitectura de "Backend como Servicio"
+y cómo interactúan las piezas para que tu red social sea rápida y segura.
+
+--------------------------------------------------------------------------------
+1. EL BACKEND (EN LA NUBE DE GOOGLE)
+--------------------------------------------------------------------------------
+
+A diferencia de proyectos anteriores, NO tienes que "iniciar" un servidor local
+para que el backend funcione. Está vivo las 24 horas en Firebase.
+
+PIEZAS CLAVE:
+- FIRESTORE (Base de Datos): Guarda todo (usuarios, posts, likes). Es en tiempo real.
+- CLOUD FUNCTIONS (El Cerebro): Scripts que se despiertan solos. Ejemplo:
+    * Cuando alguien da LIKE, la función 'onLikeAdded' suma +1 al contador del post.
+    * Cuando alguien te SIGUE, la función 'onFollowAdded' actualiza tus seguidores.
+- SECURITY RULES (El Guardia): Evitan que un usuario borre posts de otros o lea datos privados. Solo el Administrador (rol: 'admin') puede borrar cualquier contenido.
+- STORAGE (Archivos): Aquí se guardan las fotos de perfil y las imágenes de los posts.
+
+--------------------------------------------------------------------------------
+2. EL FRONTEND (TU INTERFAZ WEB)
+--------------------------------------------------------------------------------
+
+Ubicado en: D:\FIREBASE\Frontend
+Tecnologías: Vite + Vue 3 + Pinia + TypeScript
+
+FUNCIONAMIENTO:
+- Comunicación Directa: Tu web no llama a una "API casera", llama directamente
+  a Firebase usando las llaves del archivo .env.
+- PINIA STORES (Memoria):
+    * authStore: Maneja si estás logueado o no.
+    * feedStore: Trae las noticias y posts en tiempo real. Si alguien publica algo, 
+      aparece en tu pantalla sin recargar (gracias a los "Snapshots").
+    * interactionStore: Maneja los clics en Likes y Seguidores.
+
+--------------------------------------------------------------------------------
+3. EL RESPALDO A MYSQL (HOSTINGER)
+--------------------------------------------------------------------------------
+
+Firebase es el primario, pero tenemos una copia de seguridad en tu MySQL de Hostinger.
+
+¿CÓMO SINCRONIZAR?
+Desde la carpeta D:\FIREBASE\Backend, puedes correr:
+> npm run sync:firebase-to-mysql
+
+Esto leerá lo nuevo en Firebase y lo enviará a tu servidor srv1183.hstgr.io.
+Es ideal para tener reportes, estadísticas o un backup físico de tus datos.
+
+--------------------------------------------------------------------------------
+4. COSAS IMPORTANTES QUE DEBES SABER (PARA EL FUTURO)
+--------------------------------------------------------------------------------
+
+- EL BLOQUEO DE CLIENTE (ADBLOCK): Como tu web habla directo con Google, los 
+  bloqueadores de anuncios pueden pensar que es rastreo. 
+  RECOMENDACIÓN: Siempre prueba tu web en Incógnito o sin AdBlock.
+
+- ADMINISTRADORES: Para que alguien sea Admin, debes cambiar su campo 'rol' a 
+  'admin' en la base de datos (Firestore). Yo te dejé un script para esto:
+  > node scripts/set-admin.js (en la carpeta Backend)
+
+- EL PLAN BLAZE (PAGO POR USO): Ahora estás en el plan Blaze de Firebase. Si tu 
+  web tiene poco tráfico, saldrá $0 (Gratis). Si se vuelve viral, Google te 
+  cobrará solo por lo que uses. Monitorea siempre tu panel de facturación.
+
+- SEGURIDAD DE LA LLAVE: El archivo 'firebase-sa-key.json' es la llave maestra de 
+  tu base de datos. NUNCA la compartas ni la subas a GitHub/GitLab público.
+
+--------------------------------------------------------------------------------
+5. COMANDOS ÚTILES
+--------------------------------------------------------------------------------
+
+EN FRONTEND:
+- npm run dev : Inicia tu web para probarla localmente.
+
+EN BACKEND:
+- firebase deploy --only functions : Si cambias la lógica de los contadores.
+- npm run sync:firebase-to-mysql : Sincroniza datos a Hostinger.
+
+================================================================================
+FIN DEL MANUAL | Autor: Antigravity AI | Versión 2.0 (Abril 2026)
+================================================================================

@@ -1,0 +1,138 @@
+MODULO ADS FIREBASE - GUIA OPERATIVA
+Fecha: 2026-04-07
+Proyecto: cdeluar-ddefc
+
+RESUMEN
+Se implemento el modulo de publicidad (ADS) integrado al feed de la app, con control por feature flags, insercion optimizada en cliente y tracking por lotes.
+
+OBJETIVOS CUMPLIDOS
+1) Activar/desactivar modulos sin tocar codigo:
+- news
+- community
+- ads
+
+2) Mantener rendimiento:
+- Feed principal sigue leyendo content con paginacion.
+- Ads se leen por separado con limite y prioridad.
+- Mezcla de ads en cliente de forma deterministica (sin costo extra de backend por request).
+- Tracking de impresiones/clicks en lotes (menos escrituras).
+
+3) Seguridad y backend:
+- Reglas nuevas para colecciones ads y ad_events.
+- Trigger Cloud Function para agregar metricas en ads.stats.
+- Indice Firestore para query eficiente de ads activos por prioridad.
+
+
+ARQUITECTURA IMPLEMENTADA
+A) Configuracion de modulos:
+- Documento: _config/modules
+- Lectura en frontend por listener (store moduleStore).
+
+B) Publicidad:
+- Coleccion: ads
+- Lectura frontend: ads activos, ordenados por prioridad y updatedAt.
+- Insercion en feed: se mezcla en la lista de content con reglas:
+  - maxAdsPerFeed
+  - minPostsBetweenAds
+  - probability
+  - tabs habilitadas
+
+C) Tracking:
+- Coleccion: ad_events (frontend escribe eventos batch).
+- Function: onAdEventCreated (Firestore trigger)
+  - incrementa stats.impressionsTotal o stats.clicksTotal
+  - recalcula stats.ctr
+  - actualiza stats.lastEventAt
+
+
+ARCHIVOS CLAVE TOCADOS
+FRONTEND
+- src/stores/moduleStore.ts
+- src/stores/adsStore.ts
+- src/stores/feedStoreV2.ts
+- src/views/HomeView.vue
+- src/components/feed/FeedAdItem.vue
+
+BACKEND
+- functions/src/index.ts (trigger onAdEventCreated)
+- firestore.rules
+- firestore.indexes.json
+- scripts/setup-ads-module.js
+- package.json (script setup:ads-module)
+
+
+COMANDOS IMPORTANTES
+1) Bootstrap ADS en Firestore (crea _config/modules y ad de ejemplo si no hay ads):
+npm run setup:ads-module
+
+2) Build frontend:
+cd D:\FIREBASE\Frontend
+npm run build
+
+3) Build functions:
+cd D:\FIREBASE\Backend\functions
+npm run build
+
+4) Deploy rules:
+D:\FIREBASE\Backend\node_modules\.bin\firebase.cmd deploy --only firestore:rules --project cdeluar-ddefc
+
+5) Deploy indexes:
+D:\FIREBASE\Backend\node_modules\.bin\firebase.cmd deploy --only firestore:indexes --project cdeluar-ddefc
+
+6) Deploy trigger ADS:
+D:\FIREBASE\Backend\node_modules\.bin\firebase.cmd deploy --only functions:onAdEventCreated --project cdeluar-ddefc
+
+
+MODELO DE DATOS MINIMO DE AD
+Coleccion ads/{adId}:
+- active: boolean
+- priority: number (1..10)
+- title: string
+- description: string
+- imageUrl: string
+- destinationUrl: string
+- ctaLabel: string
+- stats.impressionsTotal: number
+- stats.clicksTotal: number
+- stats.ctr: number
+- createdAt: timestamp
+- updatedAt: timestamp
+
+
+COMO APAGAR ADS RAPIDO
+Editar _config/modules:
+- ads.enabled = false
+
+Resultado:
+- Se deja de escuchar ads
+- No se insertan ads en feed
+- No se generan eventos nuevos
+
+
+RECOMENDACIONES DE OPERACION
+1) Siempre dejar ads.enabled en false en ambientes de prueba si no quieren tracking real.
+2) Mantener fetchLimit bajo (6-10) para no subir lecturas.
+3) No usar imagenes pesadas en ads (>300 KB), impacta tiempo de render.
+4) Revisar periodicamente stats.ctr para pausar anuncios con bajo rendimiento.
+5) Si cambia la logica de mezcla, volver a ejecutar build frontend antes de deploy.
+
+
+CHECKLIST DE DIAGNOSTICO (SI "NO APARECEN ADS")
+1) Verificar _config/modules -> ads.enabled == true
+2) Verificar que existan docs en ads con active == true
+3) Confirmar indice de ads desplegado (active + priority + updatedAt)
+4) Revisar consola frontend por errores de permisos de Firestore
+5) Verificar rules en ads/ad_events desplegadas correctamente
+
+
+CHECKLIST DE DIAGNOSTICO (SI "NO SUBEN METRICAS")
+1) Confirmar que se crean docs en ad_events
+2) Verificar function onAdEventCreated desplegada
+3) Revisar logs de function para payload invalido
+4) Confirmar que adId del evento existe en coleccion ads
+
+
+NOTA
+La vista HomeView importa desde feedStore.ts.
+feedStore.ts re-exporta useFeedStore desde feedStoreV2.ts (version ADS optimizada).
+Esto deja compatibilidad con imports viejos y permite refactor gradual.
