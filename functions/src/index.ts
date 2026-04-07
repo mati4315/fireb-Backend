@@ -131,6 +131,10 @@ export const onContentCreated = functions.firestore
   .onCreate(async (snap, context) => {
     const contentData = snap.data();
     if (!contentData) return;
+
+    const isCommunityPost =
+      contentData.module === 'community' || contentData.type === 'post';
+    if (!isCommunityPost || !contentData.userId) return;
     
     try {
       await db.collection('users').doc(contentData.userId).update({
@@ -147,6 +151,10 @@ export const onContentDeleted = functions.firestore
     const { contentId } = context.params;
     const beforeData = change.before.data();
     const afterData = change.after.data();
+
+    const isCommunityPost =
+      afterData.module === 'community' || afterData.type === 'post';
+    if (!isCommunityPost || !afterData.userId) return;
 
     try {
       const wasAlive = beforeData.deletedAt == null;

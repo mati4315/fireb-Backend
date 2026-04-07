@@ -1,0 +1,203 @@
+GUIA VIVA DE MODULOS - CDELUAR (FIREBASE)
+Ubicacion: D:\FIREBASE\Backend\GUIA y modulos
+Ultima actualizacion: 2026-04-07
+
+===============================================================================
+0) OBJETIVO DE ESTA GUIA
+===============================================================================
+Este documento deja registro de:
+1. Como esta armado hoy el modulo de Noticias + Comunidad
+2. Que cambios se aplicaron
+3. Como validar que todo funciona
+4. Como actualizar este modulo sin romper rendimiento
+
+IMPORTANTE:
+- Esta guia se debe actualizar en cada cambio de reglas, funciones, indices o
+  estructura de datos del modulo.
+
+
+===============================================================================
+1) MODELO DE DATOS RECOMENDADO (UNIFICADO Y RAPIDO)
+===============================================================================
+Coleccion principal:
+- content/{contentId}
+
+Separacion por modulo:
+- Noticias oficiales: module = "news"
+- Comunidad usuarios: module = "community"
+
+Campos canonicos por documento:
+- module: "news" | "community"
+- type: "news" | "post"
+- source: "wordpress" | "user" | "admin"
+- isOficial: boolean
+- titulo, descripcion, images
+- userId, userName, userProfilePicUrl
+- stats.likesCount, stats.commentsCount, stats.viewsCount
+- createdAt, updatedAt, deletedAt
+
+Motivo de esta arquitectura:
+- Mantener un solo feed source (content) mejora simplicidad y velocidad.
+- Evita merges entre colecciones y reduce complejidad de listeners.
+
+
+===============================================================================
+2) CONSULTAS OPTIMIZADAS EN FRONTEND
+===============================================================================
+Archivo:
+- D:\FIREBASE\Frontend\src\stores\feedStore.ts
+
+Estado actual:
+- Se elimino el filtro OR por type/module.
+- El filtrado de tabs usa where("module","==",...).
+- createPost usa:
+  module = "community"
+  type = "post"
+  source = "user"
+  isOficial = false
+  createdAt/updatedAt = serverTimestamp()
+
+Resultado:
+- Menos costo de query
+- Menos riesgo de indexes complejos
+- Mayor consistencia de orden por fecha
+
+
+===============================================================================
+3) REGLAS DE SEGURIDAD (FIRESTORE RULES)
+===============================================================================
+Archivo:
+- D:\FIREBASE\Backend\firestore.rules
+
+Politica vigente para content:
+- create permitido solo para post de comunidad valido:
+  * usuario autenticado
+  * userId == auth.uid
+  * module == "community"
+  * type == "post"
+  * source == "user"
+  * isOficial no permitido en true
+  * stats iniciales en 0
+- update permitido solo al autor y manteniendo modulo community
+- delete solo admin
+
+Consecuencia:
+- Un cliente no admin NO puede publicar noticias oficiales.
+
+
+===============================================================================
+4) CLOUD FUNCTIONS RELACIONADAS
+===============================================================================
+Archivo:
+- D:\FIREBASE\Backend\functions\src\index.ts
+
+Funciones clave:
+- onOfficialNewsReceived (RTDB -> Firestore content)
+- onFollowAdded / onFollowRemoved
+- onContentCreated / onContentDeleted
+
+Ajuste aplicado:
+- onContentCreated/onContentDeleted ahora cuentan postsCount solo para
+  contenido de comunidad (module=community o type=post), no para news.
+
+
+===============================================================================
+5) INDICES FIRESTORE
+===============================================================================
+Archivo:
+- D:\FIREBASE\Backend\firestore.indexes.json
+
+Se agregaron indices para consultas por modulo y fecha:
+- deletedAt + module + createdAt(desc)
+- module + createdAt(desc)
+
+Objetivo:
+- Tabs "Noticias" y "Comunidad" con baja latencia.
+
+
+===============================================================================
+6) MIGRACION/BACKFILL DE DOCUMENTOS LEGACY
+===============================================================================
+Script:
+- D:\FIREBASE\Backend\scripts\backfill-content-module.js
+
+Comandos:
+- Dry run:
+  npm run backfill:content-module:dry
+- Aplicar:
+  npm run backfill:content-module
+
+Que hace:
+- Completa module/type/source/isOficial/deletedAt faltantes en content.
+- Permite que docs viejos sigan visibles con el nuevo filtro por module.
+
+
+===============================================================================
+7) PRUEBAS E2E DISPONIBLES
+===============================================================================
+1) Triggers de follows:
+- Script: D:\FIREBASE\Backend\scripts\test-follow-triggers.js
+- Comando: npm run test:follow-triggers
+- Valida +1/-1 en followersCount/followingCount
+
+2) Reglas de comunidad (usuario no admin):
+- Script: D:\FIREBASE\Backend\scripts\test-community-rules.js
+- Comando: npm run test:community-rules
+- Valida:
+  * permitido crear community post
+  * denegado crear news
+  * denegado crear isOficial=true
+
+
+===============================================================================
+8) DESPLIEGUE RECOMENDADO
+===============================================================================
+Desde: D:\FIREBASE\Backend
+
+1. Functions:
+   D:\FIREBASE\Backend\node_modules\.bin\firebase.cmd deploy --only functions:onOfficialNewsReceived,functions:onFollowAdded,functions:onFollowRemoved,functions:onContentCreated,functions:onContentDeleted --project cdeluar-ddefc
+
+2. Rules:
+   D:\FIREBASE\Backend\node_modules\.bin\firebase.cmd deploy --only firestore:rules --project cdeluar-ddefc
+
+3. Indexes:
+   D:\FIREBASE\Backend\node_modules\.bin\firebase.cmd deploy --only firestore:indexes --project cdeluar-ddefc
+
+
+===============================================================================
+9) PROTOCOLO DE ACTUALIZACION DE MODULO (OBLIGATORIO)
+===============================================================================
+Cada vez que se modifique el modulo, actualizar este TXT con:
+
+[CAMBIO YYYY-MM-DD]
+- Autor:
+- Objetivo:
+- Archivos tocados:
+- Riesgo funcional:
+- Comandos ejecutados:
+- Resultado de pruebas:
+- Rollback plan:
+
+Regla de oro:
+- Si cambias estructura de content, debes revisar SIEMPRE:
+  1) feedStore.ts
+  2) firestore.rules
+  3) firestore.indexes.json
+  4) functions/src/index.ts
+  5) scripts de test E2E
+
+
+===============================================================================
+10) CHECKLIST RAPIDO DE SALUD DEL MODULO
+===============================================================================
+[ ] npm run test:follow-triggers -> PASS
+[ ] npm run test:community-rules -> PASS
+[ ] Noticias WordPress entran en content con module="news"
+[ ] Post de usuario entra con module="community"
+[ ] Tab Noticias y Tab Comunidad cargan sin errores de index
+[ ] postsCount de usuario no sube por noticias oficiales
+
+
+===============================================================================
+FIN GUIA VIVA
+===============================================================================

@@ -1,0 +1,159 @@
+SINCRONIZAR A BASE DE DATOS MYSQL
+Proyecto: cdeluar-ddefc
+Base destino: u692901087_fire_cdelu (Hostinger)
+Ultima actualizacion: 2026-04-07
+
+===============================================================================
+1) CONTEXTO GENERAL
+===============================================================================
+Arquitectura actual:
+1. WordPress publica noticias en Realtime Database (RTDB).
+2. Cloud Function onOfficialNewsReceived copia noticias a Firestore (content).
+3. Script backend sincroniza Firestore -> MySQL (tabla feed).
+
+Comando principal de sincronizacion:
+- npm run sync:firebase-to-mysql
+
+Script principal:
+- D:\FIREBASE\Backend\scripts\firebase-sync.js
+
+
+===============================================================================
+2) PROBLEMA QUE OCURRIA
+===============================================================================
+Sintoma:
+- Las noticias oficiales se veian correctamente en Firebase/Frontend, pero no
+  quedaban sincronizadas en MySQL.
+
+Error real detectado:
+- MySQL devolvia:
+  ER_NO_REFERENCED_ROW_2
+  Cannot add or update a child row
+  FOREIGN KEY (feed.user_id) REFERENCES users(id)
+
+Causa raiz:
+- Algunos documentos de content tenian userId que no existia en tabla users
+  de MySQL (ejemplos: wp_1, usuarios de prueba efimeros).
+- Al intentar insertar en feed con ese user_id inexistente, MySQL rechazaba
+  la fila y abortaba toda la sincronizacion.
+
+Impacto:
+- La sync se cortaba en syncContent.
+- No se completaba la transferencia incremental a MySQL.
+
+
+===============================================================================
+3) SOLUCION APLICADA
+===============================================================================
+Se modifico:
+- D:\FIREBASE\Backend\scripts\firebase-sync.js
+
+Cambios aplicados:
+1. Manejo de userId faltante:
+   - Se cargan IDs existentes de users en MySQL.
+   - Si un content.userId no existe:
+     - Si es noticia oficial (news/wordpress/isOficial=true): se crea usuario
+       sistema en MySQL y se usa ese user_id.
+     - Si no es oficial: se guarda user_id = NULL para no romper FK.
+
+2. Alta automatica de usuarios sistema:
+   - Nuevo metodo upsertSystemUsersToMySQL(...)
+   - Inserta usuario tecnico en users para IDs oficiales faltantes.
+
+3. Correccion de upsert en feed:
+   - ON DUPLICATE KEY UPDATE ahora incluye user_id.
+   - Esto permite corregir historicos ya insertados con user_id NULL.
+
+4. Robustez de ultima fecha de sync:
+   - Si sync_control.lastSyncTime viene invalido, el script cae a full sync
+     en vez de romper.
+
+Resultado final:
+- Sync completa sin abortar.
+- Noticias oficiales se sincronizan a feed con user_id valido (ej: wp_1).
+
+
+===============================================================================
+4) COMANDOS OPERATIVOS RECOMENDADOS
+===============================================================================
+Desde:
+- D:\FIREBASE\Backend
+
+Sincronizacion normal:
+- npm run sync:firebase-to-mysql
+
+Forzar resincronizacion completa (caso mantenimiento):
+1. Ajustar sync_control lastSyncTime a fecha vieja valida
+2. Ejecutar sync normal
+
+Nota:
+- No usar fechas invalidas en sync_control, puede romper filtros por updatedAt.
+
+
+===============================================================================
+5) VERIFICACION POST-SYNC (OBLIGATORIA)
+===============================================================================
+Checklist rapido:
+[ ] Sync termina con "SYNC COMPLETED SUCCESSFULLY"
+[ ] No aparece ER_NO_REFERENCED_ROW_2
+[ ] En feed existen filas type=1 (noticias)
+[ ] Noticias oficiales tienen user_id valido (ej: wp_1) o NULL solo si aplica
+[ ] Tabla users contiene usuario sistema oficial (si fue necesario crearlo)
+
+Consulta ejemplo:
+- SELECT id, type, user_id, updated_at
+  FROM feed
+  WHERE type = 1
+  ORDER BY updated_at DESC
+  LIMIT 10;
+
+
+===============================================================================
+6) COMO EVITAR FUTUROS ERRORES
+===============================================================================
+1. Mantener integridad user_id:
+   - Si un origen externo (WordPress, tests, migraciones) genera userId nuevo,
+     asegurar existencia en users o dejar que el sync lo trate como sistema
+     (solo casos oficiales).
+
+2. No romper el contrato de content:
+   - module/type/source/isOficial deben estar consistentes.
+   - Noticias oficiales: module='news', source='wordpress' (o equivalente).
+
+3. Monitorear sync_control:
+   - lastSyncTime debe ser fecha valida.
+   - Si hay sospecha de inconsistencia, ejecutar una full sync controlada.
+
+4. Evitar datos de prueba sucios en produccion:
+   - Los contenidos de test con userId efimero pueden generar warnings y ruido.
+   - Limpiar contenido/usuarios de pruebas periodicamente.
+
+5. Mantener logs:
+   - Revisar WARN de "Unknown userId for content".
+   - Si suben en volumen, revisar origen de datos.
+
+
+===============================================================================
+7) PLAN DE ROLLBACK (SI ALGO FALLA)
+===============================================================================
+Si una version nueva del sync falla:
+1. Restaurar version anterior de firebase-sync.js.
+2. Ejecutar sync incremental.
+3. Validar feed type=1.
+4. Reaplicar cambios en branch de pruebas y volver a desplegar.
+
+
+===============================================================================
+8) REGISTRO DE CAMBIO (AUDITORIA)
+===============================================================================
+[2026-04-07]
+- Se identifico falla por FK feed.user_id -> users.id
+- Se implemento creacion de usuarios sistema para noticias oficiales faltantes
+- Se corrigio ON DUPLICATE KEY UPDATE para actualizar user_id
+- Se endurecio manejo de lastSyncTime invalido
+- Se ejecuto full resync y se verifico noticias type=1 sincronizadas con user_id
+
+
+===============================================================================
+FIN DEL DOCUMENTO
+===============================================================================

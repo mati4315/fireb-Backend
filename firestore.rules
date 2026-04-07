@@ -14,6 +14,32 @@ service cloud.firestore {
              (!('images' in data) || data.images.size() <= 10);
     }
 
+    function isValidCommunityPostCreate(data) {
+      return request.auth != null &&
+             isValidContent(data) &&
+             data.userId == request.auth.uid &&
+             data.module == 'community' &&
+             data.type == 'post' &&
+             data.source == 'user' &&
+             data.deletedAt == null &&
+             (!('isOficial' in data) || data.isOficial == false) &&
+             ('stats' in data) &&
+             data.stats.likesCount == 0 &&
+             data.stats.commentsCount == 0 &&
+             data.stats.viewsCount == 0;
+    }
+
+    function isValidCommunityPostUpdate() {
+      return request.auth != null &&
+             request.auth.uid == resource.data.userId &&
+             resource.data.module == 'community' &&
+             request.resource.data.userId == resource.data.userId &&
+             request.resource.data.module == 'community' &&
+             request.resource.data.type == 'post' &&
+             request.resource.data.source == resource.data.source &&
+             (!('isOficial' in request.resource.data) || request.resource.data.isOficial == false);
+    }
+
     // Usuarios: leer PRIVADO, escribir solo para sí mismo
     match /users/{userId} {
       allow read: if request.auth.uid == userId || isAdmin();
@@ -23,8 +49,8 @@ service cloud.firestore {
     // Content: leer público, crear autenticado, editar/borrar solo autor (SOFT DELETE)
     match /content/{contentId} {
       allow read: if true;
-      allow create: if request.auth != null && isValidContent(request.resource.data);
-      allow update: if request.auth.uid == resource.data.userId;
+      allow create: if isValidCommunityPostCreate(request.resource.data);
+      allow update: if isValidCommunityPostUpdate();
       allow delete: if isAdmin();
 
       // Likes: crear/leer, borrar solo quien lo creó

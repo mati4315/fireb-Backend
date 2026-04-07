@@ -59,7 +59,14 @@ class FirebaseSync {
       connection.release();
 
       if (rows.length > 0) {
-        return new Date(rows[0].lastSyncTime);
+        const parsed = new Date(rows[0].lastSyncTime);
+        if (Number.isNaN(parsed.getTime())) {
+          this.log('WARN', 'Invalid lastSyncTime found in MySQL; falling back to full sync', {
+            lastSyncTime: rows[0].lastSyncTime
+          });
+          return null;
+        }
+        return parsed;
       }
       return null;
     } catch (error) {
@@ -178,19 +185,66 @@ class FirebaseSync {
     }
 
     try {
+      const mysqlUserIds = await this.getExistingMySQLUserIds();
       const snapshot = await query.get();
+      const contentDocs = snapshot.docs.map((doc) => ({ id: doc.id, data: doc.data() }));
+      const missingOfficialUsers = new Map();
       const contentToSync = [];
 
-      snapshot.forEach((doc) => {
-        const contentData = doc.data();
+      // 1) Crear usuarios sistema para noticias oficiales si faltan en MySQL.
+      for (const item of contentDocs) {
+        const contentData = item.data;
+        const rawUserId = contentData.userId || null;
+        const isOfficialNews =
+          contentData.module === 'news' ||
+          contentData.type === 'news' ||
+          contentData.source === 'wordpress' ||
+          contentData.isOficial === true;
+
+        if (rawUserId && !mysqlUserIds.has(rawUserId) && isOfficialNews) {
+          missingOfficialUsers.set(rawUserId, {
+            id: rawUserId,
+            nombre: contentData.userName || 'WordPress Oficial',
+            username: `wp_${rawUserId}`.slice(0, 100)
+          });
+        }
+      }
+
+      if (missingOfficialUsers.size > 0) {
+        await this.upsertSystemUsersToMySQL([...missingOfficialUsers.values()]);
+        for (const id of missingOfficialUsers.keys()) {
+          mysqlUserIds.add(id);
+        }
+      }
+
+      // 2) Sincronizar content con user_id valido (o NULL si no aplica).
+      for (const item of contentDocs) {
+        const contentData = item.data;
+        let userId = contentData.userId || null;
+        const isOfficialNews =
+          contentData.module === 'news' ||
+          contentData.type === 'news' ||
+          contentData.source === 'wordpress' ||
+          contentData.isOficial === true;
+
+        // Evitar falla por FK cuando el contenido apunta a user_id no existente en users.
+        if (userId && !mysqlUserIds.has(userId)) {
+          this.log('WARN', 'Unknown userId for content; storing as NULL', {
+            contentId: item.id,
+            userId,
+            isOfficialNews
+          });
+          userId = null;
+        }
+
         const syncItem = {
-          id: doc.id,
+          id: item.id,
           titulo: contentData.titulo || '',
           descripcion: contentData.descripcion || '',
           image_url: contentData.images?.[0] || '',
           type: contentData.type === 'news' ? 1 : 2,
-          original_id: doc.id,
-          user_id: contentData.userId || null,
+          original_id: item.id,
+          user_id: userId,
           likes_count: contentData.stats?.likesCount || 0,
           comments_count: contentData.stats?.commentsCount || 0,
           created_at: this.formatTimestamp(contentData.createdAt),
@@ -198,7 +252,7 @@ class FirebaseSync {
           is_deleted: contentData.deletedAt ? 1 : 0
         };
         contentToSync.push(syncItem);
-      });
+      }
 
       if (contentToSync.length > 0) {
         await this.upsertContentToMySQL(contentToSync);
@@ -209,6 +263,50 @@ class FirebaseSync {
     } catch (error) {
       this.log('ERROR', 'Content sync failed', { error: error.message });
       throw error;
+    }
+  }
+
+  async upsertSystemUsersToMySQL(users) {
+    const connection = await pool.getConnection();
+    try {
+      const now = this.formatTimestamp(new Date());
+      for (const user of users) {
+        await connection.query(
+          `
+          INSERT IGNORE INTO users (
+            id, nombre, email, username, rol, bio, location, website,
+            profile_picture_url, is_verified, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `,
+          [
+            user.id,
+            user.nombre || 'WordPress Oficial',
+            null,
+            user.username || `wp_${user.id}`.slice(0, 100),
+            'user',
+            'Usuario sistema generado por sync Firebase->MySQL',
+            null,
+            null,
+            null,
+            0,
+            now,
+            now
+          ]
+        );
+      }
+      this.log('INFO', `System users upserted for official news`, { count: users.length });
+    } finally {
+      connection.release();
+    }
+  }
+
+  async getExistingMySQLUserIds() {
+    const connection = await pool.getConnection();
+    try {
+      const [rows] = await connection.query('SELECT id FROM users');
+      return new Set(rows.map((row) => row.id));
+    } finally {
+      connection.release();
     }
   }
 
@@ -224,7 +322,7 @@ class FirebaseSync {
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             titulo = ?, descripcion = ?, image_url = ?, type = ?,
-            likes_count = ?, comments_count = ?, updated_at = ?
+            user_id = ?, likes_count = ?, comments_count = ?, updated_at = ?
         `, [
           // INSERT
           item.id, item.titulo, item.descripcion, item.image_url,
@@ -232,7 +330,7 @@ class FirebaseSync {
           item.comments_count, item.created_at, item.updated_at,
           // UPDATE
           item.titulo, item.descripcion, item.image_url, item.type,
-          item.likes_count, item.comments_count, item.updated_at
+          item.user_id, item.likes_count, item.comments_count, item.updated_at
         ]);
       }
 
