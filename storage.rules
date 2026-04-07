@@ -1,0 +1,27 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /posts/{userId}/{allPaths=**} {
+      // ✅ Allow upload if:
+      // 1. User is authenticated
+      // 2. The path belongs to the user
+      // 3. File is an image
+      // 4. File is < 5MB
+      allow write: if request.auth != null 
+                  && request.auth.uid == userId
+                  && request.resource.contentType.matches('image/.*')
+                  && request.resource.size < 5 * 1024 * 1024;
+      
+      // ✅ Allow read to everyone
+      allow read: if true;
+    }
+    
+    match /avatars/{userId}/{allPaths=**} {
+      allow write: if request.auth != null 
+                  && request.auth.uid == userId
+                  && request.resource.contentType.matches('image/.*')
+                  && request.resource.size < 2 * 1024 * 1024;
+      allow read: if true;
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "scripts": {
+    "sync:firebase-to-mysql": "node scripts/firebase-sync.js",
+    "export-mysql": "node scripts/export-mysql.js",
+    "transform:data": "node scripts/transform-data.js",
+    "import:firebase": "node scripts/import-firebase.js",
+    "validate:migration": "node scripts/validate-migration.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.1",
+    "firebase-admin": "^13.7.0",
+    "firebase-tools": "^15.13.0",
+    "mysql2": "^3.20.0",
+    "node-cron": "^3.0.3"
+  }
+}

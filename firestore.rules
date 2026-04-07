@@ -1,0 +1,73 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ✅ HELPERS: Validación completa
+    function isAdmin() {
+      return request.auth != null && request.auth.token.admin == true;
+    }
+    
+    function isValidContent(data) {
+      return data.titulo.size() > 0 &&
+             data.titulo.size() <= 300 &&
+             (data.descripcion.size() <= 5000 || !('descripcion' in data)) &&
+             (!('images' in data) || data.images.size() <= 10);
+    }
+
+    // Usuarios: leer PRIVADO, escribir solo para sí mismo
+    match /users/{userId} {
+      allow read: if request.auth.uid == userId || isAdmin();
+      allow write: if request.auth.uid == userId && !('rol' in request.resource.data);
+    }
+
+    // Content: leer público, crear autenticado, editar/borrar solo autor (SOFT DELETE)
+    match /content/{contentId} {
+      allow read: if true;
+      allow create: if request.auth != null && isValidContent(request.resource.data);
+      allow update: if request.auth.uid == resource.data.userId;
+      allow delete: if isAdmin();
+
+      // Likes: crear/leer, borrar solo quien lo creó
+      match /likes/{likeUserId} {
+        allow read: if true;
+        allow create: if request.auth.uid == likeUserId;
+        allow delete: if request.auth.uid == likeUserId;
+      }
+
+      // Comments: crear/leer, borrar solo autor o admin
+      match /comments/{commentId} {
+        allow read: if true;
+        allow create: if request.auth != null && request.resource.data.text.size() > 0 && request.resource.data.text.size() <= 500;
+        allow delete: if request.auth.uid == resource.data.userId || isAdmin();
+      }
+    }
+
+    // Relationships: solo autenticados
+    match /relationships/follows/{userId} {
+      match /followers/{followerId} {
+        allow read: if true;
+        allow create: if request.auth.uid == followerId;
+        allow delete: if request.auth.uid == followerId || isAdmin();
+      }
+      
+      match /following/{followingId} {
+        allow read: if true;
+        allow create: if request.auth.uid == userId;
+        allow delete: if request.auth.uid == userId || isAdmin();
+      }
+    }
+
+    // Sync control (admin only)
+    match /_sync_control/{document=**} {
+      allow read: if isAdmin();
+      allow write: if isAdmin();
+    }
+
+    // Configuration & Feature Flags (Admin only write - pero todos pueden leer)
+    match /_config/{document=**} {
+      allow read: if true;
+      allow write: if isAdmin();
+      allow delete: if isAdmin();
+    }
+  }
+}

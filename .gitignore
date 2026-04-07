@@ -1,0 +1,19 @@
+# Logs
+*.log
+
+# Dependencies
+node_modules/
+
+# Secrets
+.env
+firebase-sa-key.json
+
+# Local config
+.firebaserc
+
+# Large files or temporary exports
+exports/
+transformed/
+FIREBASE_RESUMEN_EJECUTIVO.txt
+resumen-utf8.txt
+COMMANDOS.txt
