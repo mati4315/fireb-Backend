@@ -1,0 +1,290 @@
+MODULO ENCUESTA FIREBASE - GUIA OPERATIVA
+Fecha: 2026-04-08
+Proyecto: cdeluar-ddefc
+
+RESUMEN
+Se implemento el modulo de encuestas en tiempo real con:
+- Vista publica en Inicio (encuesta destacada en tab Todos).
+- Vista completa en tab Encuestas.
+- Gestion staff (admin/colaborador) para crear, editar, finalizar, eliminar y activar/desactivar modulo.
+- Voto seguro via Cloud Function callable (sin escritura directa de votos).
+- Auto-completado de encuestas vencidas por scheduler.
+
+El objetivo principal fue mantener UX rapida sin recargas globales y minimizar lecturas/escrituras innecesarias.
+
+
+OBJETIVOS CUMPLIDOS
+1) Visibilidad publica controlada
+- En tab Todos se muestra solo 1 encuesta activa (destacada).
+- Si hay varias activas, existe boton "Siguiente encuesta".
+- En tab Encuestas se ve listado (activas + completadas).
+- Si no hay encuestas activas, la tab "Encuestas" se oculta automaticamente.
+
+2) Gestion staff completa
+- Acceso por menu de usuario a "Gestion Encuestas" (solo staff).
+- Crear/editar/eliminar/finalizar encuesta.
+- Duracion por presets: 10 min, 30 min (default), 2 horas, 1 dia.
+- Modulo encuestas habilitable/deshabilitable desde _config/modules.
+
+3) Voto seguro y antifraude
+- Voto solo autenticado.
+- 1 voto por usuario por encuesta.
+- Escritura de votos solo por callable submitSurveyVote.
+- Validaciones de estado, expiracion, opciones validas y limite de seleccion.
+
+4) Rendimiento
+- Listener liviano para encuesta destacada.
+- Sin recargar Home completo al votar (optimistic UI + reconciliacion snapshot).
+- Opciones largas colapsadas (muestra max 3 + "Ver mas opciones").
+- Scheduler backend para completar expiradas por lotes.
+
+
+ARQUITECTURA IMPLEMENTADA
+A) Configuracion de modulos
+- Documento: _config/modules
+- Campo canonico: surveys.enabled (boolean)
+- Lectura en frontend por moduleStore listener.
+
+B) Encuestas
+- Coleccion: surveys/{surveyId}
+- Campos principales:
+  - question: string
+  - description: string
+  - status: active | inactive | completed
+  - durationMinutes: 10 | 30 | 120 | 1440
+  - expiresAt: timestamp
+  - isMultipleChoice: boolean
+  - maxVotesPerUser: number
+  - totalVotes: number
+  - options[]:
+    - id: string (estable)
+    - text: string
+    - voteCount: number
+    - active: boolean
+  - createdBy, updatedBy, createdAt, updatedAt
+
+C) Votos
+- Coleccion: survey_votes/{surveyId}_{userId}
+- Escritura: solo via Cloud Function callable.
+- Lectura: owner y staff.
+
+D) Funciones backend
+- submitSurveyVote (callable, us-central1):
+  - Valida auth, estado, expiracion, opciones y duplicado.
+  - Usa transaction para escribir voto y sumar conteos atomicos.
+- completeExpiredSurveys (scheduled cada 1 minuto):
+  - Busca surveys activas vencidas (status=active, expiresAt<=now).
+  - Actualiza status=completed por lotes.
+
+
+AUTORIZACION (FUENTE DE VERDAD)
+Se unifico logica staff en frontend + rules:
+- users/{uid}.rol en ['admin','administrador','colaborador'].
+- fallback super admin por:
+  - email: matias4315@gmail.com
+  - uid: Z4f5ogXDQaNhEY4iBf9jgkPnQMP2
+  - custom claims: admin / superAdmin / super_admin
+
+Nota operativa:
+Si se cambian claims o rol, se recomienda relogin del usuario para refrescar token.
+
+
+REGLAS FIRESTORE (RESUMEN)
+- surveys:
+  - read: publico
+  - create/update/delete: solo staff
+- survey_votes:
+  - read: staff o duenio del voto
+  - create/update/delete: bloqueado directo (false)
+- _config:
+  - read: publico
+  - write/delete: staff
+
+
+INDICES FIRESTORE CLAVE
+1) surveys:
+- status ASC + createdAt DESC (listados publicos/admin)
+2) surveys:
+- status ASC + expiresAt ASC (scheduler de expiracion)
+3) survey_votes:
+- userId ASC + createdAt DESC
+
+
+UX Y MECANICA FINAL
+1) Encuesta destacada en Home (tab Todos)
+- Se muestra arriba de todo.
+- Solo 1 a la vez.
+- Si hay mas activas, "Siguiente encuesta".
+
+2) Opciones largas
+- Muestra max 3 opciones.
+- Si hay mas, boton "Ver mas opciones (+N)".
+- Puede colapsar de nuevo con "Ver menos opciones".
+
+3) Tiempo restante
+- Cuenta regresiva visible en negrita.
+
+4) Voto
+- Encuesta simple (1 opcion): voto automatico al seleccionar.
+- Encuesta multiple: selecciona opciones y confirma con boton Votar.
+- Invitado: click en opcion abre popup invitando a iniciar sesion.
+
+5) Gestion staff
+- Boton "Finalizar encuesta" en pantalla de edicion.
+
+
+PROBLEMAS REALES QUE HUBO Y SOLUCIONES APLICADAS
+INCIDENTE 1 - Missing or insufficient permissions siendo admin
+Sintoma:
+- Usuario admin no podia ver/editar paneles.
+Causa:
+- Desalineacion entre chequeos UI, claims y rol.
+Solucion:
+- Se agrego helper unico de roles.
+- Se reforzaron rules con fallback por super admin email/uid/claims.
+- Se verifico usuario en Firebase Auth + users/{uid}.rol.
+
+INCIDENTE 2 - Voto con error CORS/internal
+Sintoma:
+- Preflight CORS fallaba al votar.
+Causa:
+- submitSurveyVote no estaba desplegada en Functions.
+Solucion:
+- Deploy puntual de functions:submitSurveyVote.
+- Verificacion posterior con functions:list (trigger callable activo).
+
+INCIDENTE 3 - Encuestas activas no aparecian en feed principal
+Sintoma:
+- Encuesta activa existia pero no se veia en Todos.
+Causa:
+- Render solo en tab Encuestas.
+Solucion:
+- Se agrego bloque destacado en tab Todos con listener dedicado.
+
+INCIDENTE 4 - En multiple opcion solo guardaba una respuesta
+Sintoma:
+- Usuario seleccionaba varias pero quedaba 1.
+Causa:
+- Configuracion posible con isMultipleChoice=true y maxVotesPerUser=1.
+Solucion:
+- Frontend y backend forzan minimo 2 cuando isMultipleChoice=true.
+
+INCIDENTE 5 - Tab Encuestas molestaba sin contenido activo
+Sintoma:
+- Tab visible aunque no habia encuestas activas.
+Solucion:
+- Tab se oculta automaticamente si no hay activas.
+
+
+COMANDOS IMPORTANTES
+1) Build frontend
+cd D:\FIREBASE\Frontend
+npm run build
+
+2) Build functions
+cd D:\FIREBASE\Backend\functions
+npm run build
+
+3) Deploy rules
+D:\FIREBASE\Backend\node_modules\.bin\firebase.cmd deploy --only firestore:rules --project cdeluar-ddefc
+
+4) Deploy indexes
+D:\FIREBASE\Backend\node_modules\.bin\firebase.cmd deploy --only firestore:indexes --project cdeluar-ddefc
+
+5) Deploy callable de voto
+D:\FIREBASE\Backend\node_modules\.bin\firebase.cmd deploy --only functions:submitSurveyVote --project cdeluar-ddefc
+
+6) Deploy scheduler de expiracion
+D:\FIREBASE\Backend\node_modules\.bin\firebase.cmd deploy --only functions:completeExpiredSurveys --project cdeluar-ddefc
+
+7) Listar funciones activas
+D:\FIREBASE\Backend\node_modules\.bin\firebase.cmd functions:list --project cdeluar-ddefc
+
+
+CHECKLIST RAPIDO DE DIAGNOSTICO
+A) "No aparece encuesta en Todos"
+1) _config/modules.surveys.enabled == true
+2) Existe al menos 1 survey con status=active y no vencida
+3) Frontend actualizado (cache limpia)
+
+B) "No deja votar"
+1) Usuario autenticado
+2) submitSurveyVote desplegada (functions:list)
+3) Encuesta activa y no vencida
+4) Opciones seleccionadas validas
+
+C) "Error permisos staff"
+1) users/{uid}.rol correcto
+2) custom claims admin/superAdmin si aplica
+3) relogin para refrescar token
+4) firestore.rules desplegadas
+
+D) "Scheduler no completa vencidas"
+1) completeExpiredSurveys desplegada
+2) Indice surveys(status+expiresAt) desplegado
+3) expiresAt presente y valido en docs
+
+
+MIGRACION FUTURA (RUNBOOK)
+1) Exportar datos
+- surveys
+- survey_votes
+- _config/modules
+
+2) Migrar primero contratos base
+- Crear colecciones y campos en destino.
+- Mantener ids de opciones estables (no regenerar).
+
+3) Migrar seguridad
+- Replicar reglas de lectura publica surveys y voto via backend.
+- No permitir escritura directa de survey_votes desde cliente.
+
+4) Migrar backend
+- Portar callable submitSurveyVote.
+- Portar scheduler completeExpiredSurveys.
+- Validar region equivalente (preferencia us-central1).
+
+5) Migrar frontend
+- Mantener logica featured survey en Todos.
+- Mantener colapso de opciones para UX/rendimiento.
+- Mantener tab Encuestas condicional por encuestas activas.
+
+6) Pruebas post-migracion obligatorias
+- Crear encuesta simple y multiple.
+- Votar (auth) + bloqueo invitado.
+- Expiracion automatica.
+- Visibilidad menu staff.
+
+
+RECOMENDACIONES PARA EVITAR ERRORES FUTUROS
+1) Nunca deployar solo frontend cuando cambie contrato de callable.
+2) Ante cambios de auth/claims, documentar si requieren relogin.
+3) Mantener tests de reglas y smoke tests de funciones.
+4) En encuestas multiples, no permitir maxVotesPerUser < 2.
+5) Evitar queries pesadas en Home:
+   - featured listener corto
+   - listado completo solo en tab Encuestas
+6) Revisar periodicamente funciones desplegadas con functions:list.
+
+
+ARCHIVOS CLAVE (REFERENCIA RAPIDA)
+FRONTEND
+- src/stores/surveyStore.ts
+- src/components/surveys/SurveySection.vue
+- src/views/HomeView.vue
+- src/views/SurveysManagerView.vue
+- src/stores/moduleStore.ts
+
+BACKEND
+- functions/src/index.ts
+- firestore.rules
+- firestore.indexes.json
+
+
+NOTA FINAL
+Este modulo se optimizo para priorizar:
+- velocidad percibida en Home,
+- integridad de voto,
+- y operacion segura para staff.
+Antes de cambios grandes, usar esta guia como checklist obligatorio de impacto en:
+datos, permisos, funciones y UX.

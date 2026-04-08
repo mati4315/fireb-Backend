@@ -339,8 +339,8 @@ exports.submitSurveyVote = functions.https.onCall(async (data, context) => {
         const isMultipleChoice = Boolean(surveyData.isMultipleChoice);
         const maxVotesRaw = Number((_d = surveyData.maxVotesPerUser) !== null && _d !== void 0 ? _d : 1);
         const maxVotesPerUser = Number.isFinite(maxVotesRaw)
-            ? Math.max(1, Math.floor(maxVotesRaw))
-            : 1;
+            ? (isMultipleChoice ? Math.max(2, Math.floor(maxVotesRaw)) : 1)
+            : (isMultipleChoice ? 2 : 1);
         if (!isMultipleChoice && optionIds.length !== 1) {
             throw new functions.https.HttpsError('invalid-argument', 'Esta encuesta permite solo una opcion.');
         }
