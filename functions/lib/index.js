@@ -1,17 +1,20 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.onAdEventCreated = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.onCommunityPostImageFinalized = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onUserUpdated = exports.onFollowRemoved = exports.onFollowAdded = exports.onLikeRemoved = exports.onLikeAdded = void 0;
+exports.onAdEventCreated = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onUserUpdated = exports.onFollowRemoved = exports.onFollowAdded = exports.onLikeRemoved = exports.onLikeAdded = void 0;
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const path = require("path");
 const os = require("os");
 const fs = require("fs/promises");
+const stream_1 = require("stream");
+const ftp = require("basic-ftp");
 const sharp = require("sharp");
 admin.initializeApp();
 const db = admin.firestore();
 const MAX_SURVEY_OPTIONS_SELECTED = 10;
 const SURVEY_COMPLETE_BATCH_SIZE = 200;
 const COMMUNITY_THUMB_MAX_SIDE = 480;
+const MAX_HOSTING_UPLOAD_BYTES = 6 * 1024 * 1024;
 const normalizeOptionIds = (value) => {
     if (!Array.isArray(value))
         return [];
@@ -61,6 +64,55 @@ const isExpired = (value) => {
         return value.getTime() <= Date.now();
     }
     return false;
+};
+const ensureImageMime = (value) => {
+    const mime = typeof value === 'string' ? value.trim().toLowerCase() : '';
+    if (!mime.startsWith('image/')) {
+        throw new functions.https.HttpsError('invalid-argument', 'Formato de archivo invalido.');
+    }
+    return mime;
+};
+const decodeBase64Payload = (value) => {
+    if (typeof value !== 'string' || !value.trim()) {
+        throw new functions.https.HttpsError('invalid-argument', 'No se recibio imagen.');
+    }
+    const sanitized = value.replace(/^data:[^;]+;base64,/, '').trim();
+    const buffer = Buffer.from(sanitized, 'base64');
+    if (buffer.length === 0) {
+        throw new functions.https.HttpsError('invalid-argument', 'No se pudo decodificar la imagen.');
+    }
+    if (buffer.length > MAX_HOSTING_UPLOAD_BYTES) {
+        throw new functions.https.HttpsError('invalid-argument', 'La imagen supera el limite permitido.');
+    }
+    return buffer;
+};
+const sanitizePathSegment = (value) => {
+    const sanitized = value
+        .replace(/[^a-zA-Z0-9/_.-]/g, '-')
+        .replace(/\.\.+/g, '.')
+        .replace(/\/+/g, '/')
+        .replace(/^\//, '')
+        .replace(/\/$/, '');
+    return sanitized;
+};
+const getHostingFtpConfig = () => {
+    const host = process.env.HOSTING_FTP_HOST || '';
+    const user = process.env.HOSTING_FTP_USER || '';
+    const password = process.env.HOSTING_FTP_PASSWORD || '';
+    const basePath = process.env.HOSTING_FTP_BASE_PATH || '/domains/cdelu.ar/public_html/imagenes';
+    const publicBaseUrl = process.env.HOSTING_PUBLIC_BASE_URL || 'https://cdelu.ar/imagenes';
+    const port = Number(process.env.HOSTING_FTP_PORT || 21);
+    if (!host || !user || !password) {
+        throw new functions.https.HttpsError('failed-precondition', 'Falta configurar credenciales FTP del hosting.');
+    }
+    return {
+        host,
+        user,
+        password,
+        port: Number.isFinite(port) ? port : 21,
+        basePath,
+        publicBaseUrl: publicBaseUrl.replace(/\/$/, '')
+    };
 };
 // 1. Likes
 exports.onLikeAdded = functions.firestore
@@ -358,7 +410,62 @@ exports.onCommunityPostImageFinalized = functions.storage
     }
     return null;
 });
-// 7. Surveys vote callable (single vote per user/survey)
+// 7. Hosting FTP image upload fallback for community posts
+exports.uploadCommunityImageToHosting = functions.https.onCall(async (data, context) => {
+    var _a;
+    const userId = (_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid;
+    if (!userId) {
+        throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para subir imagenes.');
+    }
+    const relativePathRaw = typeof (data === null || data === void 0 ? void 0 : data.path) === 'string' ? data.path.trim() : '';
+    const contentType = ensureImageMime(data === null || data === void 0 ? void 0 : data.contentType);
+    const base64Data = decodeBase64Payload(data === null || data === void 0 ? void 0 : data.base64Data);
+    if (!relativePathRaw) {
+        throw new functions.https.HttpsError('invalid-argument', 'Ruta de imagen invalida.');
+    }
+    const relativePath = sanitizePathSegment(relativePathRaw).replace(/^imagenes\//, '');
+    const allowedPrefix = `posts/${userId}/`;
+    if (!relativePath.startsWith(allowedPrefix)) {
+        throw new functions.https.HttpsError('permission-denied', 'Ruta de subida no permitida.');
+    }
+    const ext = path.posix.extname(relativePath).toLowerCase();
+    const safeExt = ext && ext.length <= 6 ? ext : '.webp';
+    const fileNameBase = path.posix.basename(relativePath, ext || undefined)
+        .replace(/[^a-zA-Z0-9_-]/g, '-')
+        .slice(0, 80) || `${Date.now()}`;
+    const targetRelativePath = `${path.posix.dirname(relativePath)}/${fileNameBase}${safeExt}`.replace(/\/+/g, '/');
+    const ftpConfig = getHostingFtpConfig();
+    const remoteFilePath = `${ftpConfig.basePath}/${targetRelativePath}`.replace(/\/+/g, '/');
+    const remoteDir = path.posix.dirname(remoteFilePath);
+    const publicUrl = `${ftpConfig.publicBaseUrl}/${targetRelativePath}`;
+    const ftpClient = new ftp.Client(30000);
+    ftpClient.ftp.verbose = false;
+    try {
+        await ftpClient.access({
+            host: ftpConfig.host,
+            user: ftpConfig.user,
+            password: ftpConfig.password,
+            port: ftpConfig.port,
+            secure: false
+        });
+        await ftpClient.ensureDir(remoteDir);
+        await ftpClient.uploadFrom(stream_1.Readable.from(base64Data), remoteFilePath);
+    }
+    catch (error) {
+        console.error('FTP hosting upload failed', { userId, relativePath: targetRelativePath, error });
+        throw new functions.https.HttpsError('internal', 'No se pudo subir la imagen al hosting.');
+    }
+    finally {
+        ftpClient.close();
+    }
+    return {
+        url: publicUrl,
+        path: targetRelativePath,
+        sizeBytes: base64Data.length,
+        contentType
+    };
+});
+// 8. Surveys vote callable (single vote per user/survey)
 exports.submitSurveyVote = functions.https.onCall(async (data, context) => {
     var _a;
     const userId = (_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid;
@@ -473,7 +580,7 @@ exports.submitSurveyVote = functions.https.onCall(async (data, context) => {
         };
     });
 });
-// 8. Auto-complete expired surveys
+// 9. Auto-complete expired surveys
 exports.completeExpiredSurveys = functions.pubsub
     .schedule('every 1 minutes')
     .onRun(async () => {
@@ -502,7 +609,7 @@ exports.completeExpiredSurveys = functions.pubsub
     console.log(`Expired surveys completed: ${completedCount}`);
     return null;
 });
-// 9. Ads metrics aggregation
+// 10. Ads metrics aggregation
 exports.onAdEventCreated = functions.firestore
     .document('ad_events/{eventId}')
     .onCreate(async (snap) => {
