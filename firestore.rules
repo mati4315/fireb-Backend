@@ -87,6 +87,173 @@ service cloud.firestore {
              (!('clientAt' in data) || data.clientAt is string);
     }
 
+    function modulesConfigExists() {
+      return exists(/databases/$(database)/documents/_config/modules);
+    }
+
+    function modulesConfig() {
+      return modulesConfigExists()
+        ? get(/databases/$(database)/documents/_config/modules).data
+        : null;
+    }
+
+    function commentsEnabled() {
+      return !modulesConfigExists() ||
+        !('comments' in modulesConfig()) ||
+        !('enabled' in modulesConfig().comments) ||
+        modulesConfig().comments.enabled == true;
+    }
+
+    function commentsNewsEnabled() {
+      return !modulesConfigExists() ||
+        !('comments' in modulesConfig()) ||
+        !('newsEnabled' in modulesConfig().comments) ||
+        modulesConfig().comments.newsEnabled == true;
+    }
+
+    function commentsCommunityEnabled() {
+      return !modulesConfigExists() ||
+        !('comments' in modulesConfig()) ||
+        !('communityEnabled' in modulesConfig().comments) ||
+        modulesConfig().comments.communityEnabled == true;
+    }
+
+    function isCommentsModuleAllowed(moduleName) {
+      return commentsEnabled() && (
+        (moduleName == 'news' && commentsNewsEnabled()) ||
+        (moduleName == 'community' && commentsCommunityEnabled())
+      );
+    }
+
+    function contentPath(contentId) {
+      return /databases/$(database)/documents/content/$(contentId);
+    }
+
+    function isContentAvailableForComments(contentId, moduleName) {
+      return exists(contentPath(contentId)) &&
+        get(contentPath(contentId)).data.deletedAt == null &&
+        (
+          get(contentPath(contentId)).data.module == moduleName ||
+          (moduleName == 'community' && get(contentPath(contentId)).data.type == 'post') ||
+          (moduleName == 'news' && get(contentPath(contentId)).data.type == 'news')
+        );
+    }
+
+    function isValidCommentText(data) {
+      return data.text is string && data.text.size() > 0 && data.text.size() <= 500;
+    }
+
+    function isValidReplyText(data) {
+      return data.text is string && data.text.size() > 0 && data.text.size() <= 300;
+    }
+
+    function isValidCommentCreate(data, contentId) {
+      return isSignedIn() &&
+        data.userId is string &&
+        data.userId == request.auth.uid &&
+        data.userName is string &&
+        data.userName.size() > 0 &&
+        data.userName.size() <= 120 &&
+        (!('userProfilePicUrl' in data) || data.userProfilePicUrl is string) &&
+        isValidCommentText(data) &&
+        data.module in ['news', 'community'] &&
+        data.contentId == contentId &&
+        data.deletedAt == null &&
+        data.isEdited == false &&
+        ('stats' in data) &&
+        data.stats.repliesCount is int &&
+        data.stats.repliesCount == 0 &&
+        isCommentsModuleAllowed(data.module) &&
+        isContentAvailableForComments(contentId, data.module);
+    }
+
+    function isCommentEditor() {
+      return isSignedIn() && (isAdmin() || request.auth.uid == resource.data.userId);
+    }
+
+    function isValidCommentUpdate(contentId) {
+      return isCommentEditor() &&
+        resource.data.contentId == contentId &&
+        request.resource.data.contentId == resource.data.contentId &&
+        request.resource.data.userId == resource.data.userId &&
+        request.resource.data.module == resource.data.module &&
+        request.resource.data.createdAt == resource.data.createdAt &&
+        (
+          (!('stats' in resource.data) && !('stats' in request.resource.data)) ||
+          (
+            ('stats' in resource.data) &&
+            ('stats' in request.resource.data) &&
+            request.resource.data.stats.repliesCount == resource.data.stats.repliesCount
+          )
+        ) &&
+        request.resource.data.userName is string &&
+        request.resource.data.userName.size() > 0 &&
+        request.resource.data.userName.size() <= 120 &&
+        (!('userProfilePicUrl' in request.resource.data) || request.resource.data.userProfilePicUrl is string) &&
+        isValidCommentText(request.resource.data);
+    }
+
+    function parentCommentPath(contentId, commentId) {
+      return /databases/$(database)/documents/content/$(contentId)/comments/$(commentId);
+    }
+
+    function isParentCommentAvailable(contentId, commentId, moduleName) {
+      return exists(parentCommentPath(contentId, commentId)) &&
+        get(parentCommentPath(contentId, commentId)).data.deletedAt == null &&
+        (
+          !('module' in get(parentCommentPath(contentId, commentId)).data) ||
+          get(parentCommentPath(contentId, commentId)).data.module == moduleName
+        );
+    }
+
+    function isValidReplyCreate(data, contentId, commentId) {
+      return isSignedIn() &&
+        data.userId is string &&
+        data.userId == request.auth.uid &&
+        data.userName is string &&
+        data.userName.size() > 0 &&
+        data.userName.size() <= 120 &&
+        (!('userProfilePicUrl' in data) || data.userProfilePicUrl is string) &&
+        isValidReplyText(data) &&
+        data.module in ['news', 'community'] &&
+        data.contentId == contentId &&
+        data.commentId == commentId &&
+        data.deletedAt == null &&
+        data.isEdited == false &&
+        isCommentsModuleAllowed(data.module) &&
+        isContentAvailableForComments(contentId, data.module) &&
+        isParentCommentAvailable(contentId, commentId, data.module);
+    }
+
+    function isReplyEditor() {
+      return isSignedIn() && (isAdmin() || request.auth.uid == resource.data.userId);
+    }
+
+    function isValidReplyUpdate(contentId, commentId) {
+      return isReplyEditor() &&
+        request.resource.data.contentId == resource.data.contentId &&
+        request.resource.data.commentId == resource.data.commentId &&
+        request.resource.data.userId == resource.data.userId &&
+        request.resource.data.module == resource.data.module &&
+        request.resource.data.createdAt == resource.data.createdAt &&
+        request.resource.data.userName is string &&
+        request.resource.data.userName.size() > 0 &&
+        request.resource.data.userName.size() <= 120 &&
+        (!('userProfilePicUrl' in request.resource.data) || request.resource.data.userProfilePicUrl is string) &&
+        request.resource.data.contentId == contentId &&
+        request.resource.data.commentId == commentId &&
+        isValidReplyText(request.resource.data);
+    }
+
+    function canWriteModulesConfig() {
+      return isStaff() && (
+        isAdmin() ||
+        !('comments' in request.resource.data) ||
+        !('comments' in resource.data) ||
+        request.resource.data.comments == resource.data.comments
+      );
+    }
+
     // Users: private read, self write
     match /users/{userId} {
       allow read: if request.auth.uid == userId || isAdmin();
@@ -108,10 +275,16 @@ service cloud.firestore {
 
       match /comments/{commentId} {
         allow read: if true;
-        allow create: if isSignedIn() &&
-          request.resource.data.text.size() > 0 &&
-          request.resource.data.text.size() <= 500;
-        allow delete: if request.auth.uid == resource.data.userId || isAdmin();
+        allow create: if isValidCommentCreate(request.resource.data, contentId);
+        allow update: if isValidCommentUpdate(contentId);
+        allow delete: if false;
+
+        match /replies/{replyId} {
+          allow read: if true;
+          allow create: if isValidReplyCreate(request.resource.data, contentId, commentId);
+          allow update: if isValidReplyUpdate(contentId, commentId);
+          allow delete: if false;
+        }
       }
     }
 
@@ -162,11 +335,19 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
+    match /_config/modules {
+      allow read: if true;
+      allow create: if isStaff() &&
+        (isAdmin() || !('comments' in request.resource.data));
+      allow update: if canWriteModulesConfig();
+      allow delete: if isStaff();
+    }
+
     // Configuration and feature flags
     match /_config/{document=**} {
       allow read: if true;
-      allow write: if isStaff();
-      allow delete: if isStaff();
+      allow write: if isStaff() && document != 'modules';
+      allow delete: if isStaff() && document != 'modules';
     }
   }
 }

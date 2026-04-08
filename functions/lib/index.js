@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.onAdEventCreated = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onUserUpdated = exports.onFollowRemoved = exports.onFollowAdded = exports.onLikeRemoved = exports.onLikeAdded = void 0;
+exports.onAdEventCreated = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onUserUpdated = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.onLikeRemoved = exports.onLikeAdded = void 0;
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const path = require("path");
@@ -15,6 +15,40 @@ const MAX_SURVEY_OPTIONS_SELECTED = 10;
 const SURVEY_COMPLETE_BATCH_SIZE = 200;
 const COMMUNITY_THUMB_MAX_SIDE = 480;
 const MAX_HOSTING_UPLOAD_BYTES = 6 * 1024 * 1024;
+const USER_PROPAGATION_QUERY_PAGE_SIZE = 100;
+const USER_PROPAGATION_BATCH_WRITE_LIMIT = 450;
+const buildCommentRef = (contentId, commentId) => db.collection('content').doc(contentId).collection('comments').doc(commentId);
+const propagateUserFields = async (target, userId, updateData) => {
+    let baseQuery;
+    if (target === 'content') {
+        baseQuery = db.collection('content').where('userId', '==', userId);
+    }
+    else {
+        baseQuery = db.collectionGroup(target).where('userId', '==', userId);
+    }
+    let snapshot = await baseQuery.limit(USER_PROPAGATION_QUERY_PAGE_SIZE).get();
+    let batch = db.batch();
+    let batchCount = 0;
+    let totalUpdated = 0;
+    while (!snapshot.empty) {
+        for (const targetDoc of snapshot.docs) {
+            batch.update(targetDoc.ref, updateData);
+            batchCount += 1;
+            totalUpdated += 1;
+            if (batchCount >= USER_PROPAGATION_BATCH_WRITE_LIMIT) {
+                await batch.commit();
+                batch = db.batch();
+                batchCount = 0;
+            }
+        }
+        const lastDoc = snapshot.docs[snapshot.docs.length - 1];
+        snapshot = await baseQuery.startAfter(lastDoc).limit(USER_PROPAGATION_QUERY_PAGE_SIZE).get();
+    }
+    if (batchCount > 0) {
+        await batch.commit();
+    }
+    return totalUpdated;
+};
 const normalizeOptionIds = (value) => {
     if (!Array.isArray(value))
         return [];
@@ -124,10 +158,10 @@ exports.onLikeAdded = functions.firestore
             'stats.likesCount': admin.firestore.FieldValue.increment(1),
             updatedAt: admin.firestore.FieldValue.serverTimestamp()
         });
-        console.log(`✅ Like +1 for ${contentId}`);
+        console.log(`âœ… Like +1 for ${contentId}`);
     }
     catch (error) {
-        console.error(`❌ Like increment failed: ${contentId}`, error);
+        console.error(`âŒ Like increment failed: ${contentId}`, error);
     }
 });
 exports.onLikeRemoved = functions.firestore
@@ -141,7 +175,100 @@ exports.onLikeRemoved = functions.firestore
         });
     }
     catch (error) {
-        console.error(`❌ Like decrement failed`, error);
+        console.error(`âŒ Like decrement failed`, error);
+    }
+});
+// 2. Comments
+exports.onCommentCreated = functions.firestore
+    .document('content/{contentId}/comments/{commentId}')
+    .onCreate(async (snap, context) => {
+    const { contentId } = context.params;
+    const commentData = snap.data();
+    if (!commentData || !commentData.userId || commentData.deletedAt != null)
+        return;
+    try {
+        await db.collection('content').doc(contentId).set({
+            stats: {
+                commentsCount: admin.firestore.FieldValue.increment(1)
+            },
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+        console.log(`Comment +1 for ${contentId}`);
+    }
+    catch (error) {
+        console.error(`Comment increment failed`, error);
+    }
+});
+exports.onCommentUpdated = functions.firestore
+    .document('content/{contentId}/comments/{commentId}')
+    .onUpdate(async (change, context) => {
+    const { contentId, commentId } = context.params;
+    const beforeData = change.before.data();
+    const afterData = change.after.data();
+    if (!beforeData || !afterData)
+        return;
+    const wasAlive = beforeData.deletedAt == null;
+    const isAlive = afterData.deletedAt == null;
+    if (wasAlive === isAlive)
+        return;
+    const delta = isAlive ? 1 : -1;
+    try {
+        await db.collection('content').doc(contentId).set({
+            stats: {
+                commentsCount: admin.firestore.FieldValue.increment(delta)
+            },
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+        console.log(`Comment ${commentId} visibility changed (delta ${delta})`);
+    }
+    catch (error) {
+        console.error(`Comment visibility update failed`, error);
+    }
+});
+exports.onReplyCreated = functions.firestore
+    .document('content/{contentId}/comments/{commentId}/replies/{replyId}')
+    .onCreate(async (snap, context) => {
+    const { contentId, commentId } = context.params;
+    const replyData = snap.data();
+    if (!replyData || !replyData.userId || replyData.deletedAt != null)
+        return;
+    try {
+        await buildCommentRef(contentId, commentId).set({
+            stats: {
+                repliesCount: admin.firestore.FieldValue.increment(1)
+            },
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+        console.log(`Reply +1 for comment ${commentId}`);
+    }
+    catch (error) {
+        console.error(`Reply increment failed`, error);
+    }
+});
+exports.onReplyUpdated = functions.firestore
+    .document('content/{contentId}/comments/{commentId}/replies/{replyId}')
+    .onUpdate(async (change, context) => {
+    const { contentId, commentId, replyId } = context.params;
+    const beforeData = change.before.data();
+    const afterData = change.after.data();
+    if (!beforeData || !afterData)
+        return;
+    const wasAlive = beforeData.deletedAt == null;
+    const isAlive = afterData.deletedAt == null;
+    if (wasAlive === isAlive)
+        return;
+    const delta = isAlive ? 1 : -1;
+    try {
+        await buildCommentRef(contentId, commentId).set({
+            stats: {
+                repliesCount: admin.firestore.FieldValue.increment(delta)
+            },
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+        console.log(`Reply ${replyId} visibility changed (delta ${delta})`);
+    }
+    catch (error) {
+        console.error(`Reply visibility update failed`, error);
     }
 });
 // 2. Follows
@@ -186,7 +313,7 @@ exports.onFollowRemoved = functions.firestore
         console.error(`Unfollow decrement failed`, error);
     }
 });
-// 3. User Updates (Propagación desnormalizada)
+// 3. User Updates (PropagaciÃ³n desnormalizada)
 exports.onUserUpdated = functions.firestore
     .document('users/{userId}')
     .onUpdate(async (change, context) => {
@@ -198,35 +325,31 @@ exports.onUserUpdated = functions.firestore
         const pictureChanged = beforeData.profilePictureUrl !== afterData.profilePictureUrl;
         if (!nameChanged && !pictureChanged)
             return;
-        let postsQuery = db.collection('content').where('userId', '==', userId);
-        let snapshot = await postsQuery.limit(100).get();
-        let batch = db.batch();
-        let batchCount = 0;
-        while (!snapshot.empty) {
-            for (const doc of snapshot.docs) {
-                const updateData = {};
-                if (nameChanged)
-                    updateData.userName = afterData.nombre;
-                if (pictureChanged)
-                    updateData.userProfilePicUrl = afterData.profilePictureUrl;
-                batch.update(doc.ref, updateData);
-                batchCount++;
-                if (batchCount >= 500) {
-                    await batch.commit();
-                    batch = db.batch();
-                    batchCount = 0;
-                }
-            }
-            const lastDoc = snapshot.docs[snapshot.docs.length - 1];
-            snapshot = await postsQuery.startAfter(lastDoc).limit(100).get();
+        const postUpdateData = {};
+        const commentsUpdateData = {};
+        if (nameChanged) {
+            postUpdateData.userName = afterData.nombre || '';
+            commentsUpdateData.userName = afterData.nombre || '';
         }
-        if (batchCount > 0) {
-            await batch.commit();
+        if (pictureChanged) {
+            postUpdateData.userProfilePicUrl = afterData.profilePictureUrl || '';
+            commentsUpdateData.userProfilePicUrl = afterData.profilePictureUrl || '';
         }
-        console.log(`✅ User profile updated for ${userId}: posts updated`);
+        const [postsUpdated, commentsUpdated, repliesUpdated] = await Promise.all([
+            Object.keys(postUpdateData).length > 0
+                ? propagateUserFields('content', userId, postUpdateData)
+                : Promise.resolve(0),
+            Object.keys(commentsUpdateData).length > 0
+                ? propagateUserFields('comments', userId, commentsUpdateData)
+                : Promise.resolve(0),
+            Object.keys(commentsUpdateData).length > 0
+                ? propagateUserFields('replies', userId, commentsUpdateData)
+                : Promise.resolve(0)
+        ]);
+        console.log(`User profile updated for ${userId}: posts=${postsUpdated}, comments=${commentsUpdated}, replies=${repliesUpdated}`);
     }
     catch (error) {
-        console.error(`❌ User update propagation failed:`, error);
+        console.error(`âŒ User update propagation failed:`, error);
     }
 });
 // 4. Content Tracking
@@ -245,7 +368,7 @@ exports.onContentCreated = functions.firestore
         });
     }
     catch (error) {
-        console.error(`❌ Content created increment failed:`, error);
+        console.error(`âŒ Content created increment failed:`, error);
     }
 });
 exports.onContentDeleted = functions.firestore
@@ -266,7 +389,7 @@ exports.onContentDeleted = functions.firestore
                 'stats.postsCount': admin.firestore.FieldValue.increment(-1),
                 updatedAt: admin.firestore.FieldValue.serverTimestamp()
             });
-            console.log(`✅ Content soft-deleted: ${contentId}, postsCount decremented`);
+            console.log(`âœ… Content soft-deleted: ${contentId}, postsCount decremented`);
         }
         else if (!wasAlive && !isNowDeleted) {
             const userId = afterData.userId;
@@ -274,14 +397,14 @@ exports.onContentDeleted = functions.firestore
                 'stats.postsCount': admin.firestore.FieldValue.increment(1),
                 updatedAt: admin.firestore.FieldValue.serverTimestamp()
             });
-            console.log(`✅ Content restored: ${contentId}, postsCount incremented`);
+            console.log(`âœ… Content restored: ${contentId}, postsCount incremented`);
         }
     }
     catch (error) {
-        console.error(`❌ Content deletion handling failed:`, error);
+        console.error(`âŒ Content deletion handling failed:`, error);
     }
 });
-// 5. Integración Oficial de Noticias desde WordPress via Realtime Database
+// 5. IntegraciÃ³n Oficial de Noticias desde WordPress via Realtime Database
 exports.onOfficialNewsReceived = functions.database
     .ref('/news/{newsId}')
     .onWrite(async (change, context) => {
@@ -290,12 +413,12 @@ exports.onOfficialNewsReceived = functions.database
     const afterData = change.after.val();
     // Si data es null, significa que fue borrada de RTDB (no borramos de Firestore por seguridad)
     if (!afterData) {
-        console.log(`ℹ️ News ${newsId} was deleted from RTDB. Ignoring in Firestore. (Idempotency)`);
+        console.log(`â„¹ï¸ News ${newsId} was deleted from RTDB. Ignoring in Firestore. (Idempotency)`);
         return null;
     }
     try {
         // Parsear la fecha createdAt si es string (ej: "2024-01-15 10:30:00")
-        // Si no hay fecha o es inválida, se usará el Timestamp del servidor.
+        // Si no hay fecha o es invÃ¡lida, se usarÃ¡ el Timestamp del servidor.
         let createdAtTs = admin.firestore.FieldValue.serverTimestamp();
         let updatedAtTs = admin.firestore.FieldValue.serverTimestamp();
         if (afterData.createdAt) {
@@ -315,11 +438,11 @@ exports.onOfficialNewsReceived = functions.database
             module: 'news',
             externalId: newsId,
             externalSource: 'wordpress_plugin',
-            titulo: afterData.titulo || 'Sin Título',
+            titulo: afterData.titulo || 'Sin TÃ­tulo',
             descripcion: afterData.descripcion || '',
             images: Array.isArray(afterData.images) ? afterData.images : [],
             userId: afterData.userId || 'wp_official',
-            userName: afterData.userName || 'Redacción CdeluAR',
+            userName: afterData.userName || 'RedacciÃ³n CdeluAR',
             userProfilePicUrl: afterData.userProfilePicUrl || '',
             stats: {
                 likesCount: ((_a = afterData.stats) === null || _a === void 0 ? void 0 : _a.likesCount) || 0,
@@ -338,11 +461,11 @@ exports.onOfficialNewsReceived = functions.database
         };
         // Set con merge asegura idempotencia (crea si no existe, actualiza si existe)
         await db.collection('content').doc(newsId).set(firestorePayload, { merge: true });
-        console.log(`✅ Noticia sincronizada en Firestore: ${newsId}`);
+        console.log(`âœ… Noticia sincronizada en Firestore: ${newsId}`);
         return null;
     }
     catch (error) {
-        console.error(`❌ Falló la sincronización de RTDB a Firestore para ${newsId}:`, error);
+        console.error(`âŒ FallÃ³ la sincronizaciÃ³n de RTDB a Firestore para ${newsId}:`, error);
         return null;
     }
 });

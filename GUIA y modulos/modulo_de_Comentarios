@@ -1,0 +1,319 @@
+﻿MODULO DE COMENTARIOS - CDELUAR
+Ubicacion: D:\FIREBASE\Backend\GUIA y modulos\modulo_de_Comentarios
+Fecha: 2026-04-08
+
+===============================================================================
+1) QUE ES ESTE MODULO Y PARA QUE SIRVE
+===============================================================================
+Este modulo incorpora un sistema de comentarios moderno y optimizado para el feed
+unificado de CdeluAR (Noticias + Comunidad), con las siguientes capacidades:
+
+- Comentarios por contenido en:
+  content/{contentId}/comments/{commentId}
+- Respuestas de primer nivel (thread simple, sin anidado infinito):
+  content/{contentId}/comments/{commentId}/replies/{replyId}
+- Soft delete (eliminacion logica) en vez de borrado fisico.
+- Edicion de comentarios y respuestas.
+- Moderacion global desde panel dedicado SOLO para administradores.
+- Feature flags para activar/desactivar:
+  * comments.enabled (global)
+  * comments.newsEnabled (noticias)
+  * comments.communityEnabled (comunidad)
+
+Objetivo principal:
+Mantener una experiencia rapida en frontend, segura en backend, y operable para
+moderacion sin comprometer consistencia de datos ni rendimiento.
+
+
+===============================================================================
+2) ARQUITECTURA FUNCIONAL Y TECNICA
+===============================================================================
+2.1 Modelo de datos
+- Comentario:
+  userId, userName, userProfilePicUrl, text, module, contentId,
+  stats.repliesCount, createdAt, updatedAt, isEdited, deletedAt.
+
+- Reply:
+  userId, userName, userProfilePicUrl, text, module, contentId,
+  commentId, createdAt, updatedAt, isEdited, deletedAt.
+
+2.2 Reglas de seguridad (Firestore Rules)
+- Create comment/reply:
+  * usuario autenticado
+  * userId debe coincidir con auth.uid
+  * validacion estricta de longitud (500 comment, 300 reply)
+  * modulo comments habilitado (global y por seccion)
+  * contenido padre existente y activo
+
+- Update comment/reply:
+  * solo autor o admin
+  * no se permite cambiar identidad ni pertenencia (contentId/module/userId)
+  * soft delete via update (delete directo prohibido)
+
+- Moderacion global:
+  * solo admin
+  * colaborador NO puede moderar comentarios globalmente
+
+2.3 Triggers Cloud Functions
+- onCommentCreated:
+  incrementa content.stats.commentsCount (+1)
+- onCommentUpdated:
+  detecta cambios deletedAt null <-> timestamp y ajusta contador (+/-1)
+- onReplyCreated:
+  incrementa comment.stats.repliesCount (+1)
+- onReplyUpdated:
+  detecta soft delete/restauracion y ajusta repliesCount (+/-1)
+- onUserUpdated (expandido):
+  propaga cambio de nombre/foto a content, comments y replies
+
+2.4 Frontend (performance-first)
+- Store dedicado commentStore.ts (separado de feedStore).
+- Carga lazy: no se consultan comentarios hasta abrir el hilo.
+- Preview compacto en feed: 2 comentarios visibles por defecto (si commentsCount > 0),
+  sin abrir el panel completo.
+- Paginacion cursor-based:
+  * comments page size base: 6
+  * replies iniciales: 3
+  * load more replies: 10
+- Truncado visual de texto a 160 caracteres para comentarios y respuestas
+  (Leer mas / Ver menos), manteniendo el contenido completo en Firestore.
+- Cache en memoria con TTL para evitar lecturas repetidas.
+- Listener acotado: 1 listener por hilo abierto para nuevos comentarios.
+- Replies con fetch bajo demanda (sin listeners masivos por cada comentario).
+
+2.5 Admin UX
+- Ruta nueva: /comentarios/gestion (requiresAdmin)
+- Acceso desde menu de usuario solo para admin.
+- Panel incluye:
+  * Configuracion de modulo comments (enabled/newsEnabled/communityEnabled)
+  * Listado moderable con filtros tipo/modulo/estado
+  * Editar, eliminar (soft), restaurar
+
+
+===============================================================================
+3) PROBLEMAS REALES QUE APARECIERON Y COMO SE RESOLVIERON
+===============================================================================
+3.1 Problema: colision entre roles staff y admin
+Contexto:
+El proyecto ya tenia vistas para staff (ads/encuestas) y no era suficiente para
+comentarios, donde la moderacion debia ser exclusiva admin.
+
+Solucion aplicada:
+- Se agrego utilitario isAdminUser(...) separado de isStaffUser(...).
+- Router soporta meta.requiresAdmin ademas de requiresStaff.
+- Menu de usuario muestra "Gestion Comentarios" solo si isAdminUser = true.
+
+Resultado:
+Se mantuvo compatibilidad con flujos staff existentes y se cerro la brecha de
+permisos para moderacion de comentarios.
+
+
+3.2 Problema: riesgo de inconsistencias de contadores con soft delete
+Contexto:
+Con soft delete, no alcanza trigger onCreate/onDelete tradicional, porque la
+eliminacion sucede por update de deletedAt.
+
+Solucion aplicada:
+- Se implemento onCommentUpdated y onReplyUpdated.
+- Logica de delta basada en transicion de estado:
+  * alive -> deleted => -1
+  * deleted -> alive => +1
+  * otros updates => 0
+
+Resultado:
+Contadores de commentsCount y repliesCount se mantienen consistentes incluso con
+restauraciones.
+
+
+3.3 Problema: costo/performance de listeners en comentarios
+Contexto:
+Si cada post cargaba comentarios y replies en tiempo real por defecto, el costo
+y latencia aumentaban demasiado.
+
+Solucion aplicada:
+- Lazy loading real por hilo.
+- 1 listener maximo por hilo abierto para nuevos comentarios.
+- Replies via getDocs paginado bajo demanda.
+- Cache TTL en memoria.
+
+Resultado:
+Se evito inflar el payload inicial del feed y se priorizo velocidad percibida.
+
+
+3.4 Problema: tipado TS en Functions para propagacion masiva
+Contexto:
+El helper de propagacion de usuario a comments/replies fallo en build por tipo
+incompatible de updateData.
+
+Solucion aplicada:
+- Se tiparon los payloads como:
+  FirebaseFirestore.UpdateData<FirebaseFirestore.DocumentData>
+- Se rehizo el bloque de onUserUpdated para usar helper comun.
+
+Resultado:
+Build de functions en verde y codigo mas mantenible.
+
+
+3.5 Problema: compatibilidad con datos legacy en reglas
+Contexto:
+Algunos documentos antiguos podian no tener stats definidos exactamente como
+el esquema nuevo.
+
+Solucion aplicada:
+- Se flexibilizo validacion de update en comments para tolerar ausencia legacy
+  de stats, sin abrir posibilidad de escalar privilegios.
+
+Resultado:
+Menos riesgo de bloqueos inesperados sobre contenido historico.
+
+
+3.6 Problema: contador de comentarios en 0 para contenido historico
+Contexto:
+En parte del despliegue inicial, hubo contenido legado con `stats.commentsCount`
+desalineado, por lo que el boton de Comentarios podia mostrar 0 aunque existieran
+comentarios reales.
+
+Solucion aplicada:
+- Se estandarizo el deploy para incluir SIEMPRE triggers de comentarios:
+  onCommentCreated, onCommentUpdated, onReplyCreated, onReplyUpdated.
+- Se agrego script de reconciliacion historica:
+  `npm run backfill:comment-counters` (y dry-run).
+
+Resultado:
+Los contadores quedan consistentes tanto en contenido nuevo como en historico.
+
+
+===============================================================================
+4) INDICES Y CONSULTAS
+===============================================================================
+Se agregaron indices compuestos para comments y replies, enfocados en:
+- deletedAt + createdAt
+- module + createdAt
+- deletedAt + module + createdAt
+
+Motivo:
+Soportar consultas del feed lazy y panel admin sin errores de indice y con
+latencia baja.
+
+
+===============================================================================
+5) OPERACION, SCRIPTS Y PRUEBAS
+===============================================================================
+Scripts agregados en Backend/package.json:
+- setup:comments-module
+- test:comments-rules
+- backfill:comment-counters
+- backfill:comment-counters:dry
+
+Archivos nuevos:
+- scripts/setup-comments-module.js
+- scripts/test-comments-rules.js
+- scripts/backfill-comment-counters.js
+
+Flujo operativo recomendado:
+1. Configurar modulo:
+   npm run setup:comments-module
+2. Validar reglas E2E:
+   npm run test:comments-rules
+3. Reconciliar contadores historicos (opcional pero recomendado post deploy):
+   npm run backfill:comment-counters:dry
+   npm run backfill:comment-counters
+4. Deploy ordenado:
+   a) firestore.rules
+   b) firestore.indexes.json
+   c) functions (incluyendo triggers de comentarios)
+
+Nota:
+El test E2E depende de credenciales/proyecto validos en entorno local.
+
+
+===============================================================================
+6) LIMITES Y DECISIONES DE DISENO
+===============================================================================
+- Sin anidado profundo (solo 1 nivel reply):
+  decision consciente para estabilidad de UX y costo.
+- Soft delete obligatorio:
+  mejora auditoria y recuperacion, evita perdida irreversible accidental.
+- Moderacion global admin-only:
+  reduce riesgo operativo en acciones sensibles.
+- Reglas estrictas de payload:
+  protege integridad y evita mutaciones no autorizadas.
+
+
+===============================================================================
+7) RIESGOS FUTUROS Y COMO MITIGARLOS
+===============================================================================
+7.1 Riesgo: alto volumen en collectionGroup de moderacion
+Escenario:
+Con crecimiento grande, query global de comments/replies para panel admin puede
+volverse costosa.
+
+Mitigacion sugerida:
+- Agregar paginacion por cursor en panel admin.
+- Limitar ventana temporal (ej: ultimos 30/90 dias).
+- Considerar coleccion de moderacion denormalizada para backoffice.
+
+
+7.2 Riesgo: carreras de concurrencia en moderacion simultanea
+Escenario:
+Dos admins editan/eliminan casi al mismo tiempo.
+
+Mitigacion sugerida:
+- Mostrar updatedAt visible en panel.
+- En operaciones criticas, usar precondiciones o transacciones segun caso.
+
+
+7.3 Riesgo: spam y abuso
+Escenario:
+Usuarios pueden generar ruido (flood, texto ofensivo, automatizacion).
+
+Mitigacion sugerida:
+- Rate limit por usuario/IP en capa backend.
+- Filtros de contenido (palabras clave, ML moderation opcional).
+- Sistema de reportes y cola de revision.
+
+
+7.4 Riesgo: desbalance temporal de contadores por fallas transitorias
+Escenario:
+Errores puntuales en trigger pueden desalinear counters.
+
+Mitigacion sugerida:
+- Job de reconciliacion periodico (batch) para recomputar commentsCount/
+  repliesCount y corregir drift.
+- Alertas en logs por umbrales de error.
+
+
+7.5 Riesgo: cambios futuros en schema de comments
+Escenario:
+Nuevos campos sin migracion pueden romper reglas o UI.
+
+Mitigacion sugerida:
+- Versionado de schema (campo schemaVersion).
+- Tests E2E de reglas obligatorios antes de deploy.
+- Checklist de actualizacion de guia por cada cambio.
+
+
+===============================================================================
+8) ROADMAP SUGERIDO (PROXIMAS MEJORAS)
+===============================================================================
+- Mention/notify (@usuario) con control anti-spam.
+- Ocultamiento inteligente de hilos largos (fold + resumen).
+- Busqueda y filtros de comentarios en panel admin.
+- Colas de moderacion y estados (pendiente/aprobado/oculto).
+- Metricas de salud del modulo (latencia, lecturas, errores por regla).
+
+
+===============================================================================
+9) ESTADO ACTUAL
+===============================================================================
+Estado: IMPLEMENTADO
+Compilacion Frontend: PASS
+Compilacion Functions: PASS
+Pendiente recomendado:
+- Ejecutar test:comments-rules en entorno con credenciales activas.
+- Deploy de rules + indexes + functions de forma coordinada.
+
+
+===============================================================================
+FIN DOCUMENTO
+===============================================================================

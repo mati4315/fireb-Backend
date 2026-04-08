@@ -1,6 +1,6 @@
 GUIA VIVA DE MODULOS - CDELUAR (FIREBASE)
 Ubicacion: D:\FIREBASE\Backend\GUIA y modulos
-Ultima actualizacion: 2026-04-07
+Ultima actualizacion: 2026-04-08
 
 ===============================================================================
 0) OBJETIVO DE ESTA GUIA
@@ -155,13 +155,17 @@ Que hace:
 Desde: D:\FIREBASE\Backend
 
 1. Functions:
-   D:\FIREBASE\Backend\node_modules\.bin\firebase.cmd deploy --only functions:onOfficialNewsReceived,functions:onFollowAdded,functions:onFollowRemoved,functions:onContentCreated,functions:onContentDeleted --project cdeluar-ddefc
+   D:\FIREBASE\Backend\node_modules\.bin\firebase.cmd deploy --only functions:onOfficialNewsReceived,functions:onFollowAdded,functions:onFollowRemoved,functions:onContentCreated,functions:onContentDeleted,functions:onCommentCreated,functions:onCommentUpdated,functions:onReplyCreated,functions:onReplyUpdated --project cdeluar-ddefc
 
 2. Rules:
    D:\FIREBASE\Backend\node_modules\.bin\firebase.cmd deploy --only firestore:rules --project cdeluar-ddefc
 
 3. Indexes:
    D:\FIREBASE\Backend\node_modules\.bin\firebase.cmd deploy --only firestore:indexes --project cdeluar-ddefc
+
+4. Backfill historico de contadores (recomendado cuando hay datos legacy):
+   npm run backfill:comment-counters:dry
+   npm run backfill:comment-counters
 
 
 ===============================================================================
@@ -201,3 +205,60 @@ Regla de oro:
 ===============================================================================
 FIN GUIA VIVA
 ===============================================================================
+
+[CAMBIO 2026-04-08]
+- Autor: Codex
+- Objetivo: Implementar modulo de comentarios optimizado con replies, soft delete, moderacion admin-only y feature flags por modulo.
+- Archivos tocados:
+  * Backend/firestore.rules
+  * Backend/functions/src/index.ts
+  * Backend/firestore.indexes.json
+  * Backend/scripts/setup-comments-module.js
+  * Backend/scripts/test-comments-rules.js
+  * Backend/package.json
+  * Frontend/src/stores/moduleStore.ts
+  * Frontend/src/stores/feedStoreV2.ts
+  * Frontend/src/stores/commentStore.ts
+  * Frontend/src/router/index.ts
+  * Frontend/src/utils/roles.ts
+  * Frontend/src/App.vue
+  * Frontend/src/views/HomeView.vue
+  * Frontend/src/views/CommentsManagerView.vue
+  * Frontend/src/components/comments/CommentSection.vue
+  * Frontend/src/components/comments/CommentItem.vue
+  * Frontend/src/components/comments/CommentForm.vue
+- Riesgo funcional: Medio. Cambios en reglas + nuevos triggers pueden requerir deploy sincronizado de rules/functions/indexes para evitar rechazos temporales.
+- Comandos ejecutados:
+  * npm run build (Frontend)
+  * npm run build (Backend/functions)
+- Resultado de pruebas:
+  * Compilacion Frontend PASS
+  * Compilacion Functions PASS
+  * Test E2E comments-rules pendiente de ejecucion en entorno con credenciales activas.
+- Rollback plan:
+  * Revertir deploy de firestore.rules/firestore.indexes/functions a la version previa.
+  * Deshabilitar comments en _config/modules.comments.enabled=false para corte rapido.
+
+[CAMBIO 2026-04-08]
+- Autor: Codex
+- Objetivo: UX de comentarios compacta + contador confiable (preview 2, truncado 160, pagina de 6, boton "Comentarios N", backfill historico).
+- Archivos tocados:
+  * Frontend/src/views/HomeView.vue
+  * Frontend/src/components/comments/CommentItem.vue
+  * Frontend/src/components/comments/CommentSection.vue
+  * Frontend/src/components/comments/CommentPreviewList.vue
+  * Frontend/src/stores/commentStore.ts
+  * Backend/scripts/backfill-comment-counters.js
+  * Backend/package.json
+  * Backend/GUIA y modulos/modulo_de_Comentarios
+  * Backend/GUIA y modulos/MODULO Comunidad feed.txt
+- Riesgo funcional: Bajo-Medio. Cambios visuales y operativos; el riesgo principal es no ejecutar backfill en historico.
+- Comandos ejecutados:
+  * npm run build (Frontend)
+  * npm run backfill:comment-counters:dry (pendiente sugerido en entorno con credenciales)
+- Resultado de pruebas:
+  * Compilacion Frontend PASS (pendiente de ejecutar en este entorno).
+  * Backfill script agregado y listo para correr.
+- Rollback plan:
+  * Revertir componentes de preview/truncado y dejar solo CommentSection.
+  * Omitir ejecucion del backfill y mantener solo triggers en tiempo real.

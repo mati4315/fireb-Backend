@@ -2,6 +2,7 @@
   "scripts": {
     "sync:firebase-to-mysql": "node scripts/firebase-sync.js",
     "setup:ads-module": "node scripts/setup-ads-module.js",
+    "setup:comments-module": "node scripts/setup-comments-module.js",
     "setup:surveys-module": "node scripts/setup-surveys-module.js",
     "export-mysql": "node scripts/export-mysql.js",
     "transform:data": "node scripts/transform-data.js",
@@ -9,9 +10,12 @@
     "validate:migration": "node scripts/validate-migration.js",
     "test:follow-triggers": "node scripts/test-follow-triggers.js",
     "test:community-rules": "node scripts/test-community-rules.js",
+    "test:comments-rules": "node scripts/test-comments-rules.js",
     "test:survey-rules": "node scripts/test-survey-rules.js",
     "backfill:content-module": "node scripts/backfill-content-module.js",
-    "backfill:content-module:dry": "node scripts/backfill-content-module.js --dry-run"
+    "backfill:content-module:dry": "node scripts/backfill-content-module.js --dry-run",
+    "backfill:comment-counters": "node scripts/backfill-comment-counters.js",
+    "backfill:comment-counters:dry": "node scripts/backfill-comment-counters.js --dry-run"
   },
   "dependencies": {
     "dotenv": "^17.4.1",
