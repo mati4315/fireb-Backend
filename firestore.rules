@@ -1,12 +1,40 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    // ✅ HELPERS: Validación completa
-    function isAdmin() {
-      return request.auth != null && request.auth.token.admin == true;
+
+    // Helpers
+    function isSignedIn() {
+      return request.auth != null;
     }
-    
+
+    function userRole() {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data.rol
+        : null;
+    }
+
+    function isSuperAdminEmail() {
+      return isSignedIn() && request.auth.token.email == 'matias4315@gmail.com';
+    }
+
+    function isSuperAdminUid() {
+      return isSignedIn() && request.auth.uid == 'Z4f5ogXDQaNhEY4iBf9jgkPnQMP2';
+    }
+
+    function isAdmin() {
+      return isSuperAdminEmail() ||
+        isSuperAdminUid() ||
+        (isSignedIn() && request.auth.token.admin == true) ||
+        (isSignedIn() && request.auth.token.superAdmin == true) ||
+        (isSignedIn() && request.auth.token.super_admin == true) ||
+        (userRole() in ['admin', 'administrador', 'super_admin', 'superadmin', 'super admin']);
+    }
+
+    function isStaff() {
+      return isAdmin() || userRole() == 'colaborador';
+    }
+
     function isValidContent(data) {
       return data.titulo.size() > 0 &&
              data.titulo.size() <= 300 &&
@@ -15,7 +43,7 @@ service cloud.firestore {
     }
 
     function isValidCommunityPostCreate(data) {
-      return request.auth != null &&
+      return isSignedIn() &&
              isValidContent(data) &&
              data.userId == request.auth.uid &&
              data.module == 'community' &&
@@ -30,7 +58,7 @@ service cloud.firestore {
     }
 
     function isValidCommunityPostUpdate() {
-      return request.auth != null &&
+      return isSignedIn() &&
              request.auth.uid == resource.data.userId &&
              resource.data.module == 'community' &&
              request.resource.data.userId == resource.data.userId &&
@@ -41,7 +69,7 @@ service cloud.firestore {
     }
 
     function isValidAdEventCreate(data) {
-      return request.auth != null &&
+      return isSignedIn() &&
              data.adId is string &&
              data.adId.size() > 0 &&
              data.adId.size() <= 120 &&
@@ -58,42 +86,42 @@ service cloud.firestore {
              (!('clientAt' in data) || data.clientAt is string);
     }
 
-    // Usuarios: leer PRIVADO, escribir solo para sí mismo
+    // Users: private read, self write
     match /users/{userId} {
       allow read: if request.auth.uid == userId || isAdmin();
       allow write: if request.auth.uid == userId && !('rol' in request.resource.data);
     }
 
-    // Content: leer público, crear autenticado, editar/borrar solo autor (SOFT DELETE)
+    // Content module
     match /content/{contentId} {
       allow read: if true;
       allow create: if isValidCommunityPostCreate(request.resource.data);
       allow update: if isValidCommunityPostUpdate();
       allow delete: if isAdmin();
 
-      // Likes: crear/leer, borrar solo quien lo creó
       match /likes/{likeUserId} {
         allow read: if true;
         allow create: if request.auth.uid == likeUserId;
         allow delete: if request.auth.uid == likeUserId;
       }
 
-      // Comments: crear/leer, borrar solo autor o admin
       match /comments/{commentId} {
         allow read: if true;
-        allow create: if request.auth != null && request.resource.data.text.size() > 0 && request.resource.data.text.size() <= 500;
+        allow create: if isSignedIn() &&
+          request.resource.data.text.size() > 0 &&
+          request.resource.data.text.size() <= 500;
         allow delete: if request.auth.uid == resource.data.userId || isAdmin();
       }
     }
 
-    // Relationships: solo autenticados
+    // Relationships
     match /relationships/{userId} {
       match /followers/{followerId} {
         allow read: if true;
         allow create: if request.auth.uid == followerId;
         allow delete: if request.auth.uid == followerId || isAdmin();
       }
-      
+
       match /following/{followingId} {
         allow read: if true;
         allow create: if request.auth.uid == userId;
@@ -103,17 +131,28 @@ service cloud.firestore {
 
     // Ads module
     match /ads/{adId} {
-      allow read: if (resource.data.active == true) || isAdmin();
-      allow create: if isAdmin();
-      allow update: if isAdmin();
-      allow delete: if isAdmin();
+      allow read: if (resource.data.active == true) || isStaff();
+      allow create: if isStaff();
+      allow update: if isStaff();
+      allow delete: if isStaff();
     }
 
     match /ad_events/{eventId} {
       allow create: if isValidAdEventCreate(request.resource.data);
-      allow read: if isAdmin();
+      allow read: if isStaff();
       allow update: if false;
-      allow delete: if isAdmin();
+      allow delete: if isStaff();
+    }
+
+    // Surveys module
+    match /surveys/{surveyId} {
+      allow read: if true;
+      allow create, update, delete: if isStaff();
+    }
+
+    match /survey_votes/{voteId} {
+      allow read: if isStaff() || (isSignedIn() && request.auth.uid == resource.data.userId);
+      allow create, update, delete: if false;
     }
 
     // Sync control (admin only)
@@ -122,11 +161,11 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
-    // Configuration & Feature Flags (Admin only write - pero todos pueden leer)
+    // Configuration and feature flags
     match /_config/{document=**} {
       allow read: if true;
-      allow write: if isAdmin();
-      allow delete: if isAdmin();
+      allow write: if isStaff();
+      allow delete: if isStaff();
     }
   }
 }

@@ -21,6 +21,9 @@ async function upsertModuleConfig() {
       community: {
         enabled: true
       },
+      surveys: {
+        enabled: true
+      },
       ads: {
         enabled: true,
         maxAdsPerFeed: 2,
