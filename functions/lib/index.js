@@ -1,12 +1,17 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.onAdEventCreated = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onUserUpdated = exports.onFollowRemoved = exports.onFollowAdded = exports.onLikeRemoved = exports.onLikeAdded = void 0;
+exports.onAdEventCreated = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.onCommunityPostImageFinalized = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onUserUpdated = exports.onFollowRemoved = exports.onFollowAdded = exports.onLikeRemoved = exports.onLikeAdded = void 0;
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
+const path = require("path");
+const os = require("os");
+const fs = require("fs/promises");
+const sharp = require("sharp");
 admin.initializeApp();
 const db = admin.firestore();
 const MAX_SURVEY_OPTIONS_SELECTED = 10;
 const SURVEY_COMPLETE_BATCH_SIZE = 200;
+const COMMUNITY_THUMB_MAX_SIDE = 480;
 const normalizeOptionIds = (value) => {
     if (!Array.isArray(value))
         return [];
@@ -289,7 +294,71 @@ exports.onOfficialNewsReceived = functions.database
         return null;
     }
 });
-// 6. Surveys vote callable (single vote per user/survey)
+// 6. Community image thumbnails
+exports.onCommunityPostImageFinalized = functions.storage
+    .object()
+    .onFinalize(async (object) => {
+    const filePath = object.name;
+    const contentType = object.contentType || '';
+    const bucketName = object.bucket;
+    const metadata = object.metadata || {};
+    if (!filePath || !bucketName)
+        return null;
+    if (!filePath.startsWith('posts/'))
+        return null;
+    if (!contentType.startsWith('image/'))
+        return null;
+    if (filePath.includes('/thumbs/'))
+        return null;
+    if (metadata.generatedBy === 'community-thumbnail')
+        return null;
+    const ext = path.posix.extname(filePath).toLowerCase();
+    const baseName = path.posix.basename(filePath, ext);
+    if (baseName.endsWith('_t') || baseName.endsWith('-thumb'))
+        return null;
+    const directory = path.posix.dirname(filePath);
+    const thumbPath = `${directory}/thumbs/${baseName}.webp`;
+    const bucket = admin.storage().bucket(bucketName);
+    const thumbFile = bucket.file(thumbPath);
+    const [alreadyExists] = await thumbFile.exists();
+    if (alreadyExists)
+        return null;
+    const sourceTempFile = path.join(os.tmpdir(), `${Date.now()}-${path.basename(filePath)}`);
+    const thumbTempFile = path.join(os.tmpdir(), `${Date.now()}-${baseName}.webp`);
+    try {
+        await bucket.file(filePath).download({ destination: sourceTempFile });
+        await sharp(sourceTempFile)
+            .rotate()
+            .resize(COMMUNITY_THUMB_MAX_SIDE, COMMUNITY_THUMB_MAX_SIDE, {
+            fit: 'inside',
+            withoutEnlargement: true
+        })
+            .webp({ quality: 78, effort: 4 })
+            .toFile(thumbTempFile);
+        await bucket.upload(thumbTempFile, {
+            destination: thumbPath,
+            metadata: {
+                contentType: 'image/webp',
+                cacheControl: 'public,max-age=604800',
+                metadata: {
+                    generatedBy: 'community-thumbnail',
+                    sourcePath: filePath
+                }
+            }
+        });
+    }
+    catch (error) {
+        console.error('Thumbnail generation failed', { filePath, error });
+    }
+    finally {
+        await Promise.all([
+            fs.unlink(sourceTempFile).catch(() => undefined),
+            fs.unlink(thumbTempFile).catch(() => undefined)
+        ]);
+    }
+    return null;
+});
+// 7. Surveys vote callable (single vote per user/survey)
 exports.submitSurveyVote = functions.https.onCall(async (data, context) => {
     var _a;
     const userId = (_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid;
@@ -404,7 +473,7 @@ exports.submitSurveyVote = functions.https.onCall(async (data, context) => {
         };
     });
 });
-// 7. Auto-complete expired surveys
+// 8. Auto-complete expired surveys
 exports.completeExpiredSurveys = functions.pubsub
     .schedule('every 1 minutes')
     .onRun(async () => {
@@ -433,7 +502,7 @@ exports.completeExpiredSurveys = functions.pubsub
     console.log(`Expired surveys completed: ${completedCount}`);
     return null;
 });
-// 8. Ads metrics aggregation
+// 9. Ads metrics aggregation
 exports.onAdEventCreated = functions.firestore
     .document('ad_events/{eventId}')
     .onCreate(async (snap) => {

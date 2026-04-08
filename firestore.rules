@@ -39,7 +39,8 @@ service cloud.firestore {
       return data.titulo.size() > 0 &&
              data.titulo.size() <= 300 &&
              (data.descripcion.size() <= 5000 || !('descripcion' in data)) &&
-             (!('images' in data) || data.images.size() <= 10);
+             (!('images' in data) || data.images.size() <= 6) &&
+             (!('imagesV2' in data) || data.imagesV2.size() <= 6);
     }
 
     function isValidCommunityPostCreate(data) {

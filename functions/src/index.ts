@@ -1,5 +1,9 @@
 import * as functions from 'firebase-functions';
 import * as admin from 'firebase-admin';
+import * as path from 'path';
+import * as os from 'os';
+import * as fs from 'fs/promises';
+import sharp = require('sharp');
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -15,6 +19,7 @@ type SurveyOption = {
 
 const MAX_SURVEY_OPTIONS_SELECTED = 10;
 const SURVEY_COMPLETE_BATCH_SIZE = 200;
+const COMMUNITY_THUMB_MAX_SIDE = 480;
 
 const normalizeOptionIds = (value: unknown): string[] => {
   if (!Array.isArray(value)) return [];
@@ -321,7 +326,71 @@ export const onOfficialNewsReceived = functions.database
     }
   });
 
-// 6. Surveys vote callable (single vote per user/survey)
+// 6. Community image thumbnails
+export const onCommunityPostImageFinalized = functions.storage
+  .object()
+  .onFinalize(async (object) => {
+    const filePath = object.name;
+    const contentType = object.contentType || '';
+    const bucketName = object.bucket;
+    const metadata = object.metadata || {};
+
+    if (!filePath || !bucketName) return null;
+    if (!filePath.startsWith('posts/')) return null;
+    if (!contentType.startsWith('image/')) return null;
+    if (filePath.includes('/thumbs/')) return null;
+    if (metadata.generatedBy === 'community-thumbnail') return null;
+
+    const ext = path.posix.extname(filePath).toLowerCase();
+    const baseName = path.posix.basename(filePath, ext);
+    if (baseName.endsWith('_t') || baseName.endsWith('-thumb')) return null;
+
+    const directory = path.posix.dirname(filePath);
+    const thumbPath = `${directory}/thumbs/${baseName}.webp`;
+    const bucket = admin.storage().bucket(bucketName);
+    const thumbFile = bucket.file(thumbPath);
+    const [alreadyExists] = await thumbFile.exists();
+    if (alreadyExists) return null;
+
+    const sourceTempFile = path.join(os.tmpdir(), `${Date.now()}-${path.basename(filePath)}`);
+    const thumbTempFile = path.join(os.tmpdir(), `${Date.now()}-${baseName}.webp`);
+
+    try {
+      await bucket.file(filePath).download({ destination: sourceTempFile });
+
+      await sharp(sourceTempFile)
+        .rotate()
+        .resize(COMMUNITY_THUMB_MAX_SIDE, COMMUNITY_THUMB_MAX_SIDE, {
+          fit: 'inside',
+          withoutEnlargement: true
+        })
+        .webp({ quality: 78, effort: 4 })
+        .toFile(thumbTempFile);
+
+      await bucket.upload(thumbTempFile, {
+        destination: thumbPath,
+        metadata: {
+          contentType: 'image/webp',
+          cacheControl: 'public,max-age=604800',
+          metadata: {
+            generatedBy: 'community-thumbnail',
+            sourcePath: filePath
+          }
+        }
+      });
+    } catch (error) {
+      console.error('Thumbnail generation failed', { filePath, error });
+    } finally {
+      await Promise.all([
+        fs.unlink(sourceTempFile).catch(() => undefined),
+        fs.unlink(thumbTempFile).catch(() => undefined)
+      ]);
+    }
+
+    return null;
+  });
+
+// 7. Surveys vote callable (single vote per user/survey)
 export const submitSurveyVote = functions.https.onCall(async (data, context) => {
   const userId = context.auth?.uid;
   if (!userId) {
@@ -487,7 +556,7 @@ export const submitSurveyVote = functions.https.onCall(async (data, context) => 
   });
 });
 
-// 7. Auto-complete expired surveys
+// 8. Auto-complete expired surveys
 export const completeExpiredSurveys = functions.pubsub
   .schedule('every 1 minutes')
   .onRun(async () => {
@@ -521,7 +590,7 @@ export const completeExpiredSurveys = functions.pubsub
     return null;
   });
 
-// 8. Ads metrics aggregation
+// 9. Ads metrics aggregation
 export const onAdEventCreated = functions.firestore
   .document('ad_events/{eventId}')
   .onCreate(async (snap) => {
