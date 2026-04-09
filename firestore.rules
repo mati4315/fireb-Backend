@@ -58,15 +58,20 @@ service cloud.firestore {
              data.stats.viewsCount == 0;
     }
 
-    function isValidCommunityPostUpdate() {
-      return isSignedIn() &&
-             request.auth.uid == resource.data.userId &&
-             resource.data.module == 'community' &&
+    function isContentEditor() {
+      return isSignedIn() && (isAdmin() || request.auth.uid == resource.data.userId);
+    }
+
+    function isValidContentUpdate() {
+      return isContentEditor() &&
              request.resource.data.userId == resource.data.userId &&
-             request.resource.data.module == 'community' &&
-             request.resource.data.type == 'post' &&
+             request.resource.data.module == resource.data.module &&
+             request.resource.data.type == resource.data.type &&
              request.resource.data.source == resource.data.source &&
-             (!('isOficial' in request.resource.data) || request.resource.data.isOficial == false);
+             (
+               isAdmin() || 
+               (resource.data.module == 'community' && (!('isOficial' in request.resource.data) || request.resource.data.isOficial == false))
+             );
     }
 
     function isValidAdEventCreate(data) {
@@ -324,7 +329,7 @@ service cloud.firestore {
     match /content/{contentId} {
       allow read: if true;
       allow create: if isValidCommunityPostCreate(request.resource.data);
-      allow update: if isValidCommunityPostUpdate();
+      allow update: if isValidContentUpdate();
       allow delete: if isAdmin();
 
       match /likes/{likeUserId} {
