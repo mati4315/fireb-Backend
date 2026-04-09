@@ -20,6 +20,7 @@ type SurveyOption = {
 };
 
 type LotteryStatus = 'draft' | 'active' | 'closed' | 'completed';
+type LotteryMigrationStatus = 'pending' | 'running' | 'done' | 'failed';
 
 const MAX_SURVEY_OPTIONS_SELECTED = 10;
 const SURVEY_COMPLETE_BATCH_SIZE = 200;
@@ -28,7 +29,18 @@ const MAX_HOSTING_UPLOAD_BYTES = 6 * 1024 * 1024;
 const USER_PROPAGATION_QUERY_PAGE_SIZE = 100;
 const USER_PROPAGATION_BATCH_WRITE_LIMIT = 450;
 const LIKE_WRITER_CALLABLE = 'callable_toggle_v1';
+const LOTTERY_DEFAULT_MAX_NUMBER = 100;
+const LOTTERY_MIN_MAX_NUMBER = 10;
+const LOTTERY_MAX_MAX_NUMBER = 200;
+const LOTTERY_DEFAULT_MAX_TICKETS_PER_USER = 1;
+const LOTTERY_MIN_TICKETS_PER_USER = 1;
+const LOTTERY_MAX_TICKETS_PER_USER = 5;
+const LOTTERY_ENTRY_SCHEMA_VERSION = 2;
+const LOTTERY_ENTRY_DOC_PREFIX = 'n_';
+const LOTTERY_MIGRATION_PAGE_SIZE = 400;
+const LOTTERY_MIGRATION_BATCH_SIZE = 400;
 const MAX_LOTTERY_DRAW_ENTRIES = 5000;
+const COMMUNITY_THUMBNAIL_BUCKET = process.env.COMMUNITY_IMAGES_BUCKET || 'cdeluar-ddefc-storage';
 
 const buildCommentRef = (contentId: string, commentId: string) =>
   db.collection('content').doc(contentId).collection('comments').doc(commentId);
@@ -60,6 +72,59 @@ const isLotteryModuleEnabled = (
 ): boolean => {
   const lotteryConfig = modulesConfig?.lottery ?? {};
   return lotteryConfig.enabled ?? true;
+};
+
+const clampInteger = (value: unknown, min: number, max: number, fallback: number): number => {
+  const raw = Number(value);
+  if (!Number.isFinite(raw)) return fallback;
+  const parsed = Math.floor(raw);
+  if (!Number.isFinite(parsed)) return fallback;
+  if (parsed < min) return min;
+  if (parsed > max) return max;
+  return parsed;
+};
+
+const normalizeLotteryMaxNumber = (value: unknown): number => {
+  return clampInteger(
+    value,
+    LOTTERY_MIN_MAX_NUMBER,
+    LOTTERY_MAX_MAX_NUMBER,
+    LOTTERY_DEFAULT_MAX_NUMBER
+  );
+};
+
+const normalizeLotteryMaxTicketsPerUser = (value: unknown): number => {
+  return clampInteger(
+    value,
+    LOTTERY_MIN_TICKETS_PER_USER,
+    LOTTERY_MAX_TICKETS_PER_USER,
+    LOTTERY_DEFAULT_MAX_TICKETS_PER_USER
+  );
+};
+
+const parseSelectedLotteryNumber = (value: unknown): number | null => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  const normalized = Math.floor(parsed);
+  if (!Number.isFinite(normalized) || normalized !== parsed) return null;
+  if (normalized <= 0) return null;
+  return normalized;
+};
+
+const toLotteryEntryDocId = (selectedNumber: number): string => {
+  return `${LOTTERY_ENTRY_DOC_PREFIX}${selectedNumber}`;
+};
+
+const extractSelectedNumberFromEntryDoc = (
+  entryDoc: FirebaseFirestore.QueryDocumentSnapshot<FirebaseFirestore.DocumentData>
+): number | null => {
+  const data = entryDoc.data() || {};
+  const selectedRaw = parseSelectedLotteryNumber(data.selectedNumber);
+  if (selectedRaw != null) return selectedRaw;
+
+  const matches = entryDoc.id.match(/^n_(\d+)$/);
+  if (!matches) return null;
+  return parseSelectedLotteryNumber(matches[1]);
 };
 
 const normalizeRoleAlias = (value: unknown): string => {
@@ -735,6 +800,7 @@ export const onOfficialNewsReceived = functions.database
 
 // 6. Community image thumbnails
 export const onCommunityPostImageFinalized = functions.storage
+  .bucket(COMMUNITY_THUMBNAIL_BUCKET)
   .object()
   .onFinalize(async (object) => {
     const filePath = object.name;
@@ -865,7 +931,237 @@ export const uploadCommunityImageToHosting = functions.https.onCall(async (data,
   };
 });
 
-// 8. Lottery entry callable (single ticket per user/lottery)
+const listAllLotteryEntries = async (
+  lotteryRef: FirebaseFirestore.DocumentReference<FirebaseFirestore.DocumentData>
+): Promise<FirebaseFirestore.QueryDocumentSnapshot<FirebaseFirestore.DocumentData>[]> => {
+  const docs: FirebaseFirestore.QueryDocumentSnapshot<FirebaseFirestore.DocumentData>[] = [];
+  let lastDocId: string | null = null;
+
+  while (true) {
+    let pageQuery = lotteryRef
+      .collection('entries')
+      .orderBy(admin.firestore.FieldPath.documentId())
+      .limit(LOTTERY_MIGRATION_PAGE_SIZE);
+
+    if (lastDocId) {
+      pageQuery = pageQuery.startAfter(lastDocId);
+    }
+
+    const pageSnap = await pageQuery.get();
+    if (pageSnap.empty) break;
+
+    docs.push(...pageSnap.docs);
+    if (pageSnap.size < LOTTERY_MIGRATION_PAGE_SIZE) break;
+    lastDocId = pageSnap.docs[pageSnap.docs.length - 1].id;
+  }
+
+  return docs;
+};
+
+const ensureLotteryEntriesSchemaV2 = async (lotteryId: string): Promise<void> => {
+  const lotteryRef = db.collection('lotteries').doc(lotteryId);
+  let maxNumber = LOTTERY_DEFAULT_MAX_NUMBER;
+  let maxTicketsPerUser = LOTTERY_DEFAULT_MAX_TICKETS_PER_USER;
+  let mustRunMigration = false;
+  let needsDefaultsPatch = false;
+
+  await db.runTransaction(async (tx) => {
+    const lotterySnap = await tx.get(lotteryRef);
+    if (!lotterySnap.exists) {
+      throw new functions.https.HttpsError('not-found', 'La loteria no existe.');
+    }
+
+    const lotteryData = lotterySnap.data() || {};
+    maxNumber = normalizeLotteryMaxNumber(lotteryData.maxNumber);
+    maxTicketsPerUser = normalizeLotteryMaxTicketsPerUser(lotteryData.maxTicketsPerUser);
+
+    const schemaRaw = Number(lotteryData.entrySchemaVersion || 0);
+    const schemaVersion = Number.isFinite(schemaRaw) ? Math.floor(schemaRaw) : 0;
+    const migrationStatusRaw = typeof lotteryData.migrationStatus === 'string'
+      ? lotteryData.migrationStatus
+      : '';
+    const migrationStatus = migrationStatusRaw as LotteryMigrationStatus;
+
+    const isAlreadyV2 = schemaVersion >= LOTTERY_ENTRY_SCHEMA_VERSION;
+    if (isAlreadyV2 && migrationStatus !== 'failed') {
+      const hasValidDefaults = lotteryData.maxNumber === maxNumber &&
+        lotteryData.maxTicketsPerUser === maxTicketsPerUser &&
+        migrationStatus === 'done';
+      needsDefaultsPatch = !hasValidDefaults;
+      return;
+    }
+
+    if (migrationStatus === 'running') {
+      throw new functions.https.HttpsError(
+        'failed-precondition',
+        'migration-in-progress: La loteria esta migrando entradas, intenta nuevamente en unos segundos.'
+      );
+    }
+
+    mustRunMigration = true;
+    tx.set(
+      lotteryRef,
+      {
+        migrationStatus: 'running',
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    );
+  });
+
+  if (!mustRunMigration) {
+    if (needsDefaultsPatch) {
+      await lotteryRef.set(
+        {
+          maxNumber,
+          maxTicketsPerUser,
+          migrationStatus: 'done',
+          entrySchemaVersion: LOTTERY_ENTRY_SCHEMA_VERSION,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        },
+        { merge: true }
+      );
+    }
+    return;
+  }
+
+  try {
+    const allEntries = await listAllLotteryEntries(lotteryRef);
+    const usedNumbers = new Set<number>();
+    const nextAvailableNumber = (() => {
+      let cursor = 1;
+      return (): number | null => {
+        while (cursor <= maxNumber) {
+          const candidate = cursor;
+          cursor += 1;
+          if (!usedNumbers.has(candidate)) {
+            usedNumbers.add(candidate);
+            return candidate;
+          }
+        }
+        return null;
+      };
+    })();
+
+    type PlannedEntry = {
+      source: FirebaseFirestore.QueryDocumentSnapshot<FirebaseFirestore.DocumentData>;
+      selectedNumber: number;
+      targetId: string;
+    };
+
+    const plannedEntries: PlannedEntry[] = [];
+    const deferredEntries: FirebaseFirestore.QueryDocumentSnapshot<FirebaseFirestore.DocumentData>[] = [];
+
+    for (const entryDoc of allEntries) {
+      const parsedSelected = extractSelectedNumberFromEntryDoc(entryDoc);
+      const isSelectable = parsedSelected != null && parsedSelected >= 1 && parsedSelected <= maxNumber;
+      if (!isSelectable || usedNumbers.has(parsedSelected)) {
+        deferredEntries.push(entryDoc);
+        continue;
+      }
+
+      usedNumbers.add(parsedSelected);
+      plannedEntries.push({
+        source: entryDoc,
+        selectedNumber: parsedSelected,
+        targetId: toLotteryEntryDocId(parsedSelected)
+      });
+    }
+
+    for (const entryDoc of deferredEntries) {
+      const assigned = nextAvailableNumber();
+      if (assigned == null) {
+        throw new functions.https.HttpsError(
+          'failed-precondition',
+          'No hay suficientes numeros disponibles para migrar las entradas legacy. Aumenta maxNumber.'
+        );
+      }
+
+      plannedEntries.push({
+        source: entryDoc,
+        selectedNumber: assigned,
+        targetId: toLotteryEntryDocId(assigned)
+      });
+    }
+
+    let batch = db.batch();
+    let writes = 0;
+    const flush = async () => {
+      if (writes === 0) return;
+      await batch.commit();
+      batch = db.batch();
+      writes = 0;
+    };
+
+    for (const planned of plannedEntries) {
+      const sourceData = planned.source.data() || {};
+      const userIdRaw = typeof sourceData.userId === 'string' ? sourceData.userId.trim() : '';
+      const fallbackUserId = planned.source.id;
+      const userId = userIdRaw || fallbackUserId;
+
+      const userNameRaw = typeof sourceData.userName === 'string' ? sourceData.userName.trim() : '';
+      const userName = userNameRaw || 'Usuario';
+      const profilePicRaw = typeof sourceData.userProfilePicUrl === 'string'
+        ? sourceData.userProfilePicUrl.trim()
+        : '';
+
+      const payload: Record<string, unknown> = {
+        userId,
+        userName: userName.slice(0, 120),
+        userProfilePicUrl: profilePicRaw,
+        lotteryId,
+        selectedNumber: planned.selectedNumber,
+        createdAt: sourceData.createdAt instanceof admin.firestore.Timestamp
+          ? sourceData.createdAt
+          : admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      };
+
+      const targetRef = lotteryRef.collection('entries').doc(planned.targetId);
+      batch.set(targetRef, payload, { merge: true });
+      writes += 1;
+
+      if (planned.source.ref.path !== targetRef.path) {
+        batch.delete(planned.source.ref);
+        writes += 1;
+      }
+
+      if (writes >= LOTTERY_MIGRATION_BATCH_SIZE) {
+        await flush();
+      }
+    }
+
+    batch.set(
+      lotteryRef,
+      {
+        maxNumber,
+        maxTicketsPerUser,
+        participantsCount: plannedEntries.length,
+        entrySchemaVersion: LOTTERY_ENTRY_SCHEMA_VERSION,
+        migrationStatus: 'done',
+        migrationError: admin.firestore.FieldValue.delete(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    );
+    writes += 1;
+    await flush();
+  } catch (error: any) {
+    await lotteryRef.set(
+      {
+        migrationStatus: 'failed',
+        migrationError: typeof error?.message === 'string'
+          ? error.message.slice(0, 300)
+          : 'migration-failed',
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    );
+    throw error;
+  }
+};
+
+// 8. Lottery entry callable (number-based entries, supports multiple tickets per user)
 export const enterLottery = functions.https.onCall(async (data, context) => {
   const userId = context.auth?.uid;
   if (!userId) {
@@ -876,6 +1172,7 @@ export const enterLottery = functions.https.onCall(async (data, context) => {
   }
 
   const lotteryId = typeof data?.lotteryId === 'string' ? data.lotteryId.trim() : '';
+  const selectedNumber = parseSelectedLotteryNumber(data?.selectedNumber);
   const idempotencyKeyRaw = typeof data?.idempotencyKey === 'string'
     ? data.idempotencyKey.trim()
     : '';
@@ -883,6 +1180,11 @@ export const enterLottery = functions.https.onCall(async (data, context) => {
   if (!lotteryId) {
     throw new functions.https.HttpsError('invalid-argument', 'lotteryId es obligatorio.');
   }
+  if (selectedNumber == null) {
+    throw new functions.https.HttpsError('invalid-argument', 'selectedNumber es obligatorio.');
+  }
+
+  await ensureLotteryEntriesSchemaV2(lotteryId);
 
   const userDocSnap = await db.collection('users').doc(userId).get();
   const userData = userDocSnap.data() || {};
@@ -900,19 +1202,24 @@ export const enterLottery = functions.https.onCall(async (data, context) => {
 
   const modulesConfigRef = db.collection('_config').doc('modules');
   const lotteryRef = db.collection('lotteries').doc(lotteryId);
-  const entryRef = lotteryRef.collection('entries').doc(userId);
+  const entryRef = lotteryRef.collection('entries').doc(toLotteryEntryDocId(selectedNumber));
+  const userEntriesQuery = lotteryRef
+    .collection('entries')
+    .where('userId', '==', userId)
+    .limit(LOTTERY_MAX_TICKETS_PER_USER + 2);
 
   return db.runTransaction(async (tx) => {
-    const [modulesConfigSnap, lotterySnap, entrySnap] = await Promise.all([
+    const [modulesConfigSnap, lotterySnap, entrySnap, userEntriesSnap] = await Promise.all([
       tx.get(modulesConfigRef),
       tx.get(lotteryRef),
-      tx.get(entryRef)
+      tx.get(entryRef),
+      tx.get(userEntriesQuery)
     ]);
 
     if (!isLotteryModuleEnabled(modulesConfigSnap.data())) {
       throw new functions.https.HttpsError(
         'failed-precondition',
-        'El modulo de loteria esta deshabilitado.'
+        'module-disabled: El modulo de loteria esta deshabilitado.'
       );
     }
 
@@ -924,7 +1231,7 @@ export const enterLottery = functions.https.onCall(async (data, context) => {
     if (lotteryData.deletedAt != null) {
       throw new functions.https.HttpsError(
         'failed-precondition',
-        'La loteria ya no esta disponible.'
+        'lottery-inactive: La loteria ya no esta disponible.'
       );
     }
 
@@ -932,14 +1239,14 @@ export const enterLottery = functions.https.onCall(async (data, context) => {
     if (lotteryStatus !== 'active') {
       throw new functions.https.HttpsError(
         'failed-precondition',
-        'La loteria no esta activa.'
+        'lottery-inactive: La loteria no esta activa.'
       );
     }
 
     if (lotteryData.winner) {
       throw new functions.https.HttpsError(
         'failed-precondition',
-        'La loteria ya tiene ganador.'
+        'lottery-inactive: La loteria ya tiene ganador.'
       );
     }
 
@@ -954,13 +1261,13 @@ export const enterLottery = functions.https.onCall(async (data, context) => {
     if (startsAt != null && startsAt > nowMs) {
       throw new functions.https.HttpsError(
         'failed-precondition',
-        'La loteria aun no inicio.'
+        'lottery-inactive: La loteria aun no inicio.'
       );
     }
     if (endsAt != null && endsAt < nowMs) {
       throw new functions.https.HttpsError(
         'failed-precondition',
-        'La loteria ya finalizo la etapa de participacion.'
+        'lottery-inactive: La loteria ya finalizo la etapa de participacion.'
       );
     }
 
@@ -969,12 +1276,40 @@ export const enterLottery = functions.https.onCall(async (data, context) => {
       ? Math.max(0, Math.floor(currentParticipantsRaw))
       : 0;
 
+    const maxNumber = normalizeLotteryMaxNumber(lotteryData.maxNumber);
+    const maxTicketsPerUser = normalizeLotteryMaxTicketsPerUser(lotteryData.maxTicketsPerUser);
+    if (selectedNumber < 1 || selectedNumber > maxNumber) {
+      throw new functions.https.HttpsError(
+        'failed-precondition',
+        `out-of-range: Debes seleccionar un numero entre 1 y ${maxNumber}.`
+      );
+    }
+
+    const userTicketsCount = userEntriesSnap.size;
+
     if (entrySnap.exists) {
-      return {
-        status: 'already_joined',
-        lotteryId,
-        participantsCount: currentParticipants
-      };
+      const existingEntry = entrySnap.data() || {};
+      const entryOwner = typeof existingEntry.userId === 'string' ? existingEntry.userId : '';
+      if (entryOwner === userId) {
+        return {
+          status: 'already_selected',
+          lotteryId,
+          selectedNumber,
+          participantsCount: currentParticipants,
+          userTicketsCount: Math.max(1, userTicketsCount)
+        };
+      }
+      throw new functions.https.HttpsError(
+        'already-exists',
+        'number-taken: El numero seleccionado ya esta ocupado.'
+      );
+    }
+
+    if (userTicketsCount >= maxTicketsPerUser) {
+      throw new functions.https.HttpsError(
+        'failed-precondition',
+        `limit-reached: Alcanzaste el maximo de ${maxTicketsPerUser} numeros para esta loteria.`
+      );
     }
 
     const entryPayload: Record<string, unknown> = {
@@ -982,6 +1317,7 @@ export const enterLottery = functions.https.onCall(async (data, context) => {
       userName,
       userProfilePicUrl,
       lotteryId,
+      selectedNumber,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     };
@@ -994,6 +1330,10 @@ export const enterLottery = functions.https.onCall(async (data, context) => {
       lotteryRef,
       {
         participantsCount: admin.firestore.FieldValue.increment(1),
+        maxNumber,
+        maxTicketsPerUser,
+        entrySchemaVersion: LOTTERY_ENTRY_SCHEMA_VERSION,
+        migrationStatus: 'done',
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       },
       { merge: true }
@@ -1002,7 +1342,9 @@ export const enterLottery = functions.https.onCall(async (data, context) => {
     return {
       status: 'ok',
       lotteryId,
-      participantsCount: currentParticipants + 1
+      selectedNumber,
+      participantsCount: currentParticipants + 1,
+      userTicketsCount: userTicketsCount + 1
     };
   });
 });
@@ -1015,6 +1357,8 @@ export const drawLotteryWinner = functions.https.onCall(async (data, context) =>
   if (!lotteryId) {
     throw new functions.https.HttpsError('invalid-argument', 'lotteryId es obligatorio.');
   }
+
+  await ensureLotteryEntriesSchemaV2(lotteryId);
 
   const requesterUid = context.auth?.uid || 'system';
   const modulesConfigRef = db.collection('_config').doc('modules');
@@ -1062,7 +1406,7 @@ export const drawLotteryWinner = functions.https.onCall(async (data, context) =>
 
     const entriesQuery = lotteryRef
       .collection('entries')
-      .orderBy('createdAt', 'asc')
+      .orderBy('selectedNumber', 'asc')
       .limit(MAX_LOTTERY_DRAW_ENTRIES);
     const entriesSnap = await tx.get(entriesQuery);
 
@@ -1084,6 +1428,7 @@ export const drawLotteryWinner = functions.https.onCall(async (data, context) =>
     const winnerProfilePic = typeof winnerData.userProfilePicUrl === 'string'
       ? winnerData.userProfilePicUrl
       : '';
+    const winnerSelectedNumber = parseSelectedLotteryNumber(winnerData.selectedNumber) || null;
 
     const participantsRaw = Number(lotteryData.participantsCount || 0);
     const participantsCount = Number.isFinite(participantsRaw)
@@ -1098,6 +1443,7 @@ export const drawLotteryWinner = functions.https.onCall(async (data, context) =>
           userId: winnerUserId,
           userName: winnerUserName,
           userProfilePicUrl: winnerProfilePic,
+          selectedNumber: winnerSelectedNumber,
           selectedAt: admin.firestore.FieldValue.serverTimestamp()
         },
         updatedBy: requesterUid,
@@ -1112,7 +1458,8 @@ export const drawLotteryWinner = functions.https.onCall(async (data, context) =>
       winner: {
         userId: winnerUserId,
         userName: winnerUserName,
-        userProfilePicUrl: winnerProfilePic
+        userProfilePicUrl: winnerProfilePic,
+        selectedNumber: winnerSelectedNumber
       },
       participantsCount
     };

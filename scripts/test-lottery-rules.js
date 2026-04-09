@@ -55,8 +55,12 @@ function buildLotteryFields() {
     status: toFsString('active'),
     startsAt: toFsTimestamp(new Date(now - 60000)),
     endsAt: toFsTimestamp(new Date(now + 3600000)),
+    maxNumber: toFsInt(100),
+    maxTicketsPerUser: toFsInt(1),
     participantsCount: toFsInt(0),
     winner: toFsNull(),
+    entrySchemaVersion: toFsInt(2),
+    migrationStatus: toFsString('done'),
     createdBy: toFsString('rules-test'),
     updatedBy: toFsString('rules-test'),
     createdAt: toFsTimestamp(new Date()),
@@ -71,6 +75,7 @@ function buildEntryFields({ uid, lotteryId }) {
     userName: toFsString('Usuario test'),
     userProfilePicUrl: toFsString(''),
     lotteryId: toFsString(lotteryId),
+    selectedNumber: toFsInt(1),
     createdAt: toFsTimestamp(new Date()),
     updatedAt: toFsTimestamp(new Date())
   };
@@ -198,7 +203,7 @@ async function run() {
 
     const unauthEntryCreate = await firestoreRequest({
       method: 'POST',
-      path: `lotteries/${lotteryId}/entries?documentId=${encodeURIComponent(regularUid)}`,
+      path: `lotteries/${lotteryId}/entries?documentId=n_1`,
       body: { fields: buildEntryFields({ uid: regularUid, lotteryId }) }
     });
     expectStatus('Unauth direct entry denied', unauthEntryCreate.status, [401, 403]);
@@ -207,7 +212,7 @@ async function run() {
     const authEntryCreate = await firestoreRequest({
       method: 'POST',
       token: regularToken,
-      path: `lotteries/${lotteryId}/entries?documentId=${encodeURIComponent(regularUid)}`,
+      path: `lotteries/${lotteryId}/entries?documentId=n_1`,
       body: { fields: buildEntryFields({ uid: regularUid, lotteryId }) }
     });
     expectStatus('Authenticated direct entry denied', authEntryCreate.status, [403]);
