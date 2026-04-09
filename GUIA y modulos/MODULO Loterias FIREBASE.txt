@@ -1,0 +1,391 @@
+﻿MODULO LOTERIAS FIREBASE (V2)
+Fecha de actualizacion: 2026-04-09
+Proyecto: cdeluar-ddefc
+
+==================================================
+1) OBJETIVO DEL MODULO
+==================================================
+Implementar loterias por numeros (sin pagos) con foco en:
+- Velocidad de UI.
+- Integridad de datos (sin doble compra de numero).
+- Compatibilidad con loterias legacy.
+- Operacion sencilla para staff.
+- Posibilidad de activar/desactivar modulo en tiempo real.
+
+Resumen funcional:
+- Cada loteria define un rango de numeros 1..maxNumber.
+- Cada numero puede tener un solo duenio.
+- Un usuario puede comprar varios numeros hasta maxTicketsPerUser.
+- Staff crea/edita/cierra/sortea/elimina.
+- Lectura publica de loterias y numeros ocupados.
+- Escritura de entries SOLO por Cloud Function callable.
+
+
+==================================================
+2) ARQUITECTURA
+==================================================
+Backend:
+- Firebase Functions (1st Gen, Node 22).
+- Firestore (coleccion lotteries + subcoleccion entries).
+
+Frontend:
+- Vue + Pinia.
+- Store principal: Frontend/src/stores/lotteryStore.ts
+- Vista publica: Frontend/src/components/lottery/LotterySection.vue
+- Vista staff: Frontend/src/views/LotteryManagerView.vue
+
+Feature flag:
+- Documento Firestore: _config/modules
+- Campo: lottery.enabled (boolean)
+
+
+==================================================
+3) MODELO DE DATOS
+==================================================
+Coleccion:
+lotteries/{lotteryId}
+
+Campos clave:
+- title: string
+- description: string
+- status: 'draft' | 'active' | 'closed' | 'completed'
+- startsAt: timestamp
+- endsAt: timestamp
+- maxNumber: int (limite: 10..200)
+- maxTicketsPerUser: int (limite: 1..5)
+- participantsCount: int
+- winner: object | null
+- entrySchemaVersion: int (V2 = 2)
+- migrationStatus: 'pending' | 'running' | 'done' | 'failed'
+- createdBy, updatedBy: string
+- createdAt, updatedAt, deletedAt: timestamp|null
+
+Subcoleccion:
+lotteries/{lotteryId}/entries/{entryId}
+
+Estandar V2:
+- entryId = n_<selectedNumber>
+  Ejemplo: n_37
+
+Campos entry:
+- selectedNumber: int
+- userId: string
+- userName: string
+- userProfilePicUrl: string
+- lotteryId: string
+- createdAt: timestamp
+- updatedAt: timestamp
+
+Reglas de negocio:
+- Un numero solo puede existir una vez (doc id unico n_X).
+- El usuario puede tener varios docs (numeros) en la misma loteria, hasta maxTicketsPerUser.
+
+
+==================================================
+4) CLOUD FUNCTIONS PRINCIPALES
+==================================================
+Archivo:
+Backend/functions/src/index.ts
+
+4.1 enterLottery (callable)
+Entrada esperada:
+- lotteryId: string
+- selectedNumber: number
+- idempotencyKey?: string
+
+Salida esperada:
+- status: 'ok' | 'already_selected'
+- lotteryId
+- selectedNumber
+- participantsCount
+- userTicketsCount
+
+Validaciones:
+- Usuario autenticado.
+- Modulo lottery.enabled = true.
+- Loteria existe y no borrada.
+- status = active.
+- Sin ganador previo.
+- Fecha vigente (entre startsAt y endsAt).
+- selectedNumber dentro de 1..maxNumber.
+- Numero no ocupado por otro usuario.
+- Usuario no excede maxTicketsPerUser.
+
+Errores estructurados usados:
+- already-exists: number-taken
+- failed-precondition: limit-reached
+- failed-precondition: out-of-range
+- failed-precondition: migration-in-progress
+- failed-precondition: lottery-inactive
+- failed-precondition: module-disabled
+
+4.2 drawLotteryWinner (callable, staff-only)
+Entrada:
+- lotteryId
+
+Salida:
+- status: 'ok'
+- lotteryId
+- winner: { userId, userName, userProfilePicUrl, selectedNumber }
+- participantsCount
+
+Validaciones:
+- Solo staff.
+- Modulo habilitado.
+- Loteria cerrada (status=closed).
+- Sin ganador previo.
+- Con participantes.
+
+4.3 ensureLotteryEntriesSchemaV2 (rutina interna)
+Se ejecuta automaticamente desde enterLottery y drawLotteryWinner.
+
+Objetivo:
+- Detectar loterias legacy (entries por uid o sin selectedNumber).
+- Migrar a formato canonico n_<number>.
+- Recalcular participantsCount.
+- Dejar entrySchemaVersion=2 y migrationStatus='done'.
+
+Si no hay numeros suficientes para migrar:
+- migrationStatus='failed'
+- Se devuelve error para que staff aumente maxNumber.
+
+
+==================================================
+5) REGLAS DE SEGURIDAD FIRESTORE
+==================================================
+Archivo:
+Backend/firestore.rules
+
+Loterias:
+- Read: publico.
+- Create/Update/Delete: solo staff.
+
+Entries:
+- Read: publico.
+- Create/Update/Delete: false (bloqueo total directo).
+
+Nota critica:
+- Este bloqueo obliga a usar callable functions para comprar numero.
+- Evita que cliente escriba entries sin validaciones.
+
+Moderacion global comentarios:
+- Se mantiene admin-only para gestion global.
+- Colaborador NO puede moderacion global.
+
+
+==================================================
+6) FRONTEND (PUBLICO)
+==================================================
+Vista:
+Frontend/src/components/lottery/LotterySection.vue
+
+Comportamiento:
+- Grilla numerica.
+- Estados visuales: disponible / ocupado / mio.
+- Ocupado muestra avatar del comprador.
+- Modal al tocar numero:
+  - libre: boton comprar
+  - ocupado: datos del comprador
+- Filtros: todos / disponibles / ocupados.
+- Mobile: 6 columnas.
+- Confirmacion visual post-compra.
+
+Optimizacion aplicada:
+- En V2 final, se carga de una vez la ocupacion completa de la loteria (hasta 200 numeros).
+- La paginacion es visual/local (sin consulta por pagina).
+- Se mantiene boton "Actualizar resultados" para refresco manual.
+
+Resultado:
+- Cambio de pagina casi instantaneo.
+- Menos "Cargando numeros..." en UX.
+
+
+==================================================
+7) FRONTEND (STAFF)
+==================================================
+Vista:
+Frontend/src/views/LotteryManagerView.vue
+
+Funciones:
+- Activar/desactivar modulo lottery.
+- Crear/editar loteria.
+- Cerrar/reabrir loteria.
+- Sortear ganador.
+- Eliminar loteria (soft delete).
+
+Campos staff V2:
+- maxNumber
+- maxTicketsPerUser
+
+Ajuste UX aplicado:
+- Inicio simplificado a "Hoy" (solo lectura visual).
+- Cierre por fecha (input date).
+
+Metricas visibles staff:
+- Vendidos / Total
+- Disponibles
+- Limite por usuario
+- Schema y estado de migracion
+
+
+==================================================
+8) INCIDENTES REALES Y SOLUCIONES
+==================================================
+INCIDENTE #1 (Critico)
+Sintoma:
+- Usuario "compra" numero, pero al recargar desaparece.
+
+Causa raiz:
+- Backend en produccion con version antigua de enterLottery (sin contrato V2 completo o sin persistencia compatible).
+
+Solucion aplicada:
+- Deploy explicito de:
+  - functions:enterLottery
+  - functions:drawLotteryWinner
+- Frontend hardening:
+  - compra solo se confirma si respuesta trae status valido + selectedNumber valido y coincidente.
+  - si no coincide: rollback + error backend-outdated.
+
+Leccion:
+- Nunca confiar solo en estado optimista local.
+- El cliente debe validar contrato de respuesta del servidor.
+
+
+INCIDENTE #2
+Sintoma:
+- Al cambiar de pagina en grilla aparece "Cargando numeros..." perceptible.
+
+Causa:
+- Estrategia inicial por pagina con query al pasar de pagina.
+
+Solucion aplicada:
+- Carga completa de ocupados (hasta 200) en una sola consulta.
+- Paginacion local en memoria.
+- Boton manual "Actualizar resultados".
+
+Leccion:
+- Con maxNumber <= 200 conviene full-load para UX superior.
+
+
+INCIDENTE #3
+Sintoma:
+- Solicitud de UX: no usar datetime-local en gestion.
+
+Solucion:
+- Inicio en modo solo lectura "Hoy" + fecha actual.
+- Cierre con selector date simple.
+
+
+==================================================
+9) CHECKLIST DE DEPLOY SEGURO
+==================================================
+Antes de deploy:
+1. npm run build (Frontend)
+2. npm run build (Backend/functions)
+3. npm run test:lottery-rules
+4. npm run test:comments-admin-regression
+
+Deploy minimo de loteria:
+- firebase deploy --only functions:enterLottery,functions:drawLotteryWinner --project cdeluar-ddefc
+
+Si cambian reglas:
+- firebase deploy --only firestore:rules --project cdeluar-ddefc
+
+Si cambian indices:
+- firebase deploy --only firestore:indexes --project cdeluar-ddefc
+
+Post-deploy smoke test:
+1. Crear loteria staff.
+2. Comprar numero con usuario A.
+3. Recargar y verificar persistencia.
+4. Intentar comprar mismo numero con usuario B (debe fallar number-taken).
+5. Cerrar y sortear; validar ganador con selectedNumber.
+
+
+==================================================
+10) GUIA DE MIGRACION FUTURA (A OTRO STACK O VERSION)
+==================================================
+Puntos que SI o SI hay que preservar:
+- Contrato de API callable enterLottery/drawLotteryWinner.
+- Unicidad por numero (doc key o unique index equivalente).
+- Limite por usuario por loteria.
+- Estado de loteria + fechas + validaciones.
+- Escritura de entries solo desde backend.
+- Feature flag lottery.enabled.
+
+Estrategia recomendada de migracion:
+1. Congelar cambios de schema (ventana corta).
+2. Exportar lotteries y entries.
+3. Ejecutar validador de integridad:
+   - sin numeros duplicados por loteria
+   - participantsCount consistente
+   - winner coherente con entries
+4. Migrar por lotes.
+5. Ejecutar pruebas de contrato API.
+6. Habilitar trafico progresivo.
+7. Monitorear errores structured code.
+
+Campos minimos para compatibilidad:
+- lotteries: maxNumber, maxTicketsPerUser, participantsCount, status, winner, entrySchemaVersion, migrationStatus
+- entries: selectedNumber, userId, userName, lotteryId
+
+
+==================================================
+11) ERRORES COMUNES Y RESPUESTA OPERATIVA
+==================================================
+"number-taken"
+- Significa que otro usuario ya compro ese numero.
+- UX: pedir elegir otro.
+
+"limit-reached"
+- Usuario alcanzo su maximo.
+- UX: informar limite y numeros propios.
+
+"out-of-range"
+- selectedNumber fuera de 1..maxNumber.
+- Revisar cliente o payload.
+
+"migration-in-progress"
+- Esperar y reintentar.
+- Si persiste, revisar migrationStatus en doc loteria.
+
+"lottery-inactive"
+- Estado o fechas no permiten compra.
+- Verificar status active y ventana temporal.
+
+"module-disabled"
+- Modulo apagado en _config/modules.
+
+"backend-outdated"
+- Frontend detecto contrato roto/antiguo.
+- Rehacer deploy de functions V2.
+
+
+==================================================
+12) ARCHIVOS CLAVE DEL MODULO
+==================================================
+Backend:
+- Backend/functions/src/index.ts
+- Backend/scripts/setup-lottery-module.js
+- Backend/scripts/test-lottery-rules.js
+- Backend/firestore.rules
+- Backend/firestore.indexes.json
+
+Frontend:
+- Frontend/src/stores/lotteryStore.ts
+- Frontend/src/components/lottery/LotterySection.vue
+- Frontend/src/views/LotteryManagerView.vue
+- Frontend/src/stores/moduleStore.ts
+- Frontend/src/App.vue
+- Frontend/src/router/index.ts
+
+
+==================================================
+13) NOTAS OPERATIVAS
+==================================================
+- Limite actual maxNumber (10..200) esta pensado para rendimiento alto en frontend.
+- Si se aumenta ese limite en el futuro, reevaluar estrategia de carga completa.
+- Moderacion global de comentarios sigue exclusiva admin.
+- Colaborador puede gestionar loterias, pero no moderacion global.
+
+FIN DEL DOCUMENTO
