@@ -125,6 +125,34 @@ service cloud.firestore {
       );
     }
 
+    function likesEnabled() {
+      return !modulesConfigExists() ||
+        !('likes' in modulesConfig()) ||
+        !('enabled' in modulesConfig().likes) ||
+        modulesConfig().likes.enabled == true;
+    }
+
+    function likesNewsEnabled() {
+      return !modulesConfigExists() ||
+        !('likes' in modulesConfig()) ||
+        !('newsEnabled' in modulesConfig().likes) ||
+        modulesConfig().likes.newsEnabled == true;
+    }
+
+    function likesCommunityEnabled() {
+      return !modulesConfigExists() ||
+        !('likes' in modulesConfig()) ||
+        !('communityEnabled' in modulesConfig().likes) ||
+        modulesConfig().likes.communityEnabled == true;
+    }
+
+    function isLikesModuleAllowed(moduleName) {
+      return likesEnabled() && (
+        (moduleName == 'news' && likesNewsEnabled()) ||
+        (moduleName == 'community' && likesCommunityEnabled())
+      );
+    }
+
     function contentPath(contentId) {
       return /databases/$(database)/documents/content/$(contentId);
     }
@@ -137,6 +165,29 @@ service cloud.firestore {
           (moduleName == 'community' && get(contentPath(contentId)).data.type == 'post') ||
           (moduleName == 'news' && get(contentPath(contentId)).data.type == 'news')
         );
+    }
+
+    function resolveContentModuleForLikes(contentId) {
+      return (
+        get(contentPath(contentId)).data.module == 'news' ||
+        get(contentPath(contentId)).data.type == 'news'
+      )
+        ? 'news'
+        : 'community';
+    }
+
+    function isContentAvailableForLikes(contentId) {
+      return exists(contentPath(contentId)) &&
+        get(contentPath(contentId)).data.deletedAt == null &&
+        isLikesModuleAllowed(resolveContentModuleForLikes(contentId));
+    }
+
+    function isValidLikeCreate(contentId, likeUserId) {
+      return isSignedIn() &&
+        request.auth.uid == likeUserId &&
+        request.resource.data.keys().hasOnly(['createdAt']) &&
+        request.resource.data.createdAt is timestamp &&
+        isContentAvailableForLikes(contentId);
     }
 
     function isValidCommentText(data) {
@@ -248,9 +299,18 @@ service cloud.firestore {
     function canWriteModulesConfig() {
       return isStaff() && (
         isAdmin() ||
-        !('comments' in request.resource.data) ||
-        !('comments' in resource.data) ||
-        request.resource.data.comments == resource.data.comments
+        (
+          (
+            !('comments' in request.resource.data) ||
+            !('comments' in resource.data) ||
+            request.resource.data.comments == resource.data.comments
+          ) &&
+          (
+            !('likes' in request.resource.data) ||
+            !('likes' in resource.data) ||
+            request.resource.data.likes == resource.data.likes
+          )
+        )
       );
     }
 
@@ -269,8 +329,8 @@ service cloud.firestore {
 
       match /likes/{likeUserId} {
         allow read: if true;
-        allow create: if request.auth.uid == likeUserId;
-        allow delete: if request.auth.uid == likeUserId;
+        allow create: if isValidLikeCreate(contentId, likeUserId);
+        allow delete: if isSignedIn() && request.auth.uid == likeUserId;
       }
 
       match /comments/{commentId} {
@@ -329,6 +389,17 @@ service cloud.firestore {
       allow create, update, delete: if false;
     }
 
+    // Lottery module
+    match /lotteries/{lotteryId} {
+      allow read: if true;
+      allow create, update, delete: if isStaff();
+
+      match /entries/{entryUserId} {
+        allow read: if true;
+        allow create, update, delete: if false;
+      }
+    }
+
     // Sync control (admin only)
     match /_sync_control/{document=**} {
       allow read: if isAdmin();
@@ -338,7 +409,13 @@ service cloud.firestore {
     match /_config/modules {
       allow read: if true;
       allow create: if isStaff() &&
-        (isAdmin() || !('comments' in request.resource.data));
+        (
+          isAdmin() ||
+          (
+            !('comments' in request.resource.data) &&
+            !('likes' in request.resource.data)
+          )
+        );
       allow update: if canWriteModulesConfig();
       allow delete: if isStaff();
     }

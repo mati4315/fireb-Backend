@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.onAdEventCreated = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onUserUpdated = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.onLikeRemoved = exports.onLikeAdded = void 0;
+exports.onAdEventCreated = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onUserUpdated = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = void 0;
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const path = require("path");
@@ -17,7 +17,66 @@ const COMMUNITY_THUMB_MAX_SIDE = 480;
 const MAX_HOSTING_UPLOAD_BYTES = 6 * 1024 * 1024;
 const USER_PROPAGATION_QUERY_PAGE_SIZE = 100;
 const USER_PROPAGATION_BATCH_WRITE_LIMIT = 450;
+const LIKE_WRITER_CALLABLE = 'callable_toggle_v1';
+const MAX_LOTTERY_DRAW_ENTRIES = 5000;
 const buildCommentRef = (contentId, commentId) => db.collection('content').doc(contentId).collection('comments').doc(commentId);
+const inferContentModule = (contentData) => {
+    if ((contentData === null || contentData === void 0 ? void 0 : contentData.module) === 'news' || (contentData === null || contentData === void 0 ? void 0 : contentData.type) === 'news') {
+        return 'news';
+    }
+    return 'community';
+};
+const isLikeModuleEnabledForContent = (modulesConfig, moduleName) => {
+    var _a, _b, _c, _d;
+    const likesConfig = (_a = modulesConfig === null || modulesConfig === void 0 ? void 0 : modulesConfig.likes) !== null && _a !== void 0 ? _a : {};
+    const likesEnabled = (_b = likesConfig.enabled) !== null && _b !== void 0 ? _b : true;
+    const likesNewsEnabled = (_c = likesConfig.newsEnabled) !== null && _c !== void 0 ? _c : true;
+    const likesCommunityEnabled = (_d = likesConfig.communityEnabled) !== null && _d !== void 0 ? _d : true;
+    if (!likesEnabled)
+        return false;
+    return moduleName === 'news' ? likesNewsEnabled : likesCommunityEnabled;
+};
+const isLotteryModuleEnabled = (modulesConfig) => {
+    var _a, _b;
+    const lotteryConfig = (_a = modulesConfig === null || modulesConfig === void 0 ? void 0 : modulesConfig.lottery) !== null && _a !== void 0 ? _a : {};
+    return (_b = lotteryConfig.enabled) !== null && _b !== void 0 ? _b : true;
+};
+const normalizeRoleAlias = (value) => {
+    return typeof value === 'string'
+        ? value.trim().toLowerCase().replace(/[\s_-]+/g, '')
+        : '';
+};
+const isAdminClaim = (token) => {
+    return token.admin === true ||
+        token.superAdmin === true ||
+        token.super_admin === true;
+};
+const isStaffRole = (role) => {
+    const normalized = normalizeRoleAlias(role);
+    return normalized === 'colaborador' ||
+        normalized === 'admin' ||
+        normalized === 'administrador' ||
+        normalized === 'superadmin';
+};
+const assertStaffUser = async (authContext) => {
+    var _a;
+    const uid = (authContext === null || authContext === void 0 ? void 0 : authContext.uid) || '';
+    if (!uid) {
+        throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para ejecutar esta accion.');
+    }
+    const token = ((authContext === null || authContext === void 0 ? void 0 : authContext.token) || {});
+    const email = typeof token.email === 'string' ? token.email.toLowerCase() : '';
+    if (uid === 'Z4f5ogXDQaNhEY4iBf9jgkPnQMP2' ||
+        email === 'matias4315@gmail.com' ||
+        isAdminClaim(token)) {
+        return;
+    }
+    const userSnap = await db.collection('users').doc(uid).get();
+    const role = (_a = userSnap.data()) === null || _a === void 0 ? void 0 : _a.rol;
+    if (isStaffRole(role))
+        return;
+    throw new functions.https.HttpsError('permission-denied', 'Solo staff puede ejecutar esta accion.');
+};
 const propagateUserFields = async (target, userId, updateData) => {
     let baseQuery;
     if (target === 'content') {
@@ -153,6 +212,9 @@ exports.onLikeAdded = functions.firestore
     .document('content/{contentId}/likes/{userId}')
     .onCreate(async (snap, context) => {
     const { contentId } = context.params;
+    const likeData = snap.data() || {};
+    if (likeData.writer === LIKE_WRITER_CALLABLE)
+        return;
     try {
         await db.collection('content').doc(contentId).update({
             'stats.likesCount': admin.firestore.FieldValue.increment(1),
@@ -168,6 +230,9 @@ exports.onLikeRemoved = functions.firestore
     .document('content/{contentId}/likes/{userId}')
     .onDelete(async (snap, context) => {
     const { contentId } = context.params;
+    const likeData = snap.data() || {};
+    if (likeData.writer === LIKE_WRITER_CALLABLE)
+        return;
     try {
         await db.collection('content').doc(contentId).update({
             'stats.likesCount': admin.firestore.FieldValue.increment(-1),
@@ -177,6 +242,72 @@ exports.onLikeRemoved = functions.firestore
     catch (error) {
         console.error(`âŒ Like decrement failed`, error);
     }
+});
+exports.toggleContentLike = functions.https.onCall(async (data, context) => {
+    var _a;
+    const userId = (_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid;
+    if (!userId) {
+        throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para dar me gusta.');
+    }
+    const contentId = typeof (data === null || data === void 0 ? void 0 : data.contentId) === 'string' ? data.contentId.trim() : '';
+    if (!contentId) {
+        throw new functions.https.HttpsError('invalid-argument', 'contentId es obligatorio.');
+    }
+    const contentRef = db.collection('content').doc(contentId);
+    const likeRef = contentRef.collection('likes').doc(userId);
+    const modulesConfigRef = db.collection('_config').doc('modules');
+    return db.runTransaction(async (tx) => {
+        const [modulesConfigSnap, contentSnap, likeSnap] = await Promise.all([
+            tx.get(modulesConfigRef),
+            tx.get(contentRef),
+            tx.get(likeRef)
+        ]);
+        if (!contentSnap.exists) {
+            throw new functions.https.HttpsError('not-found', 'El contenido no existe.');
+        }
+        const contentData = contentSnap.data() || {};
+        if (contentData.deletedAt != null) {
+            throw new functions.https.HttpsError('failed-precondition', 'No puedes dar me gusta a contenido eliminado.');
+        }
+        const moduleName = inferContentModule(contentData);
+        const isEnabled = isLikeModuleEnabledForContent(modulesConfigSnap.data(), moduleName);
+        if (!isEnabled) {
+            throw new functions.https.HttpsError('failed-precondition', 'Los me gusta estan deshabilitados para este modulo.');
+        }
+        if (likeSnap.exists) {
+            const existingLike = likeSnap.data() || {};
+            tx.delete(likeRef);
+            // Legacy likes (sin writer callable) mantienen compatibilidad via trigger.
+            if (existingLike.writer === LIKE_WRITER_CALLABLE) {
+                tx.set(contentRef, {
+                    stats: {
+                        likesCount: admin.firestore.FieldValue.increment(-1)
+                    },
+                    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                }, { merge: true });
+            }
+            return {
+                status: 'ok',
+                liked: false,
+                contentId
+            };
+        }
+        tx.set(likeRef, {
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            writer: LIKE_WRITER_CALLABLE
+        });
+        tx.set(contentRef, {
+            stats: {
+                likesCount: admin.firestore.FieldValue.increment(1)
+            },
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+        return {
+            status: 'ok',
+            liked: true,
+            contentId
+        };
+    });
 });
 // 2. Comments
 exports.onCommentCreated = functions.firestore
@@ -588,7 +719,183 @@ exports.uploadCommunityImageToHosting = functions.https.onCall(async (data, cont
         contentType
     };
 });
-// 8. Surveys vote callable (single vote per user/survey)
+// 8. Lottery entry callable (single ticket per user/lottery)
+exports.enterLottery = functions.https.onCall(async (data, context) => {
+    var _a, _b;
+    const userId = (_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid;
+    if (!userId) {
+        throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para participar en la loteria.');
+    }
+    const lotteryId = typeof (data === null || data === void 0 ? void 0 : data.lotteryId) === 'string' ? data.lotteryId.trim() : '';
+    const idempotencyKeyRaw = typeof (data === null || data === void 0 ? void 0 : data.idempotencyKey) === 'string'
+        ? data.idempotencyKey.trim()
+        : '';
+    if (!lotteryId) {
+        throw new functions.https.HttpsError('invalid-argument', 'lotteryId es obligatorio.');
+    }
+    const userDocSnap = await db.collection('users').doc(userId).get();
+    const userData = userDocSnap.data() || {};
+    const token = (((_b = context.auth) === null || _b === void 0 ? void 0 : _b.token) || {});
+    const fallbackEmail = typeof token.email === 'string' ? token.email : '';
+    const fallbackName = fallbackEmail ? fallbackEmail.split('@')[0] : 'Usuario';
+    const userNameRaw = typeof userData.nombre === 'string' ? userData.nombre : fallbackName;
+    const userProfilePicRaw = typeof userData.profilePictureUrl === 'string'
+        ? userData.profilePictureUrl
+        : '';
+    const userName = userNameRaw.trim().slice(0, 120) || 'Usuario';
+    const userProfilePicUrl = userProfilePicRaw.trim();
+    const modulesConfigRef = db.collection('_config').doc('modules');
+    const lotteryRef = db.collection('lotteries').doc(lotteryId);
+    const entryRef = lotteryRef.collection('entries').doc(userId);
+    return db.runTransaction(async (tx) => {
+        const [modulesConfigSnap, lotterySnap, entrySnap] = await Promise.all([
+            tx.get(modulesConfigRef),
+            tx.get(lotteryRef),
+            tx.get(entryRef)
+        ]);
+        if (!isLotteryModuleEnabled(modulesConfigSnap.data())) {
+            throw new functions.https.HttpsError('failed-precondition', 'El modulo de loteria esta deshabilitado.');
+        }
+        if (!lotterySnap.exists) {
+            throw new functions.https.HttpsError('not-found', 'La loteria no existe.');
+        }
+        const lotteryData = lotterySnap.data() || {};
+        if (lotteryData.deletedAt != null) {
+            throw new functions.https.HttpsError('failed-precondition', 'La loteria ya no esta disponible.');
+        }
+        const lotteryStatus = (lotteryData.status || 'draft');
+        if (lotteryStatus !== 'active') {
+            throw new functions.https.HttpsError('failed-precondition', 'La loteria no esta activa.');
+        }
+        if (lotteryData.winner) {
+            throw new functions.https.HttpsError('failed-precondition', 'La loteria ya tiene ganador.');
+        }
+        const nowMs = Date.now();
+        const startsAt = lotteryData.startsAt instanceof admin.firestore.Timestamp
+            ? lotteryData.startsAt.toMillis()
+            : null;
+        const endsAt = lotteryData.endsAt instanceof admin.firestore.Timestamp
+            ? lotteryData.endsAt.toMillis()
+            : null;
+        if (startsAt != null && startsAt > nowMs) {
+            throw new functions.https.HttpsError('failed-precondition', 'La loteria aun no inicio.');
+        }
+        if (endsAt != null && endsAt < nowMs) {
+            throw new functions.https.HttpsError('failed-precondition', 'La loteria ya finalizo la etapa de participacion.');
+        }
+        const currentParticipantsRaw = Number(lotteryData.participantsCount || 0);
+        const currentParticipants = Number.isFinite(currentParticipantsRaw)
+            ? Math.max(0, Math.floor(currentParticipantsRaw))
+            : 0;
+        if (entrySnap.exists) {
+            return {
+                status: 'already_joined',
+                lotteryId,
+                participantsCount: currentParticipants
+            };
+        }
+        const entryPayload = {
+            userId,
+            userName,
+            userProfilePicUrl,
+            lotteryId,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        };
+        if (idempotencyKeyRaw) {
+            entryPayload.idempotencyKey = idempotencyKeyRaw.slice(0, 120);
+        }
+        tx.set(entryRef, entryPayload);
+        tx.set(lotteryRef, {
+            participantsCount: admin.firestore.FieldValue.increment(1),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+        return {
+            status: 'ok',
+            lotteryId,
+            participantsCount: currentParticipants + 1
+        };
+    });
+});
+// 9. Lottery draw callable (staff-only)
+exports.drawLotteryWinner = functions.https.onCall(async (data, context) => {
+    var _a;
+    await assertStaffUser(context.auth);
+    const lotteryId = typeof (data === null || data === void 0 ? void 0 : data.lotteryId) === 'string' ? data.lotteryId.trim() : '';
+    if (!lotteryId) {
+        throw new functions.https.HttpsError('invalid-argument', 'lotteryId es obligatorio.');
+    }
+    const requesterUid = ((_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid) || 'system';
+    const modulesConfigRef = db.collection('_config').doc('modules');
+    const lotteryRef = db.collection('lotteries').doc(lotteryId);
+    return db.runTransaction(async (tx) => {
+        const [modulesConfigSnap, lotterySnap] = await Promise.all([
+            tx.get(modulesConfigRef),
+            tx.get(lotteryRef)
+        ]);
+        if (!isLotteryModuleEnabled(modulesConfigSnap.data())) {
+            throw new functions.https.HttpsError('failed-precondition', 'El modulo de loteria esta deshabilitado.');
+        }
+        if (!lotterySnap.exists) {
+            throw new functions.https.HttpsError('not-found', 'La loteria no existe.');
+        }
+        const lotteryData = lotterySnap.data() || {};
+        if (lotteryData.deletedAt != null) {
+            throw new functions.https.HttpsError('failed-precondition', 'La loteria ya no esta disponible.');
+        }
+        if (lotteryData.winner) {
+            throw new functions.https.HttpsError('failed-precondition', 'La loteria ya tiene ganador.');
+        }
+        const lotteryStatus = (lotteryData.status || 'draft');
+        if (lotteryStatus !== 'closed') {
+            throw new functions.https.HttpsError('failed-precondition', 'La loteria debe estar cerrada antes de sortear ganador.');
+        }
+        const entriesQuery = lotteryRef
+            .collection('entries')
+            .orderBy('createdAt', 'asc')
+            .limit(MAX_LOTTERY_DRAW_ENTRIES);
+        const entriesSnap = await tx.get(entriesQuery);
+        if (entriesSnap.empty) {
+            throw new functions.https.HttpsError('failed-precondition', 'No hay participantes para sortear.');
+        }
+        const randomIndex = Math.floor(Math.random() * entriesSnap.docs.length);
+        const winnerDoc = entriesSnap.docs[randomIndex];
+        const winnerData = winnerDoc.data() || {};
+        const winnerUserId = typeof winnerData.userId === 'string' ? winnerData.userId : winnerDoc.id;
+        const winnerUserName = typeof winnerData.userName === 'string'
+            ? winnerData.userName
+            : 'Usuario';
+        const winnerProfilePic = typeof winnerData.userProfilePicUrl === 'string'
+            ? winnerData.userProfilePicUrl
+            : '';
+        const participantsRaw = Number(lotteryData.participantsCount || 0);
+        const participantsCount = Number.isFinite(participantsRaw)
+            ? Math.max(0, Math.floor(participantsRaw))
+            : entriesSnap.docs.length;
+        tx.set(lotteryRef, {
+            status: 'completed',
+            winner: {
+                userId: winnerUserId,
+                userName: winnerUserName,
+                userProfilePicUrl: winnerProfilePic,
+                selectedAt: admin.firestore.FieldValue.serverTimestamp()
+            },
+            updatedBy: requesterUid,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+        return {
+            status: 'ok',
+            lotteryId,
+            winner: {
+                userId: winnerUserId,
+                userName: winnerUserName,
+                userProfilePicUrl: winnerProfilePic
+            },
+            participantsCount
+        };
+    });
+});
+// 10. Surveys vote callable (single vote per user/survey)
 exports.submitSurveyVote = functions.https.onCall(async (data, context) => {
     var _a;
     const userId = (_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid;
@@ -703,7 +1010,7 @@ exports.submitSurveyVote = functions.https.onCall(async (data, context) => {
         };
     });
 });
-// 9. Auto-complete expired surveys
+// 11. Auto-complete expired surveys
 exports.completeExpiredSurveys = functions.pubsub
     .schedule('every 1 minutes')
     .onRun(async () => {
@@ -732,7 +1039,7 @@ exports.completeExpiredSurveys = functions.pubsub
     console.log(`Expired surveys completed: ${completedCount}`);
     return null;
 });
-// 10. Ads metrics aggregation
+// 12. Ads metrics aggregation
 exports.onAdEventCreated = functions.firestore
     .document('ad_events/{eventId}')
     .onCreate(async (snap) => {

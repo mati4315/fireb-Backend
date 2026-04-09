@@ -16,6 +16,11 @@ async function upsertSurveyModuleConfig() {
     {
       surveys: {
         enabled: true
+      },
+      likes: {
+        enabled: true,
+        newsEnabled: true,
+        communityEnabled: true
       }
     },
     { merge: true }

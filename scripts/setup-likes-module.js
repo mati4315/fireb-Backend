@@ -3,21 +3,18 @@ require('dotenv').config();
 
 const serviceAccount = require(`../${process.env.FIREBASE_SERVICE_ACCOUNT_KEY_PATH}`);
 
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  projectId: process.env.FIREBASE_PROJECT_ID
-});
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+    projectId: process.env.FIREBASE_PROJECT_ID
+  });
+}
 
 const db = admin.firestore();
 
-async function upsertCommentsModuleConfig() {
+async function upsertLikesModuleConfig() {
   await db.collection('_config').doc('modules').set(
     {
-      comments: {
-        enabled: true,
-        newsEnabled: true,
-        communityEnabled: true
-      },
       likes: {
         enabled: true,
         newsEnabled: true,
@@ -30,12 +27,12 @@ async function upsertCommentsModuleConfig() {
 
 async function run() {
   try {
-    console.log('Setting up comments module configuration...');
-    await upsertCommentsModuleConfig();
-    console.log('Comments module setup completed.');
+    console.log('Setting up likes module configuration...');
+    await upsertLikesModuleConfig();
+    console.log('Likes module setup completed.');
     process.exit(0);
   } catch (error) {
-    console.error('Comments module setup failed:', error);
+    console.error('Likes module setup failed:', error);
     process.exit(1);
   }
 }
