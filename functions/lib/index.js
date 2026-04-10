@@ -998,7 +998,8 @@ exports.uploadCommunityImageToHosting = functions.https.onCall(async (data, cont
     }
     const relativePath = sanitizePathSegment(relativePathRaw).replace(/^imagenes\//, '');
     const allowedPrefix = `posts/${userId}/`;
-    if (!relativePath.startsWith(allowedPrefix)) {
+    const allowedAvatarPrefix = `avatars/${userId}/`;
+    if (!relativePath.startsWith(allowedPrefix) && !relativePath.startsWith(allowedAvatarPrefix)) {
         throw new functions.https.HttpsError('permission-denied', 'Ruta de subida no permitida.');
     }
     const ext = path.posix.extname(relativePath).toLowerCase();

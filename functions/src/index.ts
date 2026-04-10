@@ -1,4 +1,4 @@
-﻿import * as functions from 'firebase-functions';
+import * as functions from 'firebase-functions';
 import * as admin from 'firebase-admin';
 import * as path from 'path';
 import * as os from 'os';
@@ -1221,7 +1221,8 @@ export const uploadCommunityImageToHosting = functions.https.onCall(async (data,
 
   const relativePath = sanitizePathSegment(relativePathRaw).replace(/^imagenes\//, '');
   const allowedPrefix = `posts/${userId}/`;
-  if (!relativePath.startsWith(allowedPrefix)) {
+  const allowedAvatarPrefix = `avatars/${userId}/`;
+  if (!relativePath.startsWith(allowedPrefix) && !relativePath.startsWith(allowedAvatarPrefix)) {
     throw new functions.https.HttpsError('permission-denied', 'Ruta de subida no permitida.');
   }
 
