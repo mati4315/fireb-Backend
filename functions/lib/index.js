@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.onAdEventCreated = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onUserUpdated = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = void 0;
+exports.onAdEventCreated = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onUserUpdated = exports.syncPublicUserProfile = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = void 0;
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const path = require("path");
@@ -30,6 +30,9 @@ const LOTTERY_MIGRATION_PAGE_SIZE = 400;
 const LOTTERY_MIGRATION_BATCH_SIZE = 400;
 const MAX_LOTTERY_DRAW_ENTRIES = 5000;
 const COMMUNITY_THUMBNAIL_BUCKET = process.env.COMMUNITY_IMAGES_BUCKET || 'cdeluar-ddefc-storage';
+const USERNAME_MIN_LENGTH = 3;
+const USERNAME_MAX_LENGTH = 30;
+const USERNAME_REGEX = /^[a-z0-9_]+$/;
 const buildCommentRef = (contentId, commentId) => db.collection('content').doc(contentId).collection('comments').doc(commentId);
 const inferContentModule = (contentData) => {
     if ((contentData === null || contentData === void 0 ? void 0 : contentData.module) === 'news' || (contentData === null || contentData === void 0 ? void 0 : contentData.type) === 'news') {
@@ -130,6 +133,115 @@ const assertStaffUser = async (authContext) => {
     if (isStaffRole(role))
         return;
     throw new functions.https.HttpsError('permission-denied', 'Solo staff puede ejecutar esta accion.');
+};
+const sanitizeBoundedString = (value, maxLength) => {
+    if (typeof value !== 'string')
+        return '';
+    return value.trim().slice(0, maxLength);
+};
+const normalizeUsernameCandidate = (value) => {
+    const raw = sanitizeBoundedString(value, USERNAME_MAX_LENGTH);
+    return raw
+        .toLowerCase()
+        .replace(/[^a-z0-9_]/g, '_')
+        .replace(/_+/g, '_')
+        .replace(/^_+|_+$/g, '');
+};
+const buildFallbackUsername = (userId) => {
+    const compactUid = userId.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20);
+    const base = `user_${compactUid || 'perfil'}`;
+    const trimmed = base.slice(0, USERNAME_MAX_LENGTH);
+    return trimmed.length >= USERNAME_MIN_LENGTH
+        ? trimmed
+        : `${trimmed}${'x'.repeat(USERNAME_MIN_LENGTH - trimmed.length)}`;
+};
+const normalizeUsernameStrict = (value) => {
+    const username = normalizeUsernameCandidate(value);
+    if (username.length < USERNAME_MIN_LENGTH ||
+        username.length > USERNAME_MAX_LENGTH ||
+        !USERNAME_REGEX.test(username)) {
+        throw new functions.https.HttpsError('invalid-argument', `username debe tener entre ${USERNAME_MIN_LENGTH} y ${USERNAME_MAX_LENGTH} caracteres, solo [a-z0-9_].`);
+    }
+    return { username, usernameLower: username };
+};
+const normalizeUsernameLoose = (userId, userData) => {
+    const fromLower = typeof (userData === null || userData === void 0 ? void 0 : userData.usernameLower) === 'string'
+        ? normalizeUsernameCandidate(userData.usernameLower)
+        : '';
+    if (fromLower.length >= USERNAME_MIN_LENGTH &&
+        fromLower.length <= USERNAME_MAX_LENGTH &&
+        USERNAME_REGEX.test(fromLower)) {
+        return { username: fromLower, usernameLower: fromLower };
+    }
+    const fromUsername = normalizeUsernameCandidate(userData === null || userData === void 0 ? void 0 : userData.username);
+    if (fromUsername.length >= USERNAME_MIN_LENGTH &&
+        fromUsername.length <= USERNAME_MAX_LENGTH &&
+        USERNAME_REGEX.test(fromUsername)) {
+        return { username: fromUsername, usernameLower: fromUsername };
+    }
+    const fallback = buildFallbackUsername(userId);
+    return { username: fallback, usernameLower: fallback };
+};
+const sanitizeOptionalUrl = (value, fieldName) => {
+    const raw = sanitizeBoundedString(value, 240);
+    if (!raw)
+        return '';
+    const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+    try {
+        const parsed = new URL(withProtocol);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+            throw new Error('unsupported-protocol');
+        }
+        return parsed.toString().slice(0, 240);
+    }
+    catch (_a) {
+        throw new functions.https.HttpsError('invalid-argument', `${fieldName} debe ser una URL valida (http/https).`);
+    }
+};
+const readStatValue = (stats, key) => {
+    var _a;
+    const raw = Number((_a = stats[key]) !== null && _a !== void 0 ? _a : 0);
+    if (!Number.isFinite(raw))
+        return 0;
+    return Math.max(0, Math.floor(raw));
+};
+const ensureUserStats = (value) => {
+    const stats = (value && typeof value === 'object'
+        ? value
+        : {});
+    return {
+        postsCount: readStatValue(stats, 'postsCount'),
+        followersCount: readStatValue(stats, 'followersCount'),
+        followingCount: readStatValue(stats, 'followingCount'),
+        likesTotalCount: readStatValue(stats, 'likesTotalCount')
+    };
+};
+const ensureUserSettings = (value) => {
+    if (!value || typeof value !== 'object') {
+        return {
+            notificationsEnabled: true,
+            privateAccount: false
+        };
+    }
+    const settings = value;
+    return Object.assign(Object.assign({}, settings), { notificationsEnabled: settings.notificationsEnabled !== false, privateAccount: settings.privateAccount === true });
+};
+const buildPublicUserProfile = (userId, userData) => {
+    const { username, usernameLower } = normalizeUsernameLoose(userId, userData);
+    const stats = ensureUserStats(userData === null || userData === void 0 ? void 0 : userData.stats);
+    return {
+        userId,
+        username,
+        usernameLower,
+        nombre: sanitizeBoundedString(userData === null || userData === void 0 ? void 0 : userData.nombre, 120) || 'Usuario',
+        bio: sanitizeBoundedString(userData === null || userData === void 0 ? void 0 : userData.bio, 280),
+        location: sanitizeBoundedString(userData === null || userData === void 0 ? void 0 : userData.location, 120),
+        website: sanitizeBoundedString(userData === null || userData === void 0 ? void 0 : userData.website, 240),
+        profilePictureUrl: sanitizeBoundedString(userData === null || userData === void 0 ? void 0 : userData.profilePictureUrl, 1200),
+        isVerified: (userData === null || userData === void 0 ? void 0 : userData.isVerified) === true,
+        stats,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    };
 };
 const propagateUserFields = async (target, userId, updateData) => {
     let baseQuery;
@@ -498,6 +610,153 @@ exports.onFollowRemoved = functions.firestore
         console.error(`Unfollow decrement failed`, error);
     }
 });
+exports.updateMyProfile = functions.https.onCall(async (data, context) => {
+    var _a, _b;
+    const userId = (_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid;
+    if (!userId) {
+        throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para actualizar tu perfil.');
+    }
+    const authToken = (((_b = context.auth) === null || _b === void 0 ? void 0 : _b.token) || {});
+    const emailFromToken = typeof authToken.email === 'string' ? authToken.email : '';
+    const { username, usernameLower } = normalizeUsernameStrict(data === null || data === void 0 ? void 0 : data.username);
+    const nombre = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.nombre, 120);
+    if (!nombre) {
+        throw new functions.https.HttpsError('invalid-argument', 'nombre es obligatorio.');
+    }
+    const bio = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.bio, 280);
+    const location = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.location, 120);
+    const website = sanitizeOptionalUrl(data === null || data === void 0 ? void 0 : data.website, 'website');
+    const profilePictureUrl = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.profilePictureUrl, 1200);
+    const userRef = db.collection('users').doc(userId);
+    const userPublicRef = db.collection('users_public').doc(userId);
+    const usernameRef = db.collection('usernames').doc(usernameLower);
+    const result = await db.runTransaction(async (tx) => {
+        var _a, _b;
+        const userSnap = await tx.get(userRef);
+        const currentData = userSnap.exists
+            ? (userSnap.data() || {})
+            : {};
+        const currentIdentity = normalizeUsernameLoose(userId, currentData);
+        const previousUsernameLower = currentIdentity.usernameLower;
+        const previousUsernameRef = db.collection('usernames').doc(previousUsernameLower);
+        const usernameSnap = await tx.get(usernameRef);
+        if (usernameSnap.exists && ((_a = usernameSnap.data()) === null || _a === void 0 ? void 0 : _a.uid) !== userId) {
+            throw new functions.https.HttpsError('already-exists', 'Ese username ya esta en uso.');
+        }
+        if (previousUsernameLower !== usernameLower) {
+            const previousUsernameSnap = await tx.get(previousUsernameRef);
+            if (previousUsernameSnap.exists && ((_b = previousUsernameSnap.data()) === null || _b === void 0 ? void 0 : _b.uid) === userId) {
+                tx.delete(previousUsernameRef);
+            }
+        }
+        const mergedStats = ensureUserStats(currentData.stats);
+        const mergedSettings = ensureUserSettings(currentData.settings);
+        const nextProfile = {
+            id: userId,
+            email: sanitizeBoundedString(currentData.email, 255) || emailFromToken,
+            nombre,
+            username,
+            usernameLower,
+            bio,
+            location,
+            website,
+            profilePictureUrl,
+            rol: typeof currentData.rol === 'string' ? currentData.rol : 'user',
+            isVerified: currentData.isVerified === true,
+            stats: mergedStats,
+            settings: mergedSettings,
+            createdAt: currentData.createdAt || admin.firestore.FieldValue.serverTimestamp(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        };
+        tx.set(userRef, nextProfile, { merge: true });
+        tx.set(usernameRef, {
+            uid: userId,
+            username,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+        const publicProfile = buildPublicUserProfile(userId, nextProfile);
+        tx.set(userPublicRef, publicProfile, { merge: true });
+        return {
+            profile: {
+                id: userId,
+                email: nextProfile.email,
+                nombre,
+                username,
+                usernameLower,
+                bio,
+                location,
+                website,
+                profilePictureUrl,
+                rol: nextProfile.rol,
+                isVerified: nextProfile.isVerified,
+                stats: mergedStats,
+                settings: mergedSettings
+            },
+            publicProfile: {
+                userId,
+                username,
+                usernameLower,
+                nombre,
+                bio,
+                location,
+                website,
+                profilePictureUrl,
+                isVerified: nextProfile.isVerified,
+                stats: mergedStats
+            }
+        };
+    });
+    return Object.assign({ ok: true }, result);
+});
+exports.syncPublicUserProfile = functions.firestore
+    .document('users/{userId}')
+    .onWrite(async (change, context) => {
+    const { userId } = context.params;
+    if (!change.after.exists) {
+        const beforeData = change.before.data() || {};
+        const previousIdentity = normalizeUsernameLoose(userId, beforeData);
+        const previousUsernameRef = db.collection('usernames').doc(previousIdentity.usernameLower);
+        await db.runTransaction(async (tx) => {
+            var _a;
+            const previousUsernameSnap = await tx.get(previousUsernameRef);
+            if (previousUsernameSnap.exists && ((_a = previousUsernameSnap.data()) === null || _a === void 0 ? void 0 : _a.uid) === userId) {
+                tx.delete(previousUsernameRef);
+            }
+            tx.delete(db.collection('users_public').doc(userId));
+        });
+        return null;
+    }
+    const afterData = change.after.data() || {};
+    const beforeData = change.before.exists ? (change.before.data() || {}) : {};
+    const currentIdentity = normalizeUsernameLoose(userId, afterData);
+    const previousIdentity = normalizeUsernameLoose(userId, beforeData);
+    const publicProfile = buildPublicUserProfile(userId, afterData);
+    const currentUsernameRef = db.collection('usernames').doc(currentIdentity.usernameLower);
+    const previousUsernameRef = db.collection('usernames').doc(previousIdentity.usernameLower);
+    const usersPublicRef = db.collection('users_public').doc(userId);
+    await db.runTransaction(async (tx) => {
+        var _a, _b;
+        const currentUsernameSnap = await tx.get(currentUsernameRef);
+        if (!currentUsernameSnap.exists || ((_a = currentUsernameSnap.data()) === null || _a === void 0 ? void 0 : _a.uid) === userId) {
+            tx.set(currentUsernameRef, {
+                uid: userId,
+                username: currentIdentity.username,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+        }
+        else {
+            console.warn(`Username collision detected for ${currentIdentity.usernameLower}. Keeping existing owner.`);
+        }
+        if (previousIdentity.usernameLower !== currentIdentity.usernameLower) {
+            const previousUsernameSnap = await tx.get(previousUsernameRef);
+            if (previousUsernameSnap.exists && ((_b = previousUsernameSnap.data()) === null || _b === void 0 ? void 0 : _b.uid) === userId) {
+                tx.delete(previousUsernameRef);
+            }
+        }
+        tx.set(usersPublicRef, publicProfile, { merge: true });
+    });
+    return null;
+});
 // 3. User Updates (PropagaciÃ³n desnormalizada)
 exports.onUserUpdated = functions.firestore
     .document('users/{userId}')
@@ -508,7 +767,8 @@ exports.onUserUpdated = functions.firestore
     try {
         const nameChanged = beforeData.nombre !== afterData.nombre;
         const pictureChanged = beforeData.profilePictureUrl !== afterData.profilePictureUrl;
-        if (!nameChanged && !pictureChanged)
+        const usernameChanged = beforeData.username !== afterData.username;
+        if (!nameChanged && !pictureChanged && !usernameChanged)
             return;
         const postUpdateData = {};
         const commentsUpdateData = {};
@@ -519,6 +779,10 @@ exports.onUserUpdated = functions.firestore
         if (pictureChanged) {
             postUpdateData.userProfilePicUrl = afterData.profilePictureUrl || '';
             commentsUpdateData.userProfilePicUrl = afterData.profilePictureUrl || '';
+        }
+        if (usernameChanged) {
+            const normalizedIdentity = normalizeUsernameLoose(userId, afterData);
+            postUpdateData.userUsername = normalizedIdentity.usernameLower;
         }
         const [postsUpdated, commentsUpdated, repliesUpdated] = await Promise.all([
             Object.keys(postUpdateData).length > 0

@@ -319,10 +319,60 @@ service cloud.firestore {
       );
     }
 
+    function isOwnUser(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidUserEditableFields() {
+      return request.resource.data.nombre is string &&
+        request.resource.data.nombre.size() > 0 &&
+        request.resource.data.nombre.size() <= 120 &&
+        request.resource.data.username is string &&
+        request.resource.data.username.size() >= 3 &&
+        request.resource.data.username.size() <= 30 &&
+        request.resource.data.username.matches('^[a-z0-9_]+$') &&
+        request.resource.data.usernameLower is string &&
+        request.resource.data.usernameLower == request.resource.data.username &&
+        request.resource.data.bio is string &&
+        request.resource.data.bio.size() <= 280 &&
+        request.resource.data.location is string &&
+        request.resource.data.location.size() <= 120 &&
+        request.resource.data.website is string &&
+        request.resource.data.website.size() <= 240 &&
+        request.resource.data.profilePictureUrl is string &&
+        request.resource.data.profilePictureUrl.size() <= 1200;
+    }
+
+    function keepsProtectedUserFields() {
+      return request.resource.data.id == resource.data.id &&
+        request.resource.data.email == resource.data.email &&
+        request.resource.data.rol == resource.data.rol &&
+        request.resource.data.stats == resource.data.stats &&
+        request.resource.data.settings == resource.data.settings &&
+        request.resource.data.isVerified == resource.data.isVerified &&
+        request.resource.data.createdAt == resource.data.createdAt;
+    }
+
     // Users: private read, self write
     match /users/{userId} {
-      allow read: if request.auth.uid == userId || isAdmin();
-      allow write: if request.auth.uid == userId && !('rol' in request.resource.data);
+      allow read: if isOwnUser(userId) || isAdmin();
+      allow create: if isAdmin();
+      allow update: if isAdmin() || (
+        isOwnUser(userId) &&
+        isValidUserEditableFields() &&
+        keepsProtectedUserFields()
+      );
+      allow delete: if isAdmin();
+    }
+
+    match /users_public/{userId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    match /usernames/{usernameLower} {
+      allow read: if true;
+      allow write: if false;
     }
 
     // Content module
