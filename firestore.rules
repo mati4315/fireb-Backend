@@ -196,11 +196,11 @@ service cloud.firestore {
     }
 
     function isValidCommentText(data) {
-      return data.text is string && data.text.size() > 0 && data.text.size() <= 500;
+      return data.text is string && data.text.size() > 0 && data.text.size() <= 1000;
     }
 
     function isValidReplyText(data) {
-      return data.text is string && data.text.size() > 0 && data.text.size() <= 300;
+      return data.text is string && data.text.size() > 0 && data.text.size() <= 600;
     }
 
     function isValidCommentCreate(data, contentId) {
@@ -453,6 +453,11 @@ service cloud.firestore {
         allow read: if true;
         allow create, update, delete: if false;
       }
+    }
+
+    match /_content_slugs/{slugKey} {
+      allow read: if true;
+      allow write: if false;
     }
 
     // Sync control (admin only)

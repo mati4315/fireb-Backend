@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.onAdEventCreated = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onUserUpdated = exports.syncPublicUserProfile = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = void 0;
+exports.onAdEventCreated = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = void 0;
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const path = require("path");
@@ -33,12 +33,33 @@ const COMMUNITY_THUMBNAIL_BUCKET = process.env.COMMUNITY_IMAGES_BUCKET || 'cdelu
 const USERNAME_MIN_LENGTH = 3;
 const USERNAME_MAX_LENGTH = 30;
 const USERNAME_REGEX = /^[a-z0-9_]+$/;
+const CONTENT_SLUG_MAX_LENGTH = 96;
 const buildCommentRef = (contentId, commentId) => db.collection('content').doc(contentId).collection('comments').doc(commentId);
 const inferContentModule = (contentData) => {
     if ((contentData === null || contentData === void 0 ? void 0 : contentData.module) === 'news' || (contentData === null || contentData === void 0 ? void 0 : contentData.type) === 'news') {
         return 'news';
     }
     return 'community';
+};
+const normalizeContentSlug = (value) => {
+    const raw = typeof value === 'string' ? value : '';
+    const normalized = raw
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .replace(/-+/g, '-');
+    const trimmed = normalized.slice(0, CONTENT_SLUG_MAX_LENGTH).replace(/-+$/g, '');
+    return trimmed || 'contenido';
+};
+const buildContentSlugKey = (moduleName, slug) => `${moduleName}__${slug}`;
+const buildContentSlugBase = (contentData) => {
+    const title = typeof (contentData === null || contentData === void 0 ? void 0 : contentData.titulo) === 'string' ? contentData.titulo.trim() : '';
+    if (title)
+        return normalizeContentSlug(title);
+    const moduleName = inferContentModule(contentData);
+    return moduleName === 'news' ? 'noticia' : 'publicacion';
 };
 const isLikeModuleEnabledForContent = (modulesConfig, moduleName) => {
     var _a, _b, _c, _d;
@@ -802,6 +823,99 @@ exports.onUserUpdated = functions.firestore
     }
 });
 // 4. Content Tracking
+exports.onContentSlugSync = functions.firestore
+    .document('content/{contentId}')
+    .onWrite(async (change, context) => {
+    if (!change.after.exists)
+        return null;
+    const contentRef = change.after.ref;
+    const beforeData = change.before.exists ? change.before.data() || {} : {};
+    const afterData = change.after.data() || {};
+    const beforeSlug = typeof beforeData.slug === 'string' ? beforeData.slug.trim() : '';
+    const afterSlug = typeof afterData.slug === 'string' ? afterData.slug.trim() : '';
+    const beforeModule = change.before.exists ? inferContentModule(beforeData) : null;
+    const afterModule = inferContentModule(afterData);
+    const shouldSync = !change.before.exists ||
+        !afterSlug ||
+        beforeSlug !== afterSlug ||
+        beforeModule !== afterModule;
+    if (!shouldSync)
+        return null;
+    try {
+        await db.runTransaction(async (transaction) => {
+            var _a;
+            const freshSnapshot = await transaction.get(contentRef);
+            if (!freshSnapshot.exists)
+                return;
+            const freshData = freshSnapshot.data() || {};
+            const freshModule = inferContentModule(freshData);
+            const existingSlugRaw = typeof freshData.slug === 'string' ? freshData.slug.trim() : '';
+            if (existingSlugRaw) {
+                const normalizedExistingSlug = normalizeContentSlug(existingSlugRaw);
+                const existingSlugKey = buildContentSlugKey(freshModule, normalizedExistingSlug);
+                transaction.set(db.collection('_content_slugs').doc(existingSlugKey), {
+                    contentId: freshSnapshot.id,
+                    module: freshModule,
+                    slug: normalizedExistingSlug,
+                    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                }, { merge: true });
+                const normalizedBase = buildContentSlugBase(freshData);
+                const syncUpdate = {};
+                if (freshData.slug !== normalizedExistingSlug)
+                    syncUpdate.slug = normalizedExistingSlug;
+                if (freshData.slugBase !== normalizedBase)
+                    syncUpdate.slugBase = normalizedBase;
+                if (freshData.slugModule !== freshModule)
+                    syncUpdate.slugModule = freshModule;
+                if (Object.keys(syncUpdate).length > 0) {
+                    transaction.set(contentRef, syncUpdate, { merge: true });
+                }
+                return;
+            }
+            const slugBase = buildContentSlugBase(freshData);
+            let nextSlug = slugBase;
+            let attempt = 2;
+            while (true) {
+                const slugKey = buildContentSlugKey(freshModule, nextSlug);
+                const slugRef = db.collection('_content_slugs').doc(slugKey);
+                const slugSnapshot = await transaction.get(slugRef);
+                if (!slugSnapshot.exists) {
+                    transaction.set(contentRef, {
+                        slug: nextSlug,
+                        slugBase,
+                        slugModule: freshModule
+                    }, { merge: true });
+                    transaction.set(slugRef, {
+                        contentId: freshSnapshot.id,
+                        module: freshModule,
+                        slug: nextSlug,
+                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                    }, { merge: true });
+                    return;
+                }
+                const mappedId = String(((_a = slugSnapshot.data()) === null || _a === void 0 ? void 0 : _a.contentId) || '').trim();
+                if (mappedId === freshSnapshot.id) {
+                    transaction.set(contentRef, {
+                        slug: nextSlug,
+                        slugBase,
+                        slugModule: freshModule
+                    }, { merge: true });
+                    return;
+                }
+                const suffix = `-${attempt}`;
+                const allowedBaseLength = Math.max(1, CONTENT_SLUG_MAX_LENGTH - suffix.length);
+                const shortenedBase = slugBase.slice(0, allowedBaseLength).replace(/-+$/g, '') || 'contenido';
+                nextSlug = `${shortenedBase}${suffix}`;
+                attempt += 1;
+            }
+        });
+    }
+    catch (error) {
+        console.error(`Slug sync failed for content ${context.params.contentId}:`, error);
+    }
+    return null;
+});
 exports.onContentCreated = functions.firestore
     .document('content/{contentId}')
     .onCreate(async (snap, context) => {

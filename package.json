@@ -19,6 +19,8 @@
     "test:lottery-rules": "node scripts/test-lottery-rules.js",
     "backfill:content-module": "node scripts/backfill-content-module.js",
     "backfill:content-module:dry": "node scripts/backfill-content-module.js --dry-run",
+    "backfill:content-slugs": "node scripts/backfill-content-slugs.js",
+    "backfill:content-slugs:dry": "node scripts/backfill-content-slugs.js --dry-run",
     "backfill:comment-counters": "node scripts/backfill-comment-counters.js",
     "backfill:comment-counters:dry": "node scripts/backfill-comment-counters.js --dry-run",
     "backfill:like-counters": "node scripts/backfill-like-counters.js",
