@@ -54,6 +54,63 @@ const normalizeContentSlug = (value) => {
     return trimmed || 'contenido';
 };
 const buildContentSlugKey = (moduleName, slug) => `${moduleName}__${slug}`;
+const normalizeNewsPublicIdScalar = (value) => {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        const parsed = Math.floor(value);
+        return parsed > 0 ? String(parsed) : '';
+    }
+    if (typeof value === 'string') {
+        const raw = value.trim().replace(/^id:?/i, '');
+        if (!/^\d+$/.test(raw))
+            return '';
+        const parsed = Number(raw);
+        if (!Number.isFinite(parsed))
+            return '';
+        const normalized = Math.floor(parsed);
+        return normalized > 0 ? String(normalized) : '';
+    }
+    return '';
+};
+const normalizeNewsPublicId = (value) => {
+    const queue = [value];
+    while (queue.length > 0) {
+        const candidate = queue.shift();
+        const normalized = normalizeNewsPublicIdScalar(candidate);
+        if (normalized)
+            return normalized;
+        if (Array.isArray(candidate)) {
+            queue.push(...candidate);
+            continue;
+        }
+        if (candidate && typeof candidate === 'object') {
+            const record = candidate;
+            queue.push(record.publicId, record.postId, record.postID, record.id, record.value, record.rendered);
+        }
+    }
+    return '';
+};
+const buildContentPublicIdKey = (moduleName, publicId) => `${moduleName}__${publicId}`;
+const extractNewsPublicIdFromPayload = (payload) => {
+    var _a, _b, _c, _d;
+    const candidates = [
+        payload === null || payload === void 0 ? void 0 : payload.publicId,
+        payload === null || payload === void 0 ? void 0 : payload.postId,
+        payload === null || payload === void 0 ? void 0 : payload.postID,
+        payload === null || payload === void 0 ? void 0 : payload.id,
+        payload === null || payload === void 0 ? void 0 : payload.wpPostId,
+        payload === null || payload === void 0 ? void 0 : payload.wordpressId,
+        (_a = payload === null || payload === void 0 ? void 0 : payload.custom_fields) === null || _a === void 0 ? void 0 : _a.postId,
+        (_b = payload === null || payload === void 0 ? void 0 : payload.custom_fields) === null || _b === void 0 ? void 0 : _b.postID,
+        (_c = payload === null || payload === void 0 ? void 0 : payload.custom_fields) === null || _c === void 0 ? void 0 : _c.id,
+        (_d = payload === null || payload === void 0 ? void 0 : payload.custom_fields) === null || _d === void 0 ? void 0 : _d.wpPostId
+    ];
+    for (const candidate of candidates) {
+        const normalized = normalizeNewsPublicId(candidate);
+        if (normalized)
+            return normalized;
+    }
+    return '';
+};
 const buildContentSlugBase = (contentData) => {
     const title = typeof (contentData === null || contentData === void 0 ? void 0 : contentData.titulo) === 'string' ? contentData.titulo.trim() : '';
     if (title)
@@ -835,10 +892,17 @@ exports.onContentSlugSync = functions.firestore
     const afterSlug = typeof afterData.slug === 'string' ? afterData.slug.trim() : '';
     const beforeModule = change.before.exists ? inferContentModule(beforeData) : null;
     const afterModule = inferContentModule(afterData);
+    const beforePublicId = beforeModule === 'news'
+        ? extractNewsPublicIdFromPayload(beforeData)
+        : '';
+    const afterPublicId = afterModule === 'news'
+        ? extractNewsPublicIdFromPayload(afterData)
+        : '';
     const shouldSync = !change.before.exists ||
         !afterSlug ||
         beforeSlug !== afterSlug ||
-        beforeModule !== afterModule;
+        beforeModule !== afterModule ||
+        beforePublicId !== afterPublicId;
     if (!shouldSync)
         return null;
     try {
@@ -849,6 +913,9 @@ exports.onContentSlugSync = functions.firestore
                 return;
             const freshData = freshSnapshot.data() || {};
             const freshModule = inferContentModule(freshData);
+            const freshPublicId = freshModule === 'news'
+                ? extractNewsPublicIdFromPayload(freshData)
+                : '';
             const existingSlugRaw = typeof freshData.slug === 'string' ? freshData.slug.trim() : '';
             if (existingSlugRaw) {
                 const normalizedExistingSlug = normalizeContentSlug(existingSlugRaw);
@@ -867,6 +934,19 @@ exports.onContentSlugSync = functions.firestore
                     syncUpdate.slugBase = normalizedBase;
                 if (freshData.slugModule !== freshModule)
                     syncUpdate.slugModule = freshModule;
+                if (freshModule === 'news' && freshPublicId) {
+                    const numericPublicId = Number(freshPublicId);
+                    if (freshData.publicId !== freshPublicId)
+                        syncUpdate.publicId = freshPublicId;
+                    if (freshData.postId !== numericPublicId)
+                        syncUpdate.postId = numericPublicId;
+                    transaction.set(db.collection('_content_public_ids').doc(buildContentPublicIdKey(freshModule, freshPublicId)), {
+                        contentId: freshSnapshot.id,
+                        module: freshModule,
+                        publicId: freshPublicId,
+                        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                    }, { merge: true });
+                }
                 if (Object.keys(syncUpdate).length > 0) {
                     transaction.set(contentRef, syncUpdate, { merge: true });
                 }
@@ -880,11 +960,9 @@ exports.onContentSlugSync = functions.firestore
                 const slugRef = db.collection('_content_slugs').doc(slugKey);
                 const slugSnapshot = await transaction.get(slugRef);
                 if (!slugSnapshot.exists) {
-                    transaction.set(contentRef, {
-                        slug: nextSlug,
-                        slugBase,
-                        slugModule: freshModule
-                    }, { merge: true });
+                    transaction.set(contentRef, Object.assign({ slug: nextSlug, slugBase, slugModule: freshModule }, (freshModule === 'news' && freshPublicId
+                        ? { publicId: freshPublicId, postId: Number(freshPublicId) }
+                        : {})), { merge: true });
                     transaction.set(slugRef, {
                         contentId: freshSnapshot.id,
                         module: freshModule,
@@ -892,15 +970,30 @@ exports.onContentSlugSync = functions.firestore
                         createdAt: admin.firestore.FieldValue.serverTimestamp(),
                         updatedAt: admin.firestore.FieldValue.serverTimestamp()
                     }, { merge: true });
+                    if (freshModule === 'news' && freshPublicId) {
+                        transaction.set(db.collection('_content_public_ids').doc(buildContentPublicIdKey(freshModule, freshPublicId)), {
+                            contentId: freshSnapshot.id,
+                            module: freshModule,
+                            publicId: freshPublicId,
+                            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                        }, { merge: true });
+                    }
                     return;
                 }
                 const mappedId = String(((_a = slugSnapshot.data()) === null || _a === void 0 ? void 0 : _a.contentId) || '').trim();
                 if (mappedId === freshSnapshot.id) {
-                    transaction.set(contentRef, {
-                        slug: nextSlug,
-                        slugBase,
-                        slugModule: freshModule
-                    }, { merge: true });
+                    transaction.set(contentRef, Object.assign({ slug: nextSlug, slugBase, slugModule: freshModule }, (freshModule === 'news' && freshPublicId
+                        ? { publicId: freshPublicId, postId: Number(freshPublicId) }
+                        : {})), { merge: true });
+                    if (freshModule === 'news' && freshPublicId) {
+                        transaction.set(db.collection('_content_public_ids').doc(buildContentPublicIdKey(freshModule, freshPublicId)), {
+                            contentId: freshSnapshot.id,
+                            module: freshModule,
+                            publicId: freshPublicId,
+                            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                        }, { merge: true });
+                    }
                     return;
                 }
                 const suffix = `-${attempt}`;
@@ -994,6 +1087,8 @@ exports.onOfficialNewsReceived = functions.database
             if (!isNaN(parsedUpdate.getTime()))
                 updatedAtTs = admin.firestore.Timestamp.fromDate(parsedUpdate);
         }
+        const normalizedPostId = extractNewsPublicIdFromPayload(afterData);
+        const postIdNumber = normalizedPostId ? Number(normalizedPostId) : null;
         // Payload purificado e idempotente
         const firestorePayload = {
             type: 'news',
@@ -1001,6 +1096,8 @@ exports.onOfficialNewsReceived = functions.database
             module: 'news',
             externalId: newsId,
             externalSource: 'wordpress_plugin',
+            postId: postIdNumber,
+            publicId: normalizedPostId,
             titulo: afterData.titulo || 'Sin TÃ­tulo',
             descripcion: afterData.descripcion || '',
             images: Array.isArray(afterData.images) ? afterData.images : [],
@@ -1024,6 +1121,21 @@ exports.onOfficialNewsReceived = functions.database
         };
         // Set con merge asegura idempotencia (crea si no existe, actualiza si existe)
         await db.collection('content').doc(newsId).set(firestorePayload, { merge: true });
+        if (normalizedPostId) {
+            const publicKey = buildContentPublicIdKey('news', normalizedPostId);
+            await db
+                .collection('_content_public_ids')
+                .doc(publicKey)
+                .set({
+                contentId: newsId,
+                module: 'news',
+                publicId: normalizedPostId,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+        }
+        if (!normalizedPostId) {
+            console.warn(`News ${newsId} synced without postId/publicId`);
+        }
         console.log(`âœ… Noticia sincronizada en Firestore: ${newsId}`);
         return null;
     }

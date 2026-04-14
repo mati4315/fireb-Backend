@@ -460,6 +460,11 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    match /_content_public_ids/{publicKey} {
+      allow read: if true;
+      allow write: if false;
+    }
+
     // Sync control (admin only)
     match /_sync_control/{document=**} {
       allow read: if isAdmin();
