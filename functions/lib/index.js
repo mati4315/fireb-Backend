@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.onAdEventCreated = exports.purgeOldNotifications = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.markAllNotificationsRead = exports.markNotificationRead = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = void 0;
+exports.onAdEventCreated = exports.purgeOldNotifications = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.getUsersSocialConnections = exports.markAllNotificationsRead = exports.markNotificationRead = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = void 0;
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const path = require("path");
@@ -1333,6 +1333,41 @@ exports.markAllNotificationsRead = functions.https.onCall(async (_data, context)
     return {
         ok: true,
         updatedCount
+    };
+});
+exports.getUsersSocialConnections = functions.https.onCall(async (data, context) => {
+    await assertStaffUser(context.auth);
+    const rawUserIds = Array.isArray(data === null || data === void 0 ? void 0 : data.userIds) ? data.userIds : [];
+    const normalizedUserIds = rawUserIds
+        .map((value) => sanitizeBoundedString(value, 128))
+        .filter((value) => value.length > 0);
+    const userIds = Array.from(new Set(normalizedUserIds)).slice(0, 50);
+    if (userIds.length === 0) {
+        return {
+            ok: true,
+            records: {}
+        };
+    }
+    const records = {};
+    await Promise.all(userIds.map(async (uid) => {
+        try {
+            const userRecord = await admin.auth().getUser(uid);
+            const providerIds = Array.from(new Set((userRecord.providerData || [])
+                .map((provider) => sanitizeBoundedString(provider.providerId, 64))
+                .filter((providerId) => providerId.length > 0)));
+            records[uid] = { providerIds };
+        }
+        catch (error) {
+            if ((error === null || error === void 0 ? void 0 : error.code) === 'auth/user-not-found') {
+                records[uid] = { providerIds: [] };
+                return;
+            }
+            console.error(`Error loading auth providers for uid ${uid}:`, error);
+        }
+    }));
+    return {
+        ok: true,
+        records
     };
 });
 exports.syncPublicUserProfile = functions.firestore

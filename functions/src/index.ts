@@ -1700,6 +1700,51 @@ export const markAllNotificationsRead = functions.https.onCall(async (_data, con
   };
 });
 
+export const getUsersSocialConnections = functions.https.onCall(async (data, context) => {
+  await assertStaffUser(context.auth);
+
+  const rawUserIds = Array.isArray(data?.userIds) ? data.userIds : [];
+  const normalizedUserIds: string[] = rawUserIds
+    .map((value: unknown) => sanitizeBoundedString(value, 128))
+    .filter((value: string) => value.length > 0);
+  const userIds: string[] = Array.from(new Set(normalizedUserIds)).slice(0, 50);
+
+  if (userIds.length === 0) {
+    return {
+      ok: true,
+      records: {}
+    };
+  }
+
+  const records: Record<string, { providerIds: string[] }> = {};
+  await Promise.all(
+    userIds.map(async (uid) => {
+      try {
+        const userRecord = await admin.auth().getUser(uid);
+        const providerIds = Array.from(
+          new Set(
+            (userRecord.providerData || [])
+              .map((provider) => sanitizeBoundedString(provider.providerId, 64))
+              .filter((providerId) => providerId.length > 0)
+          )
+        );
+        records[uid] = { providerIds };
+      } catch (error: any) {
+        if (error?.code === 'auth/user-not-found') {
+          records[uid] = { providerIds: [] };
+          return;
+        }
+        console.error(`Error loading auth providers for uid ${uid}:`, error);
+      }
+    })
+  );
+
+  return {
+    ok: true,
+    records
+  };
+});
+
 export const syncPublicUserProfile = functions.firestore
   .document('users/{userId}')
   .onWrite(async (change, context) => {

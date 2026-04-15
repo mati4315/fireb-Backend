@@ -1,0 +1,251 @@
+GUIA TECNICA - NOTIFICACIONES Y PUSH (WEB + BASE ANDROID)
+Proyecto: cdeluar-ddefc
+Ubicacion backend principal: D:\FIREBASE\Backend\functions\src\index.ts
+
+==================================================
+1) OBJETIVO DEL MODULO
+==================================================
+Este modulo permite:
+- Notificaciones in-app (bandeja en Firestore).
+- Push inmediata via Firebase Cloud Messaging (FCM).
+- Compatibilidad futura para Android nativo sin cambiar la arquitectura base.
+
+Eventos cubiertos en v1:
+- like
+- comment
+- reply
+- follow
+
+Mensajes privados:
+- Fuera de alcance en v1.
+- Se recomienda agregarlo como nuevo tipo "message" mas adelante.
+
+==================================================
+2) ARQUITECTURA ACTUAL
+==================================================
+Flujo general:
+1. Se dispara un trigger (like/comment/reply/follow).
+2. Se valida que no sea auto-notificacion.
+3. Se valida modulo global de notifications activo.
+4. Se validan preferencias del receptor (global + por tipo).
+5. Se escribe/upserta documento en users/{uid}/notifications/{id}.
+6. Se envia push a users/{uid}/notification_devices.
+7. Se limpian tokens invalidos.
+
+Colecciones nuevas:
+- users/{uid}/notifications/{notificationId}
+- users/{uid}/notification_devices/{deviceId}
+
+Config global:
+- _config/modules.notifications.enabled
+
+Preferencias por usuario:
+- users/{uid}.settings.notificationsEnabled
+- users/{uid}.settings.notificationTypes.{likes,comments,replies,follows}
+
+==================================================
+3) FUNCIONES CLOUD IMPLEMENTADAS
+==================================================
+Triggers de dominio social:
+- onLikeAdded
+  - Actualiza contador (compat legacy).
+  - Genera notificacion de tipo like.
+  - Dedupe con id estable: like_{actorUserId}_{contentId}
+
+- onCommentCreated
+  - Actualiza commentsCount.
+  - Notifica al autor del contenido.
+
+- onReplyCreated
+  - Actualiza repliesCount.
+  - Notifica al autor del comentario padre.
+
+- onFollowAdded
+  - Actualiza followers/following.
+  - Notifica al usuario seguido.
+
+Callables de notificaciones:
+- updateNotificationPreferences
+  - Actualiza preferencias globales y por tipo.
+
+- registerNotificationDevice
+  - Registra token FCM y metadata del dispositivo (web/android).
+  - Habilita limpieza de duplicados por token.
+
+- unregisterNotificationDevice
+  - Elimina device por deviceId o token.
+
+- markNotificationRead
+  - Marca una notificacion como leida.
+
+- markAllNotificationsRead
+  - Marca toda la bandeja como leida por lotes.
+
+Tareas programadas:
+- purgeOldNotifications
+  - Purga notificaciones antiguas (retencion de 30 dias).
+
+Helpers clave:
+- ensureNotificationTypeSettings
+- isNotificationTypeEnabled
+- writeNotificationEvent
+- sendPushToNotificationDevices
+- loadNotificationActorIdentity
+- buildContentTargetFromDoc
+
+==================================================
+4) REGLAS DE NEGOCIO IMPORTANTES
+==================================================
+Reglas aplicadas:
+- Nunca auto-notificar (actor == recipient).
+- Si _config/modules.notifications.enabled == false, se corta flujo.
+- Si notificationsEnabled == false, no se crea ni push.
+- Si tipo desactivado por usuario, no se crea ni push.
+- unlike no borra historial de notificacion.
+
+Regla especial de likes:
+- Un unico documento por actor + contenido.
+- eventCount incrementa en relikes.
+- isRead vuelve a false en nuevo evento.
+
+==================================================
+5) FIRESTORE RULES Y SEGURIDAD
+==================================================
+Politica actual recomendada:
+- Cliente NO puede crear/editar notifications directo.
+- Cliente NO puede crear/editar notification_devices directo.
+- Escrituras sensibles solo por callable autenticada.
+
+Ventaja:
+- Evita falsificacion de notificaciones.
+- Evita abuso de tokens de terceros.
+
+Recomendacion:
+- Mantener este criterio para futuros tipos de evento.
+
+==================================================
+6) FRONTEND WEB (ESTADO ACTUAL)
+==================================================
+Elementos implementados:
+- Campana con contador de no leidas.
+- Popover de notificaciones rapidas.
+- Vista /notificaciones para configuracion completa.
+- Activacion push web con VAPID key.
+
+Dependencias de entorno:
+- VITE_FIREBASE_VAPID_KEY (obligatoria para push web).
+
+Archivo SW:
+- public/firebase-messaging-sw.js
+
+Si falla push web:
+- Verificar permiso bloqueado/denegado.
+- Rehabilitar permisos manualmente en navegador.
+- Confirmar dominio HTTPS.
+- Confirmar VAPID del mismo proyecto Firebase.
+
+==================================================
+7) ADAPTACION FUTURA A APP ANDROID
+==================================================
+Objetivo:
+- Reusar exactamente el backend actual.
+
+Que debe hacer Android:
+1. Obtener token FCM nativo.
+2. Llamar registerNotificationDevice con:
+   - platform: "android"
+   - token
+   - deviceId estable
+   - locale/timezone opcional
+3. Al logout, llamar unregisterNotificationDevice.
+4. Escuchar push y abrir targetPath equivalente en app.
+
+Mapeo sugerido de targetPath a deep links Android:
+- /noticia/{ref}/{slug}
+- /c/{ref}/{slug}
+- /perfil/{usernameOrUid}
+- /notificaciones
+
+Recomendacion Android:
+- Guardar ultimo token sincronizado para evitar llamados repetidos.
+- Reintentar registro si Firebase rota token.
+- En app foreground, refrescar bandeja local luego de push.
+
+==================================================
+8) FUTURAS MEJORAS RECOMENDADAS
+==================================================
+MVP siguiente:
+- Agregar tipo message (modulo chat futuro).
+- Agregar tipo mention (si luego hay @usuario).
+- Agregar agrupacion temporal (ej. 5 likes en 1 tarjeta).
+
+Escalabilidad:
+- Migrar funciones criticas a 2nd gen cuando convenga.
+- Separar notificaciones en archivo/modulo propio (service layer).
+- Agregar observabilidad (metricas por tipo y tasa de error push).
+
+UX:
+- Toggle por canal: in-app y push por separado.
+- Horario silencioso (quiet hours).
+- Resumen diario opcional.
+
+Datos:
+- Definir estado archived o soft-delete opcional.
+- Evaluar retencion configurable por entorno.
+
+==================================================
+9) CHECKLIST ANTI-ERRORES (DEPLOY Y OPERACION)
+==================================================
+Antes de deploy:
+- npm run build en functions
+- npm run build en frontend
+- Validar .env frontend con VAPID
+- Validar _config/modules.notifications.enabled
+
+Despues de deploy:
+- Probar con 2 usuarios:
+  - follow
+  - like
+  - comment
+  - reply
+- Verificar:
+  - aparece en popover/bandeja
+  - contador de no leidas correcto
+  - navegar al target correcto
+  - mark read funciona
+
+Errores comunes y causa:
+- "Permiso de notificaciones denegado"
+  - El navegador bloqueo permiso; se corrige manualmente.
+
+- "Registration failed - push service error"
+  - Permiso bloqueado, HTTPS ausente, VAPID incorrecta o mismatch de proyecto.
+
+- Push no llega pero bandeja si
+  - Token no registrado, token expirado o canal push bloqueado por navegador/red.
+
+- Notificaciones duplicadas de like
+  - Revisar notificationId estable y que no existan writers legacy fuera de callable.
+
+==================================================
+10) RECOMENDACIONES DE MANTENIMIENTO
+==================================================
+- No eliminar fields existentes sin migracion.
+- Mantener compatibilidad en payload de notificaciones.
+- Versionar cambios de schema si se agregan tipos nuevos.
+- Documentar cada nuevo tipo en esta guia.
+- Ejecutar pruebas de regresion social luego de cada deploy de functions.
+
+==================================================
+11) RESUMEN EJECUTIVO
+==================================================
+El sistema actual ya esta listo para:
+- Web in-app + web push.
+- Reuso directo por Android nativo.
+
+La clave para evitar problemas futuros:
+- Mantener reglas estrictas (solo callable en escrituras sensibles).
+- Reusar registro de device por plataforma.
+- Hacer validaciones de deploy con 2 usuarios en cada release.
+
+Fin del documento.
