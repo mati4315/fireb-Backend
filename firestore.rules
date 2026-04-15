@@ -158,6 +158,13 @@ service cloud.firestore {
       );
     }
 
+    function notificationsEnabled() {
+      return !modulesConfigExists() ||
+        !('notifications' in modulesConfig()) ||
+        !('enabled' in modulesConfig().notifications) ||
+        modulesConfig().notifications.enabled == true;
+    }
+
     function contentPath(contentId) {
       return /databases/$(database)/documents/content/$(contentId);
     }
@@ -314,6 +321,11 @@ service cloud.firestore {
             !('likes' in request.resource.data) ||
             !('likes' in resource.data) ||
             request.resource.data.likes == resource.data.likes
+          ) &&
+          (
+            !('notifications' in request.resource.data) ||
+            !('notifications' in resource.data) ||
+            request.resource.data.notifications == resource.data.notifications
           )
         )
       );
@@ -363,6 +375,16 @@ service cloud.firestore {
         keepsProtectedUserFields()
       );
       allow delete: if isAdmin();
+
+      match /notifications/{notificationId} {
+        allow read: if isOwnUser(userId) || isAdmin();
+        allow create, update, delete: if false;
+      }
+
+      match /notification_devices/{deviceId} {
+        allow read: if isOwnUser(userId) || isAdmin();
+        allow create, update, delete: if false;
+      }
     }
 
     match /users_public/{userId} {
@@ -478,7 +500,8 @@ service cloud.firestore {
           isAdmin() ||
           (
             !('comments' in request.resource.data) &&
-            !('likes' in request.resource.data)
+            !('likes' in request.resource.data) &&
+            !('notifications' in request.resource.data)
           )
         );
       allow update: if canWriteModulesConfig();

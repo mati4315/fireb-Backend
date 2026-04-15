@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.onAdEventCreated = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = void 0;
+exports.onAdEventCreated = exports.purgeOldNotifications = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.markAllNotificationsRead = exports.markNotificationRead = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = void 0;
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const path = require("path");
@@ -34,6 +34,19 @@ const USERNAME_MIN_LENGTH = 3;
 const USERNAME_MAX_LENGTH = 30;
 const USERNAME_REGEX = /^[a-z0-9_]+$/;
 const CONTENT_SLUG_MAX_LENGTH = 96;
+const NOTIFICATION_PAGE_SIZE = 300;
+const NOTIFICATION_RETENTION_DAYS = 30;
+const NOTIFICATION_DEVICE_ID_MAX_LENGTH = 120;
+const NOTIFICATION_TYPE_DEFAULTS = {
+    likes: true,
+    comments: true,
+    replies: true,
+    follows: true
+};
+const PERMANENT_FCM_TOKEN_ERROR_CODES = new Set([
+    'messaging/invalid-registration-token',
+    'messaging/registration-token-not-registered'
+]);
 const buildCommentRef = (contentId, commentId) => db.collection('content').doc(contentId).collection('comments').doc(commentId);
 const inferContentModule = (contentData) => {
     if ((contentData === null || contentData === void 0 ? void 0 : contentData.module) === 'news' || (contentData === null || contentData === void 0 ? void 0 : contentData.type) === 'news') {
@@ -127,6 +140,11 @@ const isLikeModuleEnabledForContent = (modulesConfig, moduleName) => {
     if (!likesEnabled)
         return false;
     return moduleName === 'news' ? likesNewsEnabled : likesCommunityEnabled;
+};
+const isNotificationsModuleEnabled = (modulesConfig) => {
+    var _a, _b;
+    const notificationsConfig = (_a = modulesConfig === null || modulesConfig === void 0 ? void 0 : modulesConfig.notifications) !== null && _a !== void 0 ? _a : {};
+    return (_b = notificationsConfig.enabled) !== null && _b !== void 0 ? _b : true;
 };
 const isLotteryModuleEnabled = (modulesConfig) => {
     var _a, _b;
@@ -260,6 +278,265 @@ const normalizeUsernameLoose = (userId, userData) => {
     const fallback = buildFallbackUsername(userId);
     return { username: fallback, usernameLower: fallback };
 };
+const toBoolean = (value, fallback) => typeof value === 'boolean' ? value : fallback;
+const ensureNotificationTypeSettings = (value) => {
+    const raw = (value && typeof value === 'object'
+        ? value
+        : {});
+    return {
+        likes: toBoolean(raw.likes, NOTIFICATION_TYPE_DEFAULTS.likes),
+        comments: toBoolean(raw.comments, NOTIFICATION_TYPE_DEFAULTS.comments),
+        replies: toBoolean(raw.replies, NOTIFICATION_TYPE_DEFAULTS.replies),
+        follows: toBoolean(raw.follows, NOTIFICATION_TYPE_DEFAULTS.follows)
+    };
+};
+const isNotificationTypeEnabled = (typeSettings, notificationType) => {
+    if (notificationType === 'like')
+        return typeSettings.likes;
+    if (notificationType === 'comment')
+        return typeSettings.comments;
+    if (notificationType === 'reply')
+        return typeSettings.replies;
+    return typeSettings.follows;
+};
+const buildStableHash = (value) => {
+    let hash = 0;
+    for (let i = 0; i < value.length; i += 1) {
+        hash = (hash * 31 + value.charCodeAt(i)) >>> 0;
+    }
+    return hash.toString(16);
+};
+const sanitizeNotificationDeviceId = (value, fallbackToken, platform) => {
+    const fromInput = typeof value === 'string' ? value.trim() : '';
+    const normalized = fromInput
+        .replace(/[^a-zA-Z0-9_-]/g, '_')
+        .slice(0, NOTIFICATION_DEVICE_ID_MAX_LENGTH);
+    if (normalized)
+        return normalized;
+    return `${platform}_${buildStableHash(fallbackToken)}`.slice(0, NOTIFICATION_DEVICE_ID_MAX_LENGTH);
+};
+const safeNotificationPath = (value, fallback) => {
+    if (typeof value !== 'string')
+        return fallback;
+    const trimmed = value.trim();
+    if (!trimmed.startsWith('/'))
+        return fallback;
+    return trimmed.slice(0, 240) || fallback;
+};
+const buildProfileTargetPath = (actorUsername, actorUserId) => {
+    const profileRef = actorUsername || actorUserId;
+    return `/perfil/${encodeURIComponent(profileRef)}`;
+};
+const buildContentTargetFromDoc = (contentId, contentData) => {
+    const contentModule = inferContentModule(contentData);
+    const contentSlug = normalizeContentSlug((contentData === null || contentData === void 0 ? void 0 : contentData.slug) || (contentData === null || contentData === void 0 ? void 0 : contentData.titulo) || contentId);
+    const contentPublicRef = contentModule === 'news'
+        ? (extractNewsPublicIdFromPayload(contentData) || contentId)
+        : contentId;
+    const targetPath = contentModule === 'news'
+        ? `/noticia/${encodeURIComponent(contentPublicRef)}/${encodeURIComponent(contentSlug)}`
+        : `/c/${encodeURIComponent(contentId)}/${encodeURIComponent(contentSlug)}`;
+    return {
+        contentId,
+        contentModule,
+        contentPublicRef,
+        contentSlug,
+        targetPath
+    };
+};
+const buildPushTextForNotification = (type, actorName) => {
+    const safeActor = actorName || 'Alguien';
+    if (type === 'like') {
+        return {
+            title: 'Nuevo me gusta',
+            body: `${safeActor} le dio me gusta a tu publicacion.`
+        };
+    }
+    if (type === 'comment') {
+        return {
+            title: 'Nuevo comentario',
+            body: `${safeActor} comento tu publicacion.`
+        };
+    }
+    if (type === 'reply') {
+        return {
+            title: 'Nueva respuesta',
+            body: `${safeActor} respondio tu comentario.`
+        };
+    }
+    return {
+        title: 'Nuevo seguidor',
+        body: `${safeActor} empezo a seguirte.`
+    };
+};
+const loadNotificationActorIdentity = async (actorUserId) => {
+    const [userPublicSnap, userPrivateSnap] = await Promise.all([
+        db.collection('users_public').doc(actorUserId).get(),
+        db.collection('users').doc(actorUserId).get()
+    ]);
+    const sourceData = userPublicSnap.exists
+        ? (userPublicSnap.data() || {})
+        : (userPrivateSnap.data() || {});
+    const { usernameLower } = normalizeUsernameLoose(actorUserId, sourceData);
+    const actorName = sanitizeBoundedString(sourceData === null || sourceData === void 0 ? void 0 : sourceData.nombre, 120) || 'Usuario';
+    const actorProfilePictureUrl = sanitizeBoundedString(sourceData === null || sourceData === void 0 ? void 0 : sourceData.profilePictureUrl, 1200);
+    return {
+        userId: actorUserId,
+        actorName,
+        actorUsername: usernameLower,
+        actorProfilePictureUrl
+    };
+};
+const sendPushToNotificationDevices = async (notificationRef, recipientUserId, notificationType, actorName, targetPath) => {
+    var _a;
+    const devicesSnap = await db.collection('users')
+        .doc(recipientUserId)
+        .collection('notification_devices')
+        .where('enabled', '==', true)
+        .get();
+    if (devicesSnap.empty)
+        return;
+    const tokenToDeviceRefs = new Map();
+    const uniqueTokens = [];
+    for (const deviceDoc of devicesSnap.docs) {
+        const token = sanitizeBoundedString((_a = deviceDoc.data()) === null || _a === void 0 ? void 0 : _a.token, 4096);
+        if (!token)
+            continue;
+        const existing = tokenToDeviceRefs.get(token) || [];
+        existing.push(deviceDoc.ref);
+        tokenToDeviceRefs.set(token, existing);
+        if (existing.length === 1)
+            uniqueTokens.push(token);
+    }
+    if (uniqueTokens.length === 0)
+        return;
+    const pushText = buildPushTextForNotification(notificationType, actorName);
+    const sendResult = await admin.messaging().sendEachForMulticast({
+        tokens: uniqueTokens,
+        notification: {
+            title: pushText.title,
+            body: pushText.body
+        },
+        data: {
+            notificationId: notificationRef.id,
+            type: notificationType,
+            targetPath
+        },
+        android: {
+            priority: 'high',
+            notification: {
+                clickAction: 'FLUTTER_NOTIFICATION_CLICK'
+            }
+        },
+        webpush: {
+            fcmOptions: {
+                link: targetPath
+            }
+        }
+    });
+    const refsToDelete = [];
+    sendResult.responses.forEach((response, index) => {
+        var _a;
+        if (response.success)
+            return;
+        const code = String(((_a = response.error) === null || _a === void 0 ? void 0 : _a.code) || '');
+        if (!PERMANENT_FCM_TOKEN_ERROR_CODES.has(code))
+            return;
+        const token = uniqueTokens[index];
+        const linkedRefs = tokenToDeviceRefs.get(token) || [];
+        refsToDelete.push(...linkedRefs);
+    });
+    if (refsToDelete.length === 0)
+        return;
+    const batch = db.batch();
+    for (const ref of refsToDelete) {
+        batch.delete(ref);
+    }
+    await batch.commit();
+};
+const writeNotificationEvent = async (input) => {
+    var _a, _b, _c, _d;
+    if (input.recipientUserId === input.actor.userId)
+        return;
+    const [modulesConfigSnap, recipientSnap] = await Promise.all([
+        db.collection('_config').doc('modules').get(),
+        db.collection('users').doc(input.recipientUserId).get()
+    ]);
+    if (!isNotificationsModuleEnabled(modulesConfigSnap.data()))
+        return;
+    if (!recipientSnap.exists)
+        return;
+    const recipientData = recipientSnap.data() || {};
+    const recipientSettings = ensureUserSettings(recipientData.settings);
+    const notificationsEnabled = recipientSettings.notificationsEnabled !== false;
+    if (!notificationsEnabled)
+        return;
+    const typeSettings = ensureNotificationTypeSettings(recipientSettings.notificationTypes);
+    if (!isNotificationTypeEnabled(typeSettings, input.type))
+        return;
+    const notificationsCollection = db.collection('users')
+        .doc(input.recipientUserId)
+        .collection('notifications');
+    const notificationRef = input.notificationId
+        ? notificationsCollection.doc(input.notificationId)
+        : notificationsCollection.doc();
+    if (input.notificationId) {
+        await db.runTransaction(async (tx) => {
+            var _a, _b, _c, _d, _e;
+            const existingSnap = await tx.get(notificationRef);
+            const existingData = existingSnap.data() || {};
+            const currentCountRaw = Number((_a = existingData.eventCount) !== null && _a !== void 0 ? _a : 1);
+            const currentCount = Number.isFinite(currentCountRaw) ? Math.max(1, Math.floor(currentCountRaw)) : 1;
+            tx.set(notificationRef, {
+                type: input.type,
+                recipientUserId: input.recipientUserId,
+                actorUserId: input.actor.userId,
+                actorName: input.actor.actorName,
+                actorUsername: input.actor.actorUsername,
+                actorProfilePictureUrl: input.actor.actorProfilePictureUrl,
+                contentId: ((_b = input.contentTarget) === null || _b === void 0 ? void 0 : _b.contentId) || '',
+                contentModule: ((_c = input.contentTarget) === null || _c === void 0 ? void 0 : _c.contentModule) || '',
+                contentPublicRef: ((_d = input.contentTarget) === null || _d === void 0 ? void 0 : _d.contentPublicRef) || '',
+                contentSlug: ((_e = input.contentTarget) === null || _e === void 0 ? void 0 : _e.contentSlug) || '',
+                commentId: input.commentId || '',
+                replyId: input.replyId || '',
+                targetPath: safeNotificationPath(input.targetPath, '/notificaciones'),
+                isRead: false,
+                readAt: null,
+                eventCount: existingSnap.exists ? currentCount + 1 : 1,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                lastEventAt: admin.firestore.FieldValue.serverTimestamp(),
+                createdAt: existingSnap.exists
+                    ? (existingData.createdAt || admin.firestore.FieldValue.serverTimestamp())
+                    : admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+        });
+    }
+    else {
+        await notificationRef.set({
+            type: input.type,
+            recipientUserId: input.recipientUserId,
+            actorUserId: input.actor.userId,
+            actorName: input.actor.actorName,
+            actorUsername: input.actor.actorUsername,
+            actorProfilePictureUrl: input.actor.actorProfilePictureUrl,
+            contentId: ((_a = input.contentTarget) === null || _a === void 0 ? void 0 : _a.contentId) || '',
+            contentModule: ((_b = input.contentTarget) === null || _b === void 0 ? void 0 : _b.contentModule) || '',
+            contentPublicRef: ((_c = input.contentTarget) === null || _c === void 0 ? void 0 : _c.contentPublicRef) || '',
+            contentSlug: ((_d = input.contentTarget) === null || _d === void 0 ? void 0 : _d.contentSlug) || '',
+            commentId: input.commentId || '',
+            replyId: input.replyId || '',
+            targetPath: safeNotificationPath(input.targetPath, '/notificaciones'),
+            isRead: false,
+            readAt: null,
+            eventCount: 1,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            lastEventAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+    }
+    await sendPushToNotificationDevices(notificationRef, input.recipientUserId, input.type, input.actor.actorName, safeNotificationPath(input.targetPath, '/notificaciones'));
+};
 const sanitizeOptionalUrl = (value, fieldName) => {
     const raw = sanitizeBoundedString(value, 240);
     if (!raw)
@@ -298,11 +575,12 @@ const ensureUserSettings = (value) => {
     if (!value || typeof value !== 'object') {
         return {
             notificationsEnabled: true,
-            privateAccount: false
+            privateAccount: false,
+            notificationTypes: Object.assign({}, NOTIFICATION_TYPE_DEFAULTS)
         };
     }
     const settings = value;
-    return Object.assign(Object.assign({}, settings), { notificationsEnabled: settings.notificationsEnabled !== false, privateAccount: settings.privateAccount === true });
+    return Object.assign(Object.assign({}, settings), { notificationsEnabled: settings.notificationsEnabled !== false, privateAccount: settings.privateAccount === true, notificationTypes: ensureNotificationTypeSettings(settings.notificationTypes) });
 };
 const buildPublicUserProfile = (userId, userData) => {
     const { username, usernameLower } = normalizeUsernameLoose(userId, userData);
@@ -455,14 +733,34 @@ const getHostingFtpConfig = () => {
 exports.onLikeAdded = functions.firestore
     .document('content/{contentId}/likes/{userId}')
     .onCreate(async (snap, context) => {
-    const { contentId } = context.params;
+    const { contentId, userId: actorUserId } = context.params;
     const likeData = snap.data() || {};
-    if (likeData.writer === LIKE_WRITER_CALLABLE)
-        return;
     try {
-        await db.collection('content').doc(contentId).update({
-            'stats.likesCount': admin.firestore.FieldValue.increment(1),
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        const contentRef = db.collection('content').doc(contentId);
+        const contentSnap = await contentRef.get();
+        if (!contentSnap.exists)
+            return;
+        const contentData = contentSnap.data() || {};
+        if (contentData.deletedAt != null)
+            return;
+        if (likeData.writer !== LIKE_WRITER_CALLABLE) {
+            await contentRef.update({
+                'stats.likesCount': admin.firestore.FieldValue.increment(1),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+        }
+        const recipientUserId = sanitizeBoundedString(contentData.userId, 128);
+        if (!recipientUserId)
+            return;
+        const actor = await loadNotificationActorIdentity(actorUserId);
+        const contentTarget = buildContentTargetFromDoc(contentId, contentData);
+        await writeNotificationEvent({
+            type: 'like',
+            recipientUserId,
+            actor,
+            notificationId: `like_${actorUserId}_${contentId}`,
+            contentTarget,
+            targetPath: contentTarget.targetPath
         });
         console.log(`âœ… Like +1 for ${contentId}`);
     }
@@ -557,17 +855,38 @@ exports.toggleContentLike = functions.https.onCall(async (data, context) => {
 exports.onCommentCreated = functions.firestore
     .document('content/{contentId}/comments/{commentId}')
     .onCreate(async (snap, context) => {
-    const { contentId } = context.params;
+    const { contentId, commentId } = context.params;
     const commentData = snap.data();
     if (!commentData || !commentData.userId || commentData.deletedAt != null)
         return;
     try {
-        await db.collection('content').doc(contentId).set({
+        const contentRef = db.collection('content').doc(contentId);
+        await contentRef.set({
             stats: {
                 commentsCount: admin.firestore.FieldValue.increment(1)
             },
             updatedAt: admin.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
+        const contentSnap = await contentRef.get();
+        if (!contentSnap.exists)
+            return;
+        const contentData = contentSnap.data() || {};
+        if (contentData.deletedAt != null)
+            return;
+        const recipientUserId = sanitizeBoundedString(contentData.userId, 128);
+        const actorUserId = sanitizeBoundedString(commentData.userId, 128);
+        if (!recipientUserId || !actorUserId)
+            return;
+        const actor = await loadNotificationActorIdentity(actorUserId);
+        const contentTarget = buildContentTargetFromDoc(contentId, contentData);
+        await writeNotificationEvent({
+            type: 'comment',
+            recipientUserId,
+            actor,
+            commentId,
+            contentTarget,
+            targetPath: contentTarget.targetPath
+        });
         console.log(`Comment +1 for ${contentId}`);
     }
     catch (error) {
@@ -603,17 +922,53 @@ exports.onCommentUpdated = functions.firestore
 exports.onReplyCreated = functions.firestore
     .document('content/{contentId}/comments/{commentId}/replies/{replyId}')
     .onCreate(async (snap, context) => {
-    const { contentId, commentId } = context.params;
+    const { contentId, commentId, replyId } = context.params;
     const replyData = snap.data();
     if (!replyData || !replyData.userId || replyData.deletedAt != null)
         return;
     try {
-        await buildCommentRef(contentId, commentId).set({
+        const commentRef = buildCommentRef(contentId, commentId);
+        await commentRef.set({
             stats: {
                 repliesCount: admin.firestore.FieldValue.increment(1)
             },
             updatedAt: admin.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
+        const [commentSnap, contentSnap] = await Promise.all([
+            commentRef.get(),
+            db.collection('content').doc(contentId).get()
+        ]);
+        if (!commentSnap.exists)
+            return;
+        const parentCommentData = commentSnap.data() || {};
+        if (parentCommentData.deletedAt != null)
+            return;
+        const recipientUserId = sanitizeBoundedString(parentCommentData.userId, 128);
+        const actorUserId = sanitizeBoundedString(replyData.userId, 128);
+        if (!recipientUserId || !actorUserId)
+            return;
+        const actor = await loadNotificationActorIdentity(actorUserId);
+        const fallbackModule = replyData.module === 'news'
+            ? 'news'
+            : 'community';
+        const contentTarget = contentSnap.exists
+            ? buildContentTargetFromDoc(contentId, contentSnap.data() || {})
+            : {
+                contentId,
+                contentModule: fallbackModule,
+                contentPublicRef: contentId,
+                contentSlug: normalizeContentSlug(contentId),
+                targetPath: `/c/${encodeURIComponent(contentId)}/${encodeURIComponent(normalizeContentSlug(contentId))}`
+            };
+        await writeNotificationEvent({
+            type: 'reply',
+            recipientUserId,
+            actor,
+            commentId,
+            replyId,
+            contentTarget,
+            targetPath: contentTarget.targetPath
+        });
         console.log(`Reply +1 for comment ${commentId}`);
     }
     catch (error) {
@@ -663,6 +1018,14 @@ exports.onFollowAdded = functions.firestore
             'stats.followingCount': admin.firestore.FieldValue.increment(1)
         });
         await batch.commit();
+        const actor = await loadNotificationActorIdentity(followerId);
+        const targetPath = buildProfileTargetPath(actor.actorUsername, actor.userId);
+        await writeNotificationEvent({
+            type: 'follow',
+            recipientUserId: userId,
+            actor,
+            targetPath
+        });
         console.log(`Follow +1: ${followerId} -> ${userId}`);
     }
     catch (error) {
@@ -785,6 +1148,192 @@ exports.updateMyProfile = functions.https.onCall(async (data, context) => {
         };
     });
     return Object.assign({ ok: true }, result);
+});
+exports.updateNotificationPreferences = functions.https.onCall(async (data, context) => {
+    var _a, _b;
+    const userId = (_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid;
+    if (!userId) {
+        throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para configurar notificaciones.');
+    }
+    const userRef = db.collection('users').doc(userId);
+    const userSnap = await userRef.get();
+    if (!userSnap.exists) {
+        throw new functions.https.HttpsError('not-found', 'No se encontro el perfil del usuario.');
+    }
+    const currentSettings = ensureUserSettings((_b = userSnap.data()) === null || _b === void 0 ? void 0 : _b.settings);
+    const currentTypes = ensureNotificationTypeSettings(currentSettings.notificationTypes);
+    const hasNotificationsEnabled = Object.prototype.hasOwnProperty.call(data || {}, 'notificationsEnabled');
+    const hasLikes = Object.prototype.hasOwnProperty.call(data || {}, 'likes');
+    const hasComments = Object.prototype.hasOwnProperty.call(data || {}, 'comments');
+    const hasReplies = Object.prototype.hasOwnProperty.call(data || {}, 'replies');
+    const hasFollows = Object.prototype.hasOwnProperty.call(data || {}, 'follows');
+    const nextSettings = Object.assign(Object.assign({}, currentSettings), { privateAccount: currentSettings.privateAccount === true, notificationsEnabled: hasNotificationsEnabled
+            ? data.notificationsEnabled === true
+            : currentSettings.notificationsEnabled !== false, notificationTypes: {
+            likes: hasLikes ? data.likes === true : currentTypes.likes,
+            comments: hasComments ? data.comments === true : currentTypes.comments,
+            replies: hasReplies ? data.replies === true : currentTypes.replies,
+            follows: hasFollows ? data.follows === true : currentTypes.follows
+        } });
+    await userRef.set({
+        settings: nextSettings,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    return {
+        ok: true,
+        settings: nextSettings
+    };
+});
+exports.registerNotificationDevice = functions.https.onCall(async (data, context) => {
+    var _a;
+    const userId = (_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid;
+    if (!userId) {
+        throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para registrar un dispositivo.');
+    }
+    const token = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.token, 4096);
+    if (!token) {
+        throw new functions.https.HttpsError('invalid-argument', 'token es obligatorio.');
+    }
+    const platformRaw = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.platform, 20).toLowerCase();
+    if (platformRaw !== 'web' && platformRaw !== 'android') {
+        throw new functions.https.HttpsError('invalid-argument', 'platform debe ser "web" o "android".');
+    }
+    const platform = platformRaw;
+    const deviceId = sanitizeNotificationDeviceId(data === null || data === void 0 ? void 0 : data.deviceId, token, platform);
+    const locale = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.locale, 64);
+    const timezone = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.timezone, 80);
+    const userAgent = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.userAgent, 255);
+    const devicesCollection = db.collection('users').doc(userId).collection('notification_devices');
+    const deviceRef = devicesCollection.doc(deviceId);
+    await db.runTransaction(async (tx) => {
+        const deviceSnap = await tx.get(deviceRef);
+        const previous = deviceSnap.data() || {};
+        tx.set(deviceRef, {
+            token,
+            platform,
+            enabled: true,
+            locale,
+            timezone,
+            userAgent,
+            lastSeenAt: admin.firestore.FieldValue.serverTimestamp(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            createdAt: deviceSnap.exists
+                ? (previous.createdAt || admin.firestore.FieldValue.serverTimestamp())
+                : admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+    });
+    const duplicatesSnap = await devicesCollection.where('token', '==', token).get();
+    const duplicatesToDelete = duplicatesSnap.docs
+        .filter((docSnap) => docSnap.id !== deviceId)
+        .map((docSnap) => docSnap.ref);
+    if (duplicatesToDelete.length > 0) {
+        const batch = db.batch();
+        for (const duplicateRef of duplicatesToDelete) {
+            batch.delete(duplicateRef);
+        }
+        await batch.commit();
+    }
+    return {
+        ok: true,
+        deviceId,
+        platform
+    };
+});
+exports.unregisterNotificationDevice = functions.https.onCall(async (data, context) => {
+    var _a;
+    const userId = (_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid;
+    if (!userId) {
+        throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para eliminar un dispositivo.');
+    }
+    const devicesCollection = db.collection('users').doc(userId).collection('notification_devices');
+    const deviceId = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.deviceId, NOTIFICATION_DEVICE_ID_MAX_LENGTH);
+    const token = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.token, 4096);
+    if (!deviceId && !token) {
+        throw new functions.https.HttpsError('invalid-argument', 'Debes enviar deviceId o token.');
+    }
+    const refsToDelete = [];
+    if (deviceId) {
+        refsToDelete.push(devicesCollection.doc(deviceId));
+    }
+    else {
+        const tokenMatches = await devicesCollection.where('token', '==', token).get();
+        refsToDelete.push(...tokenMatches.docs.map((docSnap) => docSnap.ref));
+    }
+    if (refsToDelete.length > 0) {
+        const batch = db.batch();
+        for (const ref of refsToDelete) {
+            batch.delete(ref);
+        }
+        await batch.commit();
+    }
+    return {
+        ok: true,
+        removed: refsToDelete.length
+    };
+});
+exports.markNotificationRead = functions.https.onCall(async (data, context) => {
+    var _a, _b;
+    const userId = (_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid;
+    if (!userId) {
+        throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para actualizar notificaciones.');
+    }
+    const notificationId = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.notificationId, 200);
+    if (!notificationId) {
+        throw new functions.https.HttpsError('invalid-argument', 'notificationId es obligatorio.');
+    }
+    const notificationRef = db.collection('users').doc(userId).collection('notifications').doc(notificationId);
+    const notificationSnap = await notificationRef.get();
+    if (!notificationSnap.exists) {
+        throw new functions.https.HttpsError('not-found', 'La notificacion no existe.');
+    }
+    if (((_b = notificationSnap.data()) === null || _b === void 0 ? void 0 : _b.isRead) === true) {
+        return {
+            ok: true,
+            updated: false
+        };
+    }
+    await notificationRef.set({
+        isRead: true,
+        readAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    return {
+        ok: true,
+        updated: true
+    };
+});
+exports.markAllNotificationsRead = functions.https.onCall(async (_data, context) => {
+    var _a;
+    const userId = (_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid;
+    if (!userId) {
+        throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para actualizar notificaciones.');
+    }
+    const notificationsCollection = db.collection('users').doc(userId).collection('notifications');
+    let updatedCount = 0;
+    while (true) {
+        const unreadSnap = await notificationsCollection
+            .where('isRead', '==', false)
+            .limit(NOTIFICATION_PAGE_SIZE)
+            .get();
+        if (unreadSnap.empty)
+            break;
+        const batch = db.batch();
+        for (const unreadDoc of unreadSnap.docs) {
+            batch.set(unreadDoc.ref, {
+                isRead: true,
+                readAt: admin.firestore.FieldValue.serverTimestamp(),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+        }
+        await batch.commit();
+        updatedCount += unreadSnap.size;
+        if (unreadSnap.size < NOTIFICATION_PAGE_SIZE)
+            break;
+    }
+    return {
+        ok: true,
+        updatedCount
+    };
 });
 exports.syncPublicUserProfile = functions.firestore
     .document('users/{userId}')
@@ -1798,6 +2347,32 @@ exports.completeExpiredSurveys = functions.pubsub
             break;
     }
     console.log(`Expired surveys completed: ${completedCount}`);
+    return null;
+});
+exports.purgeOldNotifications = functions.pubsub
+    .schedule('every day 03:00')
+    .timeZone('Etc/UTC')
+    .onRun(async () => {
+    const cutoffDate = new Date(Date.now() - NOTIFICATION_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+    const cutoffTs = admin.firestore.Timestamp.fromDate(cutoffDate);
+    let removedCount = 0;
+    while (true) {
+        const snapshot = await db.collectionGroup('notifications')
+            .where('lastEventAt', '<=', cutoffTs)
+            .limit(NOTIFICATION_PAGE_SIZE)
+            .get();
+        if (snapshot.empty)
+            break;
+        const batch = db.batch();
+        for (const notificationDoc of snapshot.docs) {
+            batch.delete(notificationDoc.ref);
+        }
+        await batch.commit();
+        removedCount += snapshot.size;
+        if (snapshot.size < NOTIFICATION_PAGE_SIZE)
+            break;
+    }
+    console.log(`Old notifications removed: ${removedCount}`);
     return null;
 });
 // 12. Ads metrics aggregation
