@@ -1774,7 +1774,7 @@ exports.onContentDeleted = functions.firestore
 exports.onOfficialNewsReceived = functions.database
     .ref('/news/{newsId}')
     .onWrite(async (change, context) => {
-    var _a, _b, _c, _d, _e, _f, _g, _h;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m;
     const { newsId } = context.params;
     const afterData = change.after.val();
     // Si data es null, significa que fue borrada de RTDB (no borramos de Firestore por seguridad)
@@ -1867,6 +1867,39 @@ exports.onOfficialNewsReceived = functions.database
         const updatedAtTs = parsedUpdatedAt || admin.firestore.FieldValue.serverTimestamp();
         const normalizedPostId = extractNewsPublicIdFromPayload(afterData);
         const postIdNumber = normalizedPostId ? Number(normalizedPostId) : null;
+        const normalizeUrlCandidate = (value) => {
+            if (typeof value !== 'string')
+                return '';
+            return value.trim().slice(0, 2400);
+        };
+        const coverThumbnailUrl = [
+            normalizeUrlCandidate(afterData.img_miniatura),
+            normalizeUrlCandidate(afterData.imgMiniatura),
+            normalizeUrlCandidate(afterData.thumbnail),
+            normalizeUrlCandidate(afterData.thumbnailUrl),
+            normalizeUrlCandidate(afterData.coverThumbnailUrl),
+            normalizeUrlCandidate((_f = afterData.custom_fields) === null || _f === void 0 ? void 0 : _f.img_miniatura),
+            normalizeUrlCandidate((_g = afterData.custom_fields) === null || _g === void 0 ? void 0 : _g.thumbnail),
+            normalizeUrlCandidate((_h = afterData.custom_fields) === null || _h === void 0 ? void 0 : _h.thumbnailUrl)
+        ].find((value) => value.length > 0) || '';
+        const rawImages = Array.isArray(afterData.images)
+            ? afterData.images
+            : [
+                afterData.image,
+                afterData.imageUrl,
+                afterData.coverImage,
+                (_j = afterData.custom_fields) === null || _j === void 0 ? void 0 : _j.image
+            ];
+        const normalizedImages = Array.from(new Set(rawImages
+            .map((value) => normalizeUrlCandidate(value))
+            .filter((value) => value.length > 0)));
+        if (normalizedImages.length === 0 && coverThumbnailUrl) {
+            normalizedImages.push(coverThumbnailUrl);
+        }
+        const imagesV2 = normalizedImages.map((url, index) => ({
+            url,
+            thumbUrl: index === 0 && coverThumbnailUrl ? coverThumbnailUrl : url
+        }));
         // Payload purificado e idempotente
         const firestorePayload = {
             type: 'news',
@@ -1878,14 +1911,16 @@ exports.onOfficialNewsReceived = functions.database
             publicId: normalizedPostId,
             titulo: afterData.titulo || 'Sin TÃ­tulo',
             descripcion: afterData.descripcion || '',
-            images: Array.isArray(afterData.images) ? afterData.images : [],
+            images: normalizedImages,
+            imagesV2,
+            imgMiniatura: coverThumbnailUrl,
             userId: afterData.userId || 'wp_official',
             userName: afterData.userName || 'RedacciÃ³n CdeluAR',
             userProfilePicUrl: afterData.userProfilePicUrl || '',
             stats: {
-                likesCount: ((_f = afterData.stats) === null || _f === void 0 ? void 0 : _f.likesCount) || 0,
-                commentsCount: ((_g = afterData.stats) === null || _g === void 0 ? void 0 : _g.commentsCount) || 0,
-                viewsCount: ((_h = afterData.stats) === null || _h === void 0 ? void 0 : _h.viewsCount) || 0
+                likesCount: ((_k = afterData.stats) === null || _k === void 0 ? void 0 : _k.likesCount) || 0,
+                commentsCount: ((_l = afterData.stats) === null || _l === void 0 ? void 0 : _l.commentsCount) || 0,
+                viewsCount: ((_m = afterData.stats) === null || _m === void 0 ? void 0 : _m.viewsCount) || 0
             },
             createdAt: createdAtTs,
             updatedAt: updatedAtTs,

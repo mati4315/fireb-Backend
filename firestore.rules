@@ -52,7 +52,11 @@ service cloud.firestore {
 
     function isValidCommunityPostCreate(data) {
       return isSignedIn() &&
-             isValidContent(data) &&
+             data.titulo is string &&
+             data.titulo.size() <= 300 &&
+             (data.descripcion.size() <= 5000 || !('descripcion' in data)) &&
+             (!('images' in data) || data.images.size() <= 6) &&
+             (!('imagesV2' in data) || data.imagesV2.size() <= 6) &&
              data.userId == request.auth.uid &&
              data.module == 'community' &&
              data.type == 'post' &&

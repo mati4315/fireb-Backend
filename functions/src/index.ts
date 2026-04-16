@@ -2381,6 +2381,43 @@ export const onOfficialNewsReceived = functions.database
 
       const normalizedPostId = extractNewsPublicIdFromPayload(afterData);
       const postIdNumber = normalizedPostId ? Number(normalizedPostId) : null;
+      const normalizeUrlCandidate = (value: unknown): string => {
+        if (typeof value !== 'string') return '';
+        return value.trim().slice(0, 2400);
+      };
+      const coverThumbnailUrl = [
+        normalizeUrlCandidate(afterData.img_miniatura),
+        normalizeUrlCandidate(afterData.imgMiniatura),
+        normalizeUrlCandidate(afterData.thumbnail),
+        normalizeUrlCandidate(afterData.thumbnailUrl),
+        normalizeUrlCandidate(afterData.coverThumbnailUrl),
+        normalizeUrlCandidate(afterData.custom_fields?.img_miniatura),
+        normalizeUrlCandidate(afterData.custom_fields?.thumbnail),
+        normalizeUrlCandidate(afterData.custom_fields?.thumbnailUrl)
+      ].find((value) => value.length > 0) || '';
+
+      const rawImages = Array.isArray(afterData.images)
+        ? afterData.images
+        : [
+          afterData.image,
+          afterData.imageUrl,
+          afterData.coverImage,
+          afterData.custom_fields?.image
+        ];
+      const normalizedImages = Array.from(
+        new Set(
+          rawImages
+            .map((value: unknown) => normalizeUrlCandidate(value))
+            .filter((value: string) => value.length > 0)
+        )
+      );
+      if (normalizedImages.length === 0 && coverThumbnailUrl) {
+        normalizedImages.push(coverThumbnailUrl);
+      }
+      const imagesV2 = normalizedImages.map((url, index) => ({
+        url,
+        thumbUrl: index === 0 && coverThumbnailUrl ? coverThumbnailUrl : url
+      }));
 
       // Payload purificado e idempotente
       const firestorePayload = {
@@ -2394,7 +2431,9 @@ export const onOfficialNewsReceived = functions.database
         
         titulo: afterData.titulo || 'Sin TÃ­tulo',
         descripcion: afterData.descripcion || '',
-        images: Array.isArray(afterData.images) ? afterData.images : [],
+        images: normalizedImages,
+        imagesV2,
+        imgMiniatura: coverThumbnailUrl,
         
         userId: afterData.userId || 'wp_official',
         userName: afterData.userName || 'RedacciÃ³n CdeluAR',
