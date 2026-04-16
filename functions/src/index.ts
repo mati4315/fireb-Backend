@@ -2274,18 +2274,110 @@ export const onOfficialNewsReceived = functions.database
     try {
       // Parsear la fecha createdAt si es string (ej: "2024-01-15 10:30:00")
       // Si no hay fecha o es invÃ¡lida, se usarÃ¡ el Timestamp del servidor.
-      let createdAtTs: admin.firestore.FieldValue | admin.firestore.Timestamp = admin.firestore.FieldValue.serverTimestamp();
-      let updatedAtTs: admin.firestore.FieldValue | admin.firestore.Timestamp = admin.firestore.FieldValue.serverTimestamp();
-      
-      if (afterData.createdAt) {
-        const parsedCreate = new Date(afterData.createdAt);
-        if (!isNaN(parsedCreate.getTime())) createdAtTs = admin.firestore.Timestamp.fromDate(parsedCreate);
+      const parseDateCandidate = (value: unknown): admin.firestore.Timestamp | null => {
+        if (!value) return null;
+        if (value instanceof admin.firestore.Timestamp) return value;
+        if (value instanceof Date && !isNaN(value.getTime())) {
+          return admin.firestore.Timestamp.fromDate(value);
+        }
+        if (typeof value === 'number' && Number.isFinite(value)) {
+          const asMs = value > 1e12 ? value : value * 1000;
+          const parsedNumeric = new Date(asMs);
+          if (!isNaN(parsedNumeric.getTime())) {
+            return admin.firestore.Timestamp.fromDate(parsedNumeric);
+          }
+          return null;
+        }
+        if (typeof value !== 'string') return null;
+
+        const raw = value.trim();
+        if (!raw) return null;
+
+        const parsedNative = new Date(raw);
+        if (!isNaN(parsedNative.getTime())) {
+          return admin.firestore.Timestamp.fromDate(parsedNative);
+        }
+
+        const isoLike = raw.match(
+          /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/
+        );
+        if (isoLike) {
+          const [, y, m, d, h, min, s] = isoLike;
+          const parsedIsoLike = new Date(
+            Number(y),
+            Number(m) - 1,
+            Number(d),
+            Number(h),
+            Number(min),
+            Number(s || '0')
+          );
+          if (!isNaN(parsedIsoLike.getTime())) {
+            return admin.firestore.Timestamp.fromDate(parsedIsoLike);
+          }
+        }
+
+        const latamLike = raw.match(
+          /^(\d{2})\/(\d{2})\/(\d{4})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/
+        );
+        if (latamLike) {
+          const [, d, m, y, h, min, s] = latamLike;
+          const parsedLatam = new Date(
+            Number(y),
+            Number(m) - 1,
+            Number(d),
+            Number(h || '0'),
+            Number(min || '0'),
+            Number(s || '0')
+          );
+          if (!isNaN(parsedLatam.getTime())) {
+            return admin.firestore.Timestamp.fromDate(parsedLatam);
+          }
+        }
+
+        return null;
+      };
+
+      const contentRef = db.collection('content').doc(newsId);
+      const existingSnap = await contentRef.get();
+      const existingCreatedAt = existingSnap.exists ? existingSnap.data()?.createdAt : null;
+
+      const createdCandidates: unknown[] = [
+        afterData.createdAt,
+        afterData.created_at,
+        afterData.date,
+        afterData.postDate,
+        afterData.post_date,
+        afterData.custom_fields?.createdAt,
+        afterData.custom_fields?.date
+      ];
+      const updatedCandidates: unknown[] = [
+        afterData.updatedAt,
+        afterData.updated_at,
+        afterData.modified,
+        afterData.modifiedAt,
+        afterData.custom_fields?.updatedAt,
+        afterData.custom_fields?.modified
+      ];
+
+      let parsedCreatedAt: admin.firestore.Timestamp | null = null;
+      for (const candidate of createdCandidates) {
+        parsedCreatedAt = parseDateCandidate(candidate);
+        if (parsedCreatedAt) break;
       }
-      
-      if (afterData.updatedAt) {
-         const parsedUpdate = new Date(afterData.updatedAt);
-         if (!isNaN(parsedUpdate.getTime())) updatedAtTs = admin.firestore.Timestamp.fromDate(parsedUpdate);
+
+      let parsedUpdatedAt: admin.firestore.Timestamp | null = null;
+      for (const candidate of updatedCandidates) {
+        parsedUpdatedAt = parseDateCandidate(candidate);
+        if (parsedUpdatedAt) break;
       }
+
+      const createdAtTs: admin.firestore.FieldValue | admin.firestore.Timestamp =
+        parsedCreatedAt ||
+        (existingCreatedAt instanceof admin.firestore.Timestamp
+          ? existingCreatedAt
+          : admin.firestore.FieldValue.serverTimestamp());
+      const updatedAtTs: admin.firestore.FieldValue | admin.firestore.Timestamp =
+        parsedUpdatedAt || admin.firestore.FieldValue.serverTimestamp();
 
       const normalizedPostId = extractNewsPublicIdFromPayload(afterData);
       const postIdNumber = normalizedPostId ? Number(normalizedPostId) : null;

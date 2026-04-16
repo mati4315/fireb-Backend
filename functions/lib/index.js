@@ -1774,7 +1774,7 @@ exports.onContentDeleted = functions.firestore
 exports.onOfficialNewsReceived = functions.database
     .ref('/news/{newsId}')
     .onWrite(async (change, context) => {
-    var _a, _b, _c;
+    var _a, _b, _c, _d, _e, _f, _g, _h;
     const { newsId } = context.params;
     const afterData = change.after.val();
     // Si data es null, significa que fue borrada de RTDB (no borramos de Firestore por seguridad)
@@ -1785,18 +1785,86 @@ exports.onOfficialNewsReceived = functions.database
     try {
         // Parsear la fecha createdAt si es string (ej: "2024-01-15 10:30:00")
         // Si no hay fecha o es invÃ¡lida, se usarÃ¡ el Timestamp del servidor.
-        let createdAtTs = admin.firestore.FieldValue.serverTimestamp();
-        let updatedAtTs = admin.firestore.FieldValue.serverTimestamp();
-        if (afterData.createdAt) {
-            const parsedCreate = new Date(afterData.createdAt);
-            if (!isNaN(parsedCreate.getTime()))
-                createdAtTs = admin.firestore.Timestamp.fromDate(parsedCreate);
+        const parseDateCandidate = (value) => {
+            if (!value)
+                return null;
+            if (value instanceof admin.firestore.Timestamp)
+                return value;
+            if (value instanceof Date && !isNaN(value.getTime())) {
+                return admin.firestore.Timestamp.fromDate(value);
+            }
+            if (typeof value === 'number' && Number.isFinite(value)) {
+                const asMs = value > 1e12 ? value : value * 1000;
+                const parsedNumeric = new Date(asMs);
+                if (!isNaN(parsedNumeric.getTime())) {
+                    return admin.firestore.Timestamp.fromDate(parsedNumeric);
+                }
+                return null;
+            }
+            if (typeof value !== 'string')
+                return null;
+            const raw = value.trim();
+            if (!raw)
+                return null;
+            const parsedNative = new Date(raw);
+            if (!isNaN(parsedNative.getTime())) {
+                return admin.firestore.Timestamp.fromDate(parsedNative);
+            }
+            const isoLike = raw.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/);
+            if (isoLike) {
+                const [, y, m, d, h, min, s] = isoLike;
+                const parsedIsoLike = new Date(Number(y), Number(m) - 1, Number(d), Number(h), Number(min), Number(s || '0'));
+                if (!isNaN(parsedIsoLike.getTime())) {
+                    return admin.firestore.Timestamp.fromDate(parsedIsoLike);
+                }
+            }
+            const latamLike = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/);
+            if (latamLike) {
+                const [, d, m, y, h, min, s] = latamLike;
+                const parsedLatam = new Date(Number(y), Number(m) - 1, Number(d), Number(h || '0'), Number(min || '0'), Number(s || '0'));
+                if (!isNaN(parsedLatam.getTime())) {
+                    return admin.firestore.Timestamp.fromDate(parsedLatam);
+                }
+            }
+            return null;
+        };
+        const contentRef = db.collection('content').doc(newsId);
+        const existingSnap = await contentRef.get();
+        const existingCreatedAt = existingSnap.exists ? (_a = existingSnap.data()) === null || _a === void 0 ? void 0 : _a.createdAt : null;
+        const createdCandidates = [
+            afterData.createdAt,
+            afterData.created_at,
+            afterData.date,
+            afterData.postDate,
+            afterData.post_date,
+            (_b = afterData.custom_fields) === null || _b === void 0 ? void 0 : _b.createdAt,
+            (_c = afterData.custom_fields) === null || _c === void 0 ? void 0 : _c.date
+        ];
+        const updatedCandidates = [
+            afterData.updatedAt,
+            afterData.updated_at,
+            afterData.modified,
+            afterData.modifiedAt,
+            (_d = afterData.custom_fields) === null || _d === void 0 ? void 0 : _d.updatedAt,
+            (_e = afterData.custom_fields) === null || _e === void 0 ? void 0 : _e.modified
+        ];
+        let parsedCreatedAt = null;
+        for (const candidate of createdCandidates) {
+            parsedCreatedAt = parseDateCandidate(candidate);
+            if (parsedCreatedAt)
+                break;
         }
-        if (afterData.updatedAt) {
-            const parsedUpdate = new Date(afterData.updatedAt);
-            if (!isNaN(parsedUpdate.getTime()))
-                updatedAtTs = admin.firestore.Timestamp.fromDate(parsedUpdate);
+        let parsedUpdatedAt = null;
+        for (const candidate of updatedCandidates) {
+            parsedUpdatedAt = parseDateCandidate(candidate);
+            if (parsedUpdatedAt)
+                break;
         }
+        const createdAtTs = parsedCreatedAt ||
+            (existingCreatedAt instanceof admin.firestore.Timestamp
+                ? existingCreatedAt
+                : admin.firestore.FieldValue.serverTimestamp());
+        const updatedAtTs = parsedUpdatedAt || admin.firestore.FieldValue.serverTimestamp();
         const normalizedPostId = extractNewsPublicIdFromPayload(afterData);
         const postIdNumber = normalizedPostId ? Number(normalizedPostId) : null;
         // Payload purificado e idempotente
@@ -1815,9 +1883,9 @@ exports.onOfficialNewsReceived = functions.database
             userName: afterData.userName || 'RedacciÃ³n CdeluAR',
             userProfilePicUrl: afterData.userProfilePicUrl || '',
             stats: {
-                likesCount: ((_a = afterData.stats) === null || _a === void 0 ? void 0 : _a.likesCount) || 0,
-                commentsCount: ((_b = afterData.stats) === null || _b === void 0 ? void 0 : _b.commentsCount) || 0,
-                viewsCount: ((_c = afterData.stats) === null || _c === void 0 ? void 0 : _c.viewsCount) || 0
+                likesCount: ((_f = afterData.stats) === null || _f === void 0 ? void 0 : _f.likesCount) || 0,
+                commentsCount: ((_g = afterData.stats) === null || _g === void 0 ? void 0 : _g.commentsCount) || 0,
+                viewsCount: ((_h = afterData.stats) === null || _h === void 0 ? void 0 : _h.viewsCount) || 0
             },
             createdAt: createdAtTs,
             updatedAt: updatedAtTs,
