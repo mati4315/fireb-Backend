@@ -1,0 +1,64 @@
+{
+  "Stqh0idlYmbdTnpGXhYp": {
+    "module": "ads",
+    "description": "asd asd ad asd",
+    "imageUrl": "https://imgs.search.brave.com/J010Cl8eOMqkvpV8ybU1Uembocslfuny_Adkp1s3kDQ/rs:fit:500:0:1:0/g:ce/aHR0cHM6Ly93d3cu/YmltemVseGhjcC5j/b20vc2l0ZXMvZGVm/YXVsdC9maWxlcy9z/dHlsZXMvd2Ntc19k/ZWZhdWx0X2Nyb3Av/cHVibGljLzIwMjQt/MTAvUmhldW1hLW5y/LWF4U3BBLWFzYXM0/MC1EaXNlYXNlLUFj/dGl2aXR5LnBuZy53/ZWJwP2l0b2s9aGFR/aDlBU3Y",
+    "destinationUrl": "https://www.google.com.ar",
+    "ctaLabel": "Ver mas",
+    "priority": 5,
+    "startAt": {
+      "_seconds": 1775566260,
+      "_nanoseconds": 0
+    },
+    "endAt": {
+      "_seconds": 1777726260,
+      "_nanoseconds": 0
+    },
+    "createdAt": {
+      "_seconds": 1775566316,
+      "_nanoseconds": 310000000
+    },
+    "active": true,
+    "title": "publicacion de prueba",
+    "stats": {
+      "clicksTotal": 5,
+      "ctr": 10.87,
+      "lastEventAt": {
+        "_seconds": 1776292715,
+        "_nanoseconds": 467000000
+      },
+      "impressionsTotal": 46
+    },
+    "updatedAt": {
+      "_seconds": 1776292715,
+      "_nanoseconds": 467000000
+    }
+  },
+  "sample_ads_welcome": {
+    "module": "ads",
+    "priority": 8,
+    "title": "Promociona tu proyecto en CdeluAR",
+    "description": "Este es un ejemplo de anuncio. Puedes editarlo o crear anuncios nuevos desde Firestore.",
+    "imageUrl": "",
+    "destinationUrl": "https://cdeluar.com",
+    "ctaLabel": "Conocer mas",
+    "createdAt": {
+      "_seconds": 1775564850,
+      "_nanoseconds": 17000000
+    },
+    "active": true,
+    "stats": {
+      "clicksTotal": 3,
+      "ctr": 9.38,
+      "lastEventAt": {
+        "_seconds": 1776297432,
+        "_nanoseconds": 912000000
+      },
+      "impressionsTotal": 32
+    },
+    "updatedAt": {
+      "_seconds": 1776297432,
+      "_nanoseconds": 912000000
+    }
+  }
+}

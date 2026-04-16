@@ -31,6 +31,13 @@ service cloud.firestore {
         (userRole() in ['admin', 'administrador', 'super_admin', 'superadmin', 'super admin']);
     }
 
+    function isSystemAdmin() {
+      return isSuperAdminEmail() ||
+        isSuperAdminUid() ||
+        (isSignedIn() && request.auth.token.superAdmin == true) ||
+        (isSignedIn() && request.auth.token.super_admin == true);
+    }
+
     function isStaff() {
       return isAdmin() || userRole() == 'colaborador';
     }
@@ -365,11 +372,24 @@ service cloud.firestore {
         request.resource.data.createdAt == resource.data.createdAt;
     }
 
+    function keepsCoreIdentityFields() {
+      return request.resource.data.nombre == resource.data.nombre &&
+        request.resource.data.username == resource.data.username &&
+        request.resource.data.usernameLower == resource.data.usernameLower &&
+        request.resource.data.email == resource.data.email;
+    }
+
     // Users: private read, self write
     match /users/{userId} {
       allow read: if isOwnUser(userId) || isAdmin();
       allow create: if isAdmin();
-      allow update: if isAdmin() || (
+      allow update: if (
+        isAdmin() &&
+        (
+          isSystemAdmin() ||
+          keepsCoreIdentityFields()
+        )
+      ) || (
         isOwnUser(userId) &&
         isValidUserEditableFields() &&
         keepsProtectedUserFields()

@@ -1,0 +1,42 @@
+{
+  "modules": {
+    "news": {
+      "enabled": true
+    },
+    "community": {
+      "enabled": true
+    },
+    "likes": {
+      "communityEnabled": true,
+      "enabled": true,
+      "newsEnabled": true
+    },
+    "ads": {
+      "trackImpressions": true,
+      "impressionCooldownMs": 3600000,
+      "clickCooldownMs": 0,
+      "trackClicks": true,
+      "tabs": [
+        "todo",
+        "news",
+        "post"
+      ],
+      "maxAdsPerFeed": 2,
+      "enabled": true,
+      "probability": 0.75,
+      "minPostsBetweenAds": 7,
+      "fetchLimit": 9
+    },
+    "surveys": {
+      "enabled": true
+    },
+    "comments": {
+      "newsEnabled": true,
+      "enabled": true,
+      "communityEnabled": true
+    },
+    "lottery": {
+      "enabled": false
+    }
+  }
+}

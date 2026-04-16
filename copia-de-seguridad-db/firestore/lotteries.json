@@ -1,0 +1,459 @@
+{
+  "0WXkb8USuN9eBRjmSOqm": {
+    "title": "11111111",
+    "description": "222222222",
+    "imageUrl": "https://cdelu.ar/imagenes/posts/Z4f5ogXDQaNhEY4iBf9jgkPnQMP2/lotteries/1775739085894_ubujjb.webp",
+    "status": "active",
+    "startsAt": {
+      "_seconds": 1775739092,
+      "_nanoseconds": 244000000
+    },
+    "endsAt": {
+      "_seconds": 1777039199,
+      "_nanoseconds": 0
+    },
+    "maxNumber": 100,
+    "maxTicketsPerUser": 4,
+    "winner": null,
+    "entrySchemaVersion": 2,
+    "migrationStatus": "done",
+    "createdBy": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+    "updatedBy": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+    "deletedAt": null,
+    "createdAt": {
+      "_seconds": 1775739093,
+      "_nanoseconds": 628000000
+    },
+    "participantsCount": 3,
+    "updatedAt": {
+      "_seconds": 1775740490,
+      "_nanoseconds": 207000000
+    }
+  },
+  "0gVmR5vtuO8rDlYJgR0u": {
+    "title": "11111111111",
+    "description": "222222222222222",
+    "status": "active",
+    "startsAt": {
+      "_seconds": 1775735622,
+      "_nanoseconds": 262000000
+    },
+    "endsAt": {
+      "_seconds": 1775829599,
+      "_nanoseconds": 0
+    },
+    "maxNumber": 100,
+    "maxTicketsPerUser": 5,
+    "winner": null,
+    "entrySchemaVersion": 2,
+    "migrationStatus": "done",
+    "createdBy": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+    "updatedBy": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+    "createdAt": {
+      "_seconds": 1775735623,
+      "_nanoseconds": 142000000
+    },
+    "participantsCount": 1,
+    "deletedAt": {
+      "_seconds": 1775735713,
+      "_nanoseconds": 907000000
+    },
+    "updatedAt": {
+      "_seconds": 1775735713,
+      "_nanoseconds": 907000000
+    }
+  },
+  "3Nlo4R3HF6tI7Jgc3dPn": {
+    "title": "asdsd",
+    "description": "adadasda",
+    "imageUrl": "",
+    "status": "active",
+    "startsAt": {
+      "_seconds": 1775738359,
+      "_nanoseconds": 659000000
+    },
+    "endsAt": {
+      "_seconds": 1776520799,
+      "_nanoseconds": 0
+    },
+    "maxNumber": 100,
+    "maxTicketsPerUser": 4,
+    "winner": null,
+    "entrySchemaVersion": 2,
+    "migrationStatus": "done",
+    "createdBy": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+    "updatedBy": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+    "deletedAt": null,
+    "createdAt": {
+      "_seconds": 1775738360,
+      "_nanoseconds": 545000000
+    },
+    "participantsCount": 2,
+    "updatedAt": {
+      "_seconds": 1775826354,
+      "_nanoseconds": 11000000
+    }
+  },
+  "GVn8SlHN71spNsvw3jx7": {
+    "title": "1111111111",
+    "description": "222222222222222222",
+    "imageUrl": "",
+    "status": "active",
+    "startsAt": {
+      "_seconds": 1775738317,
+      "_nanoseconds": 800000000
+    },
+    "endsAt": {
+      "_seconds": 1776434399,
+      "_nanoseconds": 0
+    },
+    "maxNumber": 100,
+    "maxTicketsPerUser": 4,
+    "winner": null,
+    "entrySchemaVersion": 2,
+    "migrationStatus": "done",
+    "createdBy": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+    "updatedBy": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+    "deletedAt": null,
+    "createdAt": {
+      "_seconds": 1775738320,
+      "_nanoseconds": 194000000
+    },
+    "participantsCount": 4,
+    "updatedAt": {
+      "_seconds": 1775826339,
+      "_nanoseconds": 520000000
+    }
+  },
+  "RUinwYM55sSx72qlM3kp": {
+    "title": "111111111",
+    "description": "2222222222",
+    "imageUrl": "",
+    "status": "active",
+    "startsAt": {
+      "_seconds": 1775738123,
+      "_nanoseconds": 584000000
+    },
+    "endsAt": {
+      "_seconds": 1775915999,
+      "_nanoseconds": 0
+    },
+    "maxNumber": 100,
+    "maxTicketsPerUser": 1,
+    "winner": null,
+    "entrySchemaVersion": 2,
+    "migrationStatus": "done",
+    "createdBy": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+    "updatedBy": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+    "deletedAt": null,
+    "createdAt": {
+      "_seconds": 1775738126,
+      "_nanoseconds": 319000000
+    },
+    "participantsCount": 1,
+    "updatedAt": {
+      "_seconds": 1775738291,
+      "_nanoseconds": 860000000
+    }
+  },
+  "TWC3oDuSiL73MVTBrC19": {
+    "title": "aaaaaaaaaaa",
+    "description": "1111111111111",
+    "startsAt": {
+      "_seconds": 1775733660,
+      "_nanoseconds": 0
+    },
+    "endsAt": {
+      "_seconds": 1775827440,
+      "_nanoseconds": 0
+    },
+    "maxTicketsPerUser": 2,
+    "entrySchemaVersion": 2,
+    "migrationStatus": "done",
+    "createdBy": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+    "updatedBy": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+    "createdAt": {
+      "_seconds": 1775733692,
+      "_nanoseconds": 733000000
+    },
+    "participantsCount": 1,
+    "maxNumber": 105,
+    "winner": {
+      "userProfilePicUrl": "",
+      "userName": "Matias Admin",
+      "userId": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+      "selectedAt": {
+        "_seconds": 1775734491,
+        "_nanoseconds": 610000000
+      }
+    },
+    "status": "completed",
+    "deletedAt": {
+      "_seconds": 1775735602,
+      "_nanoseconds": 607000000
+    },
+    "updatedAt": {
+      "_seconds": 1775735602,
+      "_nanoseconds": 607000000
+    }
+  },
+  "k8wTw8W9axNpSFOxXl2Q": {
+    "title": "asdasdasd asd",
+    "description": "asd sd as das das dd",
+    "status": "active",
+    "startsAt": {
+      "_seconds": 1775734716,
+      "_nanoseconds": 61000000
+    },
+    "endsAt": {
+      "_seconds": 1775829599,
+      "_nanoseconds": 0
+    },
+    "maxNumber": 100,
+    "maxTicketsPerUser": 1,
+    "winner": null,
+    "entrySchemaVersion": 2,
+    "migrationStatus": "done",
+    "createdBy": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+    "updatedBy": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+    "createdAt": {
+      "_seconds": 1775734717,
+      "_nanoseconds": 318000000
+    },
+    "participantsCount": 1,
+    "deletedAt": {
+      "_seconds": 1775735602,
+      "_nanoseconds": 564000000
+    },
+    "updatedAt": {
+      "_seconds": 1775735602,
+      "_nanoseconds": 564000000
+    }
+  },
+  "lottery-rules-1775708750246-40731": {
+    "createdAt": {
+      "_seconds": 1775708758,
+      "_nanoseconds": 454000000
+    },
+    "createdBy": "rules-test",
+    "description": "Prueba e2e reglas loteria",
+    "winner": null,
+    "endsAt": {
+      "_seconds": 1775712358,
+      "_nanoseconds": 454000000
+    },
+    "participantsCount": 0,
+    "startsAt": {
+      "_seconds": 1775708698,
+      "_nanoseconds": 454000000
+    },
+    "title": "Loteria test reglas",
+    "status": "closed",
+    "deletedAt": {
+      "_seconds": 1775733596,
+      "_nanoseconds": 937000000
+    },
+    "updatedBy": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+    "updatedAt": {
+      "_seconds": 1775733596,
+      "_nanoseconds": 937000000
+    }
+  },
+  "lottery-rules-1775710854237-41939": {
+    "title": "Loteria test reglas",
+    "winner": null,
+    "startsAt": {
+      "_seconds": 1775710802,
+      "_nanoseconds": 934000000
+    },
+    "participantsCount": 0,
+    "createdAt": {
+      "_seconds": 1775710862,
+      "_nanoseconds": 934000000
+    },
+    "createdBy": "rules-test",
+    "endsAt": {
+      "_seconds": 1775714462,
+      "_nanoseconds": 934000000
+    },
+    "description": "Prueba e2e reglas loteria",
+    "status": "closed",
+    "deletedAt": {
+      "_seconds": 1775733591,
+      "_nanoseconds": 410000000
+    },
+    "updatedBy": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+    "updatedAt": {
+      "_seconds": 1775733591,
+      "_nanoseconds": 410000000
+    }
+  },
+  "lottery-rules-1775732738157-30769": {
+    "maxTicketsPerUser": 1,
+    "startsAt": {
+      "_seconds": 1775732686,
+      "_nanoseconds": 736000000
+    },
+    "description": "Prueba e2e reglas loteria",
+    "createdBy": "rules-test",
+    "winner": null,
+    "title": "Loteria test reglas",
+    "migrationStatus": "done",
+    "maxNumber": 100,
+    "endsAt": {
+      "_seconds": 1775736346,
+      "_nanoseconds": 736000000
+    },
+    "createdAt": {
+      "_seconds": 1775732746,
+      "_nanoseconds": 736000000
+    },
+    "participantsCount": 0,
+    "entrySchemaVersion": 2,
+    "status": "closed",
+    "deletedAt": {
+      "_seconds": 1775733590,
+      "_nanoseconds": 348000000
+    },
+    "updatedBy": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+    "updatedAt": {
+      "_seconds": 1775733590,
+      "_nanoseconds": 348000000
+    }
+  },
+  "lottery-rules-1775733139296-29045": {
+    "winner": null,
+    "maxTicketsPerUser": 1,
+    "startsAt": {
+      "_seconds": 1775733087,
+      "_nanoseconds": 322000000
+    },
+    "description": "Prueba e2e reglas loteria",
+    "createdBy": "rules-test",
+    "entrySchemaVersion": 2,
+    "title": "Loteria test reglas",
+    "migrationStatus": "done",
+    "maxNumber": 100,
+    "endsAt": {
+      "_seconds": 1775736747,
+      "_nanoseconds": 322000000
+    },
+    "createdAt": {
+      "_seconds": 1775733147,
+      "_nanoseconds": 322000000
+    },
+    "participantsCount": 0,
+    "status": "closed",
+    "deletedAt": {
+      "_seconds": 1775733592,
+      "_nanoseconds": 626000000
+    },
+    "updatedBy": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+    "updatedAt": {
+      "_seconds": 1775733592,
+      "_nanoseconds": 626000000
+    }
+  },
+  "nIJyY2AssWMXT1TVZRHd": {
+    "title": "aaaaa",
+    "description": "bbbbbbbb",
+    "status": "active",
+    "startsAt": {
+      "_seconds": 1775623200,
+      "_nanoseconds": 0
+    },
+    "endsAt": {
+      "_seconds": 1775796000,
+      "_nanoseconds": 0
+    },
+    "winner": null,
+    "createdBy": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+    "updatedBy": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+    "createdAt": {
+      "_seconds": 1775709647,
+      "_nanoseconds": 851000000
+    },
+    "participantsCount": 2,
+    "deletedAt": {
+      "_seconds": 1775733595,
+      "_nanoseconds": 239000000
+    },
+    "updatedAt": {
+      "_seconds": 1775733595,
+      "_nanoseconds": 239000000
+    }
+  },
+  "rDwIHBf6CvJqDdKI3PC7": {
+    "title": "1111111",
+    "description": "222222",
+    "startsAt": {
+      "_seconds": 1775736417,
+      "_nanoseconds": 983000000
+    },
+    "endsAt": {
+      "_seconds": 1775829599,
+      "_nanoseconds": 0
+    },
+    "maxNumber": 100,
+    "maxTicketsPerUser": 4,
+    "entrySchemaVersion": 2,
+    "migrationStatus": "done",
+    "createdBy": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+    "updatedBy": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+    "createdAt": {
+      "_seconds": 1775736419,
+      "_nanoseconds": 337000000
+    },
+    "participantsCount": 7,
+    "winner": {
+      "userProfilePicUrl": "",
+      "selectedNumber": 17,
+      "userName": "Matias Admin",
+      "userId": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+      "selectedAt": {
+        "_seconds": 1775736811,
+        "_nanoseconds": 554000000
+      }
+    },
+    "status": "completed",
+    "deletedAt": {
+      "_seconds": 1775737897,
+      "_nanoseconds": 729000000
+    },
+    "updatedAt": {
+      "_seconds": 1775737897,
+      "_nanoseconds": 729000000
+    }
+  },
+  "zeJa7NNSqYrjUD3epsoK": {
+    "title": "1111111",
+    "description": "222222222",
+    "imageUrl": "https://cdelu.ar/imagenes/posts/Z4f5ogXDQaNhEY4iBf9jgkPnQMP2/lotteries/1775794610514_tbx3t0.webp",
+    "status": "active",
+    "startsAt": {
+      "_seconds": 1775794616,
+      "_nanoseconds": 313000000
+    },
+    "maxNumber": 100,
+    "maxTicketsPerUser": 5,
+    "winner": null,
+    "entrySchemaVersion": 2,
+    "migrationStatus": "done",
+    "createdBy": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+    "updatedBy": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+    "deletedAt": null,
+    "createdAt": {
+      "_seconds": 1775794617,
+      "_nanoseconds": 524000000
+    },
+    "endsAt": {
+      "_seconds": 1776002399,
+      "_nanoseconds": 0
+    },
+    "participantsCount": 13,
+    "updatedAt": {
+      "_seconds": 1775826378,
+      "_nanoseconds": 209000000
+    }
+  }
+}

@@ -1,0 +1,149 @@
+{
+  "G44pB8L2hch53dLYMIQDZO24zUx2": {
+    "usernameLower": "wp_2",
+    "isVerified": false,
+    "nombre": "Noticias Cdelu.ar",
+    "userId": "G44pB8L2hch53dLYMIQDZO24zUx2",
+    "username": "wp_2",
+    "profilePictureUrl": "https://cdelu.ar/imagenes/avatars/G44pB8L2hch53dLYMIQDZO24zUx2/1776250094367_vpc8o7_t.webp",
+    "website": "",
+    "bio": "",
+    "location": "",
+    "stats": {
+      "followersCount": 0,
+      "followingCount": 0,
+      "likesTotalCount": 0,
+      "postsCount": 0
+    },
+    "updatedAt": {
+      "_seconds": 1776252521,
+      "_nanoseconds": 486000000
+    }
+  },
+  "LJnTpDLXlpf1qrLcUdhDCc0IOpu2": {
+    "website": "",
+    "isVerified": false,
+    "bio": "",
+    "location": "",
+    "userId": "LJnTpDLXlpf1qrLcUdhDCc0IOpu2",
+    "profilePictureUrl": "https://cdelu.ar/imagenes/avatars/LJnTpDLXlpf1qrLcUdhDCc0IOpu2/1775795059422_hlq8ma_t.webp",
+    "usernameLower": "ramirez",
+    "nombre": "Nico",
+    "username": "ramirez",
+    "stats": {
+      "followingCount": 0,
+      "likesTotalCount": 0,
+      "followersCount": 1,
+      "postsCount": 1
+    },
+    "updatedAt": {
+      "_seconds": 1776230272,
+      "_nanoseconds": 858000000
+    }
+  },
+  "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2": {
+    "usernameLower": "matias4315",
+    "website": "",
+    "isVerified": true,
+    "bio": "Administrador del sistema",
+    "location": "",
+    "nombre": "Matias Admin",
+    "userId": "Z4f5ogXDQaNhEY4iBf9jgkPnQMP2",
+    "username": "matias4315",
+    "profilePictureUrl": "https://cdelu.ar/imagenes/avatars/Z4f5ogXDQaNhEY4iBf9jgkPnQMP2/1775794455371_qll6sp_t.webp",
+    "stats": {
+      "followersCount": 0,
+      "followingCount": 0,
+      "likesTotalCount": 0,
+      "postsCount": 1
+    },
+    "updatedAt": {
+      "_seconds": 1776232439,
+      "_nanoseconds": 656000000
+    }
+  },
+  "nNCEPU061nQmVP3JLAX3DFQJCx02": {
+    "profilePictureUrl": "",
+    "usernameLower": "comments_user_1776138401050_53",
+    "website": "",
+    "isVerified": false,
+    "bio": "",
+    "location": "",
+    "nombre": "Comments User",
+    "userId": "nNCEPU061nQmVP3JLAX3DFQJCx02",
+    "username": "comments_user_1776138401050_53",
+    "stats": {
+      "followersCount": 0,
+      "followingCount": 0,
+      "likesTotalCount": 0,
+      "postsCount": 0
+    },
+    "updatedAt": {
+      "_seconds": 1776138547,
+      "_nanoseconds": 694000000
+    }
+  },
+  "nXxNajnCYjSTarE08H3xRgxeeRf2": {
+    "profilePictureUrl": "https://lh3.googleusercontent.com/a/ACg8ocJb5q-Bv_uNFNHbD5oRL2leR_bplc9oA7S3h3udbrsBV-G1kOg=s96-c",
+    "usernameLower": "cdelu143151",
+    "website": "",
+    "isVerified": false,
+    "bio": "",
+    "location": "",
+    "nombre": "Matias moreira",
+    "userId": "nXxNajnCYjSTarE08H3xRgxeeRf2",
+    "username": "cdelu143151",
+    "stats": {
+      "followersCount": 0,
+      "followingCount": 0,
+      "likesTotalCount": 0,
+      "postsCount": 0
+    },
+    "updatedAt": {
+      "_seconds": 1776229558,
+      "_nanoseconds": 199000000
+    }
+  },
+  "sqw5cNoedVOCOGtSi02IS7dtEk03": {
+    "profilePictureUrl": "",
+    "usernameLower": "juan",
+    "website": "",
+    "isVerified": false,
+    "bio": "",
+    "location": "",
+    "userId": "sqw5cNoedVOCOGtSi02IS7dtEk03",
+    "username": "juan",
+    "nombre": "Juan",
+    "stats": {
+      "postsCount": 0,
+      "followersCount": 0,
+      "likesTotalCount": 0,
+      "followingCount": 1
+    },
+    "updatedAt": {
+      "_seconds": 1775795285,
+      "_nanoseconds": 793000000
+    }
+  },
+  "yAk2ojKGBfYuMGry3PdrqkgD6fs1": {
+    "profilePictureUrl": "https://lh3.googleusercontent.com/a/ACg8ocIlJI7EdiZ24WPmVu1xNQjEx-vx9EGVwp5I-f3-LzSnNIOOHPs=s96-c",
+    "usernameLower": "sorteoscdelu",
+    "website": "",
+    "bio": "",
+    "location": "",
+    "nombre": "sorteos cdelu",
+    "userId": "yAk2ojKGBfYuMGry3PdrqkgD6fs1",
+    "username": "sorteoscdelu",
+    "stats": {
+      "followersCount": 0,
+      "followingCount": 0,
+      "likesTotalCount": 0,
+      "postsCount": 0
+    },
+    "isVerified": true,
+    "updatedAt": {
+      "_seconds": 1776232251,
+      "_nanoseconds": 784000000
+    }
+  }
+}
