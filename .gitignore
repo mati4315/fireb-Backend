@@ -1,3 +1,9 @@
+# scripts Funcionan para que no puedan crear usuarios admin etc,
+scripts/
+
+# copias de seguridad
+copia-de-seguridad-db/
+
 # Logs
 *.log
 
