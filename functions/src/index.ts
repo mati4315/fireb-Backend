@@ -23,6 +23,7 @@ type LotteryStatus = 'draft' | 'active' | 'closed' | 'completed';
 type LotteryMigrationStatus = 'pending' | 'running' | 'done' | 'failed';
 type NotificationType = 'like' | 'comment' | 'reply' | 'follow';
 type NotificationPlatform = 'web' | 'android';
+type UserDefaultFeedTab = 'todo' | 'news' | 'post' | 'surveys' | 'lottery';
 type NotificationTypeSettings = {
   likes: boolean;
   comments: boolean;
@@ -79,6 +80,13 @@ const CONTENT_SLUG_MAX_LENGTH = 96;
 const NOTIFICATION_PAGE_SIZE = 300;
 const NOTIFICATION_RETENTION_DAYS = 30;
 const NOTIFICATION_DEVICE_ID_MAX_LENGTH = 120;
+const USER_DEFAULT_FEED_TAB_VALUES = new Set<UserDefaultFeedTab>([
+  'todo',
+  'news',
+  'post',
+  'surveys',
+  'lottery'
+]);
 const NOTIFICATION_TYPE_DEFAULTS: NotificationTypeSettings = {
   likes: true,
   comments: true,
@@ -364,6 +372,14 @@ const assertSystemAdminUser = (
 const sanitizeBoundedString = (value: unknown, maxLength: number): string => {
   if (typeof value !== 'string') return '';
   return value.trim().slice(0, maxLength);
+};
+
+const normalizeUserDefaultFeedTab = (value: unknown): UserDefaultFeedTab => {
+  const normalized = sanitizeBoundedString(value, 40).toLowerCase();
+  if (USER_DEFAULT_FEED_TAB_VALUES.has(normalized as UserDefaultFeedTab)) {
+    return normalized as UserDefaultFeedTab;
+  }
+  return 'todo';
 };
 
 const normalizeUsernameCandidate = (value: unknown): string => {
@@ -770,6 +786,7 @@ const ensureUserSettings = (value: unknown): Record<string, unknown> => {
     return {
       notificationsEnabled: true,
       privateAccount: false,
+      defaultFeedTab: 'todo',
       notificationTypes: { ...NOTIFICATION_TYPE_DEFAULTS }
     };
   }
@@ -779,6 +796,7 @@ const ensureUserSettings = (value: unknown): Record<string, unknown> => {
     ...settings,
     notificationsEnabled: settings.notificationsEnabled !== false,
     privateAccount: settings.privateAccount === true,
+    defaultFeedTab: normalizeUserDefaultFeedTab(settings.defaultFeedTab),
     notificationTypes: ensureNotificationTypeSettings(settings.notificationTypes)
   };
 };
@@ -1508,6 +1526,52 @@ export const updateNotificationPreferences = functions.https.onCall(async (data,
       replies: hasReplies ? data.replies === true : currentTypes.replies,
       follows: hasFollows ? data.follows === true : currentTypes.follows
     }
+  };
+
+  await userRef.set(
+    {
+      settings: nextSettings,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    },
+    { merge: true }
+  );
+
+  return {
+    ok: true,
+    settings: nextSettings
+  };
+});
+
+export const updateHomeFeedPreference = functions.https.onCall(async (data, context) => {
+  const userId = context.auth?.uid;
+  if (!userId) {
+    throw new functions.https.HttpsError(
+      'unauthenticated',
+      'Debes iniciar sesion para configurar tu feed.'
+    );
+  }
+
+  const rawDefaultFeedTab = sanitizeBoundedString(data?.defaultFeedTab, 40).toLowerCase();
+  if (!rawDefaultFeedTab || !USER_DEFAULT_FEED_TAB_VALUES.has(rawDefaultFeedTab as UserDefaultFeedTab)) {
+    throw new functions.https.HttpsError(
+      'invalid-argument',
+      'defaultFeedTab invalido. Valores permitidos: todo, news, post, surveys, lottery.'
+    );
+  }
+
+  const userRef = db.collection('users').doc(userId);
+  const userSnap = await userRef.get();
+  if (!userSnap.exists) {
+    throw new functions.https.HttpsError(
+      'not-found',
+      'No se encontro el perfil del usuario.'
+    );
+  }
+
+  const currentSettings = ensureUserSettings(userSnap.data()?.settings);
+  const nextSettings = {
+    ...currentSettings,
+    defaultFeedTab: rawDefaultFeedTab
   };
 
   await userRef.set(

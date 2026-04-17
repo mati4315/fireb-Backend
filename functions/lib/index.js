@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.onAdEventCreated = exports.purgeOldNotifications = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.getUsersSocialConnections = exports.updateUserManagement = exports.markAllNotificationsRead = exports.markNotificationRead = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = void 0;
+exports.onAdEventCreated = exports.purgeOldNotifications = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.getUsersSocialConnections = exports.updateUserManagement = exports.markAllNotificationsRead = exports.markNotificationRead = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateHomeFeedPreference = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = void 0;
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const path = require("path");
@@ -37,6 +37,13 @@ const CONTENT_SLUG_MAX_LENGTH = 96;
 const NOTIFICATION_PAGE_SIZE = 300;
 const NOTIFICATION_RETENTION_DAYS = 30;
 const NOTIFICATION_DEVICE_ID_MAX_LENGTH = 120;
+const USER_DEFAULT_FEED_TAB_VALUES = new Set([
+    'todo',
+    'news',
+    'post',
+    'surveys',
+    'lottery'
+]);
 const NOTIFICATION_TYPE_DEFAULTS = {
     likes: true,
     comments: true,
@@ -252,6 +259,13 @@ const sanitizeBoundedString = (value, maxLength) => {
     if (typeof value !== 'string')
         return '';
     return value.trim().slice(0, maxLength);
+};
+const normalizeUserDefaultFeedTab = (value) => {
+    const normalized = sanitizeBoundedString(value, 40).toLowerCase();
+    if (USER_DEFAULT_FEED_TAB_VALUES.has(normalized)) {
+        return normalized;
+    }
+    return 'todo';
 };
 const normalizeUsernameCandidate = (value) => {
     const raw = sanitizeBoundedString(value, USERNAME_MAX_LENGTH);
@@ -594,11 +608,12 @@ const ensureUserSettings = (value) => {
         return {
             notificationsEnabled: true,
             privateAccount: false,
+            defaultFeedTab: 'todo',
             notificationTypes: Object.assign({}, NOTIFICATION_TYPE_DEFAULTS)
         };
     }
     const settings = value;
-    return Object.assign(Object.assign({}, settings), { notificationsEnabled: settings.notificationsEnabled !== false, privateAccount: settings.privateAccount === true, notificationTypes: ensureNotificationTypeSettings(settings.notificationTypes) });
+    return Object.assign(Object.assign({}, settings), { notificationsEnabled: settings.notificationsEnabled !== false, privateAccount: settings.privateAccount === true, defaultFeedTab: normalizeUserDefaultFeedTab(settings.defaultFeedTab), notificationTypes: ensureNotificationTypeSettings(settings.notificationTypes) });
 };
 const buildPublicUserProfile = (userId, userData) => {
     const { username, usernameLower } = normalizeUsernameLoose(userId, userData);
@@ -1194,6 +1209,32 @@ exports.updateNotificationPreferences = functions.https.onCall(async (data, cont
             replies: hasReplies ? data.replies === true : currentTypes.replies,
             follows: hasFollows ? data.follows === true : currentTypes.follows
         } });
+    await userRef.set({
+        settings: nextSettings,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    return {
+        ok: true,
+        settings: nextSettings
+    };
+});
+exports.updateHomeFeedPreference = functions.https.onCall(async (data, context) => {
+    var _a, _b;
+    const userId = (_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid;
+    if (!userId) {
+        throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para configurar tu feed.');
+    }
+    const rawDefaultFeedTab = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.defaultFeedTab, 40).toLowerCase();
+    if (!rawDefaultFeedTab || !USER_DEFAULT_FEED_TAB_VALUES.has(rawDefaultFeedTab)) {
+        throw new functions.https.HttpsError('invalid-argument', 'defaultFeedTab invalido. Valores permitidos: todo, news, post, surveys, lottery.');
+    }
+    const userRef = db.collection('users').doc(userId);
+    const userSnap = await userRef.get();
+    if (!userSnap.exists) {
+        throw new functions.https.HttpsError('not-found', 'No se encontro el perfil del usuario.');
+    }
+    const currentSettings = ensureUserSettings((_b = userSnap.data()) === null || _b === void 0 ? void 0 : _b.settings);
+    const nextSettings = Object.assign(Object.assign({}, currentSettings), { defaultFeedTab: rawDefaultFeedTab });
     await userRef.set({
         settings: nextSettings,
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
