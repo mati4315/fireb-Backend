@@ -92,6 +92,8 @@ const SECRET_COMMENT_COOLDOWN_MS = 20 * 1000;
 const SECRET_DAILY_LIMIT = 5;
 const SECRET_FINGERPRINT_TTL_MS = 72 * 60 * 60 * 1000;
 const SECRET_AUTO_HIDE_REPORT_THRESHOLD = 6;
+const SECRET_RANKINGS_SAMPLE_LIMIT = 450;
+const SECRET_RANKINGS_LIST_LIMIT = 12;
 const USER_DEFAULT_FEED_TAB_VALUES = new Set<UserDefaultFeedTab>([
   'todo',
   'news',
@@ -367,6 +369,23 @@ type SecretRankResult = {
   trend: SecretTrend;
 };
 
+type SecretRankingItem = {
+  secretId: string;
+  textPreview: string;
+  category: string;
+  zone: string;
+  createdAtMs: number;
+  commentsCount: number;
+  upVotesCount: number;
+  downVotesCount: number;
+  totalVotesCount: number;
+  reportsCount: number;
+  trend: SecretTrend;
+  score: number;
+  hotScore: number;
+  controversyScore: number;
+};
+
 const computeSecretRank = (
   upVotesCount: number,
   downVotesCount: number,
@@ -396,6 +415,127 @@ const computeSecretRank = (
     controversyScore: Number(controversyScoreRaw.toFixed(4)),
     trend
   };
+};
+
+const isSecretActiveForRanking = (data: FirebaseFirestore.DocumentData): boolean => {
+  if (data?.module !== 'secrets') return false;
+  if (data?.deletedAt != null) return false;
+  const moderationStatus = sanitizeBoundedString(data?.moderation?.status, 40) || 'active';
+  return moderationStatus === 'active';
+};
+
+const toSecretRankingItem = (
+  secretDoc: FirebaseFirestore.QueryDocumentSnapshot<FirebaseFirestore.DocumentData>
+): SecretRankingItem => {
+  const data = secretDoc.data() || {};
+  const createdAtMs = timestampToMillisOrZero(data.createdAt) || Date.now();
+  const upVotesCount = Math.max(0, Math.floor(Number(data?.stats?.upVotesCount || 0)));
+  const downVotesCount = Math.max(0, Math.floor(Number(data?.stats?.downVotesCount || 0)));
+  const commentsCount = Math.max(0, Math.floor(Number(data?.stats?.commentsCount || 0)));
+  const reportsCount = Math.max(0, Math.floor(Number(data?.stats?.reportsCount || 0)));
+  const totalVotesCount = upVotesCount + downVotesCount;
+  const rank = computeSecretRank(upVotesCount, downVotesCount, commentsCount, createdAtMs);
+
+  return {
+    secretId: secretDoc.id,
+    textPreview: sanitizeSecretText(data.descripcion, 220),
+    category: sanitizeBoundedString(data.category, 40),
+    zone: sanitizeBoundedString(data.zone, 60),
+    createdAtMs,
+    commentsCount,
+    upVotesCount,
+    downVotesCount,
+    totalVotesCount,
+    reportsCount,
+    trend: rank.trend,
+    score: rank.score,
+    hotScore: rank.hotScore,
+    controversyScore: rank.controversyScore
+  };
+};
+
+const takeUniqueSecretRankingItems = (
+  items: SecretRankingItem[],
+  maxItems = SECRET_RANKINGS_LIST_LIMIT
+): SecretRankingItem[] => {
+  const unique = new Set<string>();
+  const result: SecretRankingItem[] = [];
+  for (const item of items) {
+    if (unique.has(item.secretId)) continue;
+    unique.add(item.secretId);
+    result.push(item);
+    if (result.length >= maxItems) break;
+  }
+  return result;
+};
+
+const buildSecretRankingsSnapshot = (
+  allItems: SecretRankingItem[]
+): Record<string, unknown> => {
+  const nowMs = Date.now();
+  const dayAgoMs = nowMs - (24 * 60 * 60 * 1000);
+
+  const topDay = takeUniqueSecretRankingItems(
+    allItems
+      .filter((item) => item.createdAtMs >= dayAgoMs)
+      .sort((a, b) => b.hotScore - a.hotScore || b.score - a.score || b.createdAtMs - a.createdAtMs)
+  );
+
+  const mostCommented = takeUniqueSecretRankingItems(
+    [...allItems].sort((a, b) => b.commentsCount - a.commentsCount || b.hotScore - a.hotScore)
+  );
+
+  const mostVoted = takeUniqueSecretRankingItems(
+    [...allItems].sort((a, b) => b.totalVotesCount - a.totalVotesCount || b.hotScore - a.hotScore)
+  );
+
+  const mostPolemic = takeUniqueSecretRankingItems(
+    [...allItems]
+      .filter((item) => item.totalVotesCount >= 3)
+      .sort(
+        (a, b) =>
+          b.controversyScore - a.controversyScore ||
+          b.totalVotesCount - a.totalVotesCount ||
+          b.createdAtMs - a.createdAtMs
+      )
+  );
+
+  return {
+    version: 2,
+    generatedAtMs: nowMs,
+    generatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    source: {
+      sampleSize: allItems.length,
+      listLimit: SECRET_RANKINGS_LIST_LIMIT
+    },
+    windows: {
+      dayStartMs: dayAgoMs
+    },
+    lists: {
+      topDay,
+      mostCommented,
+      mostVoted,
+      mostPolemic
+    }
+  };
+};
+
+const refreshSecretRankingsInternal = async (): Promise<Record<string, unknown>> => {
+  const snapshot = await db.collection('content')
+    .where('module', '==', 'secrets')
+    .where('deletedAt', '==', null)
+    .where('moderation.status', '==', 'active')
+    .orderBy('createdAt', 'desc')
+    .limit(SECRET_RANKINGS_SAMPLE_LIMIT)
+    .get();
+
+  const rankingItems = snapshot.docs
+    .filter((docSnap) => isSecretActiveForRanking(docSnap.data() || {}))
+    .map(toSecretRankingItem);
+
+  const rankings = buildSecretRankingsSnapshot(rankingItems);
+  await db.collection('_config').doc('secret_rankings').set(rankings, { merge: true });
+  return rankings;
 };
 
 const clampInteger = (value: unknown, min: number, max: number, fallback: number): number => {
@@ -476,6 +616,13 @@ const isStaffRole = (role: unknown): boolean => {
     normalized === 'superadmin';
 };
 
+const isAdminRole = (role: unknown): boolean => {
+  const normalized = normalizeRoleAlias(role);
+  return normalized === 'admin' ||
+    normalized === 'administrador' ||
+    normalized === 'superadmin';
+};
+
 const assertStaffUser = async (
   authContext: functions.https.CallableContext['auth']
 ): Promise<void> => {
@@ -531,6 +678,37 @@ const assertSystemAdminUser = (
   throw new functions.https.HttpsError(
     'permission-denied',
     'Solo el administrador del sistema puede ejecutar esta accion.'
+  );
+};
+
+const assertAdminUser = async (
+  authContext: functions.https.CallableContext['auth']
+): Promise<void> => {
+  const uid = authContext?.uid || '';
+  if (!uid) {
+    throw new functions.https.HttpsError(
+      'unauthenticated',
+      'Debes iniciar sesion para ejecutar esta accion.'
+    );
+  }
+
+  const token = (authContext?.token || {}) as Record<string, unknown>;
+  const email = typeof token.email === 'string' ? token.email.toLowerCase() : '';
+  if (
+    uid === 'Z4f5ogXDQaNhEY4iBf9jgkPnQMP2' ||
+    email === 'matias4315@gmail.com' ||
+    isAdminClaim(token)
+  ) {
+    return;
+  }
+
+  const userSnap = await db.collection('users').doc(uid).get();
+  const role = userSnap.data()?.rol;
+  if (isAdminRole(role)) return;
+
+  throw new functions.https.HttpsError(
+    'permission-denied',
+    'Solo administradores pueden ejecutar esta accion.'
   );
 };
 
@@ -1827,6 +2005,170 @@ export const reportSecretCallable = functions.https.onCall(async (data, context)
     };
   });
 });
+
+const SECRET_MODERATION_STATUS_VALUES = new Set([
+  'all',
+  'active',
+  'hidden_auto',
+  'hidden_admin',
+  'blocked'
+]);
+
+const normalizeSecretModerationStatusFilter = (value: unknown): string => {
+  const normalized = sanitizeBoundedString(value, 40).toLowerCase();
+  if (SECRET_MODERATION_STATUS_VALUES.has(normalized)) return normalized;
+  return 'all';
+};
+
+const normalizeSecretModerationAction = (
+  value: unknown
+): 'hide' | 'restore' | 'block' => {
+  const normalized = sanitizeBoundedString(value, 40).toLowerCase();
+  if (normalized === 'hide' || normalized === 'restore' || normalized === 'block') {
+    return normalized;
+  }
+  throw new functions.https.HttpsError(
+    'invalid-argument',
+    'action debe ser hide, restore o block.'
+  );
+};
+
+export const getSecretModerationQueueCallable = functions.https.onCall(async (data, context) => {
+  await assertAdminUser(context.auth);
+
+  const statusFilter = normalizeSecretModerationStatusFilter(data?.status);
+  const limitValue = clampInteger(data?.limit, 10, 200, 80);
+
+  let moderationQuery: FirebaseFirestore.Query<FirebaseFirestore.DocumentData> = db
+    .collection('content')
+    .where('module', '==', 'secrets')
+    .where('deletedAt', '==', null);
+
+  if (statusFilter !== 'all') {
+    moderationQuery = moderationQuery.where('moderation.status', '==', statusFilter);
+  }
+
+  moderationQuery = moderationQuery.orderBy('createdAt', 'desc').limit(limitValue);
+  const snapshot = await moderationQuery.get();
+
+  const items = snapshot.docs.map((docSnap) => {
+    const data = docSnap.data() || {};
+    return {
+      secretId: docSnap.id,
+      textPreview: sanitizeSecretText(data.descripcion, 280),
+      category: sanitizeBoundedString(data.category, 40),
+      zone: sanitizeBoundedString(data.zone, 60),
+      createdAtMs: timestampToMillisOrZero(data.createdAt),
+      updatedAtMs: timestampToMillisOrZero(data.updatedAt),
+      moderation: {
+        status: sanitizeBoundedString(data?.moderation?.status, 40) || 'active',
+        reason: sanitizeBoundedString(data?.moderation?.reason, 180),
+        reviewedBy: sanitizeBoundedString(data?.moderation?.reviewedBy, 128),
+        reviewedAtMs: timestampToMillisOrZero(data?.moderation?.reviewedAt)
+      },
+      stats: {
+        upVotesCount: Math.max(0, Math.floor(Number(data?.stats?.upVotesCount || 0))),
+        downVotesCount: Math.max(0, Math.floor(Number(data?.stats?.downVotesCount || 0))),
+        commentsCount: Math.max(0, Math.floor(Number(data?.stats?.commentsCount || 0))),
+        reportsCount: Math.max(0, Math.floor(Number(data?.stats?.reportsCount || 0))),
+        totalVotesCount: Math.max(0, Math.floor(Number(data?.stats?.totalVotesCount || 0)))
+      }
+    };
+  });
+
+  return {
+    status: 'ok',
+    filter: statusFilter,
+    count: items.length,
+    items,
+    fetchedAtMs: Date.now()
+  };
+});
+
+export const moderateSecretCallable = functions.https.onCall(async (data, context) => {
+  await assertAdminUser(context.auth);
+
+  const secretId = sanitizeBoundedString(data?.secretId, 128);
+  if (!secretId) {
+    throw new functions.https.HttpsError('invalid-argument', 'secretId es obligatorio.');
+  }
+
+  const action = normalizeSecretModerationAction(data?.action);
+  const reasonInput = sanitizeSecretText(data?.reason, 180);
+  const reviewerUid = context.auth?.uid || 'admin';
+
+  const secretRef = db.collection('content').doc(secretId);
+
+  return db.runTransaction(async (tx) => {
+    const secretSnap = await tx.get(secretRef);
+    if (!secretSnap.exists) {
+      throw new functions.https.HttpsError('not-found', 'El secreto no existe.');
+    }
+    const secretData = secretSnap.data() || {};
+    if (secretData.module !== 'secrets' || secretData.deletedAt != null) {
+      throw new functions.https.HttpsError(
+        'failed-precondition',
+        'El secreto no esta disponible para moderacion.'
+      );
+    }
+
+    let moderationStatus: 'active' | 'hidden_admin' | 'blocked' = 'active';
+    let moderationReason: string | null = null;
+
+    if (action === 'hide') {
+      moderationStatus = 'hidden_admin';
+      moderationReason = reasonInput || 'hidden_by_admin';
+    } else if (action === 'block') {
+      moderationStatus = 'blocked';
+      moderationReason = reasonInput || 'blocked_by_admin';
+    } else {
+      moderationStatus = 'active';
+      moderationReason = null;
+    }
+
+    tx.update(secretRef, {
+      'moderation.status': moderationStatus,
+      'moderation.reason': moderationReason,
+      'moderation.reviewedBy': reviewerUid,
+      'moderation.reviewedAt': admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    return {
+      status: 'ok',
+      secretId,
+      moderationStatus,
+      action
+    };
+  });
+});
+
+export const refreshSecretRankingsCallable = functions.https.onCall(async (_data, context) => {
+  await assertStaffUser(context.auth);
+  const rankings = await refreshSecretRankingsInternal();
+  const lists = (rankings.lists || {}) as Record<string, unknown[]>;
+
+  return {
+    status: 'ok',
+    generatedAtMs: Number(rankings.generatedAtMs || Date.now()),
+    sourceSampleSize: Number((rankings.source as any)?.sampleSize || 0),
+    counts: {
+      topDay: Array.isArray(lists.topDay) ? lists.topDay.length : 0,
+      mostCommented: Array.isArray(lists.mostCommented) ? lists.mostCommented.length : 0,
+      mostVoted: Array.isArray(lists.mostVoted) ? lists.mostVoted.length : 0,
+      mostPolemic: Array.isArray(lists.mostPolemic) ? lists.mostPolemic.length : 0
+    }
+  };
+});
+
+export const refreshSecretRankings = functions.pubsub
+  .schedule('every 5 minutes')
+  .onRun(async () => {
+    const rankings = await refreshSecretRankingsInternal();
+    const sampleSize = Number((rankings.source as any)?.sampleSize || 0);
+    console.log(`Secret rankings refreshed. sampleSize=${sampleSize}`);
+    return null;
+  });
 
 // 2. Comments
 export const onCommentCreated = functions.firestore
