@@ -217,6 +217,19 @@ service cloud.firestore {
       return data.text is string && data.text.size() > 0 && data.text.size() <= 1000;
     }
 
+    function isSecretVisibleForRead(data) {
+      return data.module != 'secrets' ||
+        (
+          data.deletedAt == null &&
+          (
+            !('moderation' in data) ||
+            !(data.moderation is map) ||
+            !('status' in data.moderation) ||
+            data.moderation.status == 'active'
+          )
+        );
+    }
+
     function isValidReplyText(data) {
       return data.text is string && data.text.size() > 0 && data.text.size() <= 600;
     }
@@ -423,7 +436,7 @@ service cloud.firestore {
 
     // Content module
     match /content/{contentId} {
-      allow read: if true;
+      allow read: if isSecretVisibleForRead(resource.data);
       allow create: if isValidCommunityPostCreate(request.resource.data);
       allow update: if isValidContentUpdate();
       allow delete: if isAdmin();
@@ -446,6 +459,20 @@ service cloud.firestore {
           allow update: if isValidReplyUpdate(contentId, commentId);
           allow delete: if false;
         }
+      }
+
+      match /secret_votes/{fingerprintHash} {
+        allow read, create, update, delete: if false;
+      }
+
+      match /secret_reports/{fingerprintHash} {
+        allow read, create, update, delete: if false;
+      }
+
+      match /secret_comments/{commentId} {
+        allow read: if exists(contentPath(contentId)) &&
+          isSecretVisibleForRead(get(contentPath(contentId)).data);
+        allow create, update, delete: if false;
       }
     }
 

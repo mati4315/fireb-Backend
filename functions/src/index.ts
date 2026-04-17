@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs/promises';
 import { Readable } from 'stream';
+import * as crypto from 'crypto';
 import * as ftp from 'basic-ftp';
 import sharp = require('sharp');
 
@@ -80,6 +81,17 @@ const CONTENT_SLUG_MAX_LENGTH = 96;
 const NOTIFICATION_PAGE_SIZE = 300;
 const NOTIFICATION_RETENTION_DAYS = 30;
 const NOTIFICATION_DEVICE_ID_MAX_LENGTH = 120;
+const SECRET_TEXT_MIN_LENGTH = 12;
+const SECRET_TEXT_MAX_LENGTH = 280;
+const SECRET_COMMENT_MIN_LENGTH = 2;
+const SECRET_COMMENT_MAX_LENGTH = 300;
+const SECRET_ZONE_MAX_LENGTH = 48;
+const SECRET_REPORT_REASON_MAX_LENGTH = 140;
+const SECRET_CREATE_COOLDOWN_MS = 30 * 60 * 1000;
+const SECRET_COMMENT_COOLDOWN_MS = 20 * 1000;
+const SECRET_DAILY_LIMIT = 5;
+const SECRET_FINGERPRINT_TTL_MS = 72 * 60 * 60 * 1000;
+const SECRET_AUTO_HIDE_REPORT_THRESHOLD = 6;
 const USER_DEFAULT_FEED_TAB_VALUES = new Set<UserDefaultFeedTab>([
   'todo',
   'news',
@@ -96,6 +108,18 @@ const NOTIFICATION_TYPE_DEFAULTS: NotificationTypeSettings = {
 const PERMANENT_FCM_TOKEN_ERROR_CODES = new Set<string>([
   'messaging/invalid-registration-token',
   'messaging/registration-token-not-registered'
+]);
+const SECRET_CATEGORY_VALUES = new Set<string>([
+  'rumores',
+  'relaciones',
+  'trabajo_negocios',
+  'denuncia_light',
+  'random_divertido'
+]);
+const SECRET_SEX_VALUES = new Set<string>([
+  'no_responder',
+  'hombre',
+  'mujer'
 ]);
 
 const buildCommentRef = (contentId: string, commentId: string) =>
@@ -231,6 +255,147 @@ const isLotteryModuleEnabled = (
 ): boolean => {
   const lotteryConfig = modulesConfig?.lottery ?? {};
   return lotteryConfig.enabled ?? true;
+};
+
+const isSecretsModuleEnabled = (
+  modulesConfig: FirebaseFirestore.DocumentData | undefined
+): boolean => {
+  const secretsConfig = modulesConfig?.secrets ?? {};
+  return secretsConfig.enabled ?? true;
+};
+
+const collapseWhitespace = (value: string): string => value.replace(/\s+/g, ' ').trim();
+
+const hasMeaningfulSecretText = (value: string): boolean =>
+  /[0-9A-Za-z\u00C0-\u024F]/.test(value);
+
+const sanitizeSecretText = (value: unknown, maxLength: number): string => {
+  const asString = typeof value === 'string' ? value : '';
+  return collapseWhitespace(asString).slice(0, maxLength);
+};
+
+const normalizeSecretCategory = (value: unknown): string | null => {
+  const normalized = sanitizeBoundedString(value, 40).toLowerCase();
+  if (!normalized) return null;
+  return SECRET_CATEGORY_VALUES.has(normalized) ? normalized : null;
+};
+
+const normalizeSecretSex = (value: unknown): 'no_responder' | 'hombre' | 'mujer' => {
+  const normalized = sanitizeBoundedString(value, 20).toLowerCase();
+  if (SECRET_SEX_VALUES.has(normalized)) {
+    return normalized as 'no_responder' | 'hombre' | 'mujer';
+  }
+  return 'no_responder';
+};
+
+const normalizeSecretZone = (value: unknown): string | null => {
+  const sanitized = sanitizeSecretText(value, SECRET_ZONE_MAX_LENGTH);
+  return sanitized || null;
+};
+
+const normalizeSecretAge = (value: unknown): number | null => {
+  if (value == null || value === '') return null;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  const normalized = Math.floor(parsed);
+  if (normalized < 13 || normalized > 99) return null;
+  return normalized;
+};
+
+const normalizeSecretReportReason = (value: unknown): string => {
+  const reason = sanitizeSecretText(value, SECRET_REPORT_REASON_MAX_LENGTH);
+  return reason || 'contenido_inapropiado';
+};
+
+const normalizeSecretClientAnonId = (value: unknown): string => {
+  const raw = sanitizeBoundedString(value, 120);
+  return raw.replace(/[^a-zA-Z0-9_-]/g, '');
+};
+
+const timestampToMillisOrZero = (value: unknown): number => {
+  if (value instanceof admin.firestore.Timestamp) return value.toMillis();
+  return 0;
+};
+
+const buildSecretFingerprintHash = (
+  data: any,
+  context: functions.https.CallableContext
+): string => {
+  const rawRequest = (context as functions.https.CallableContext & { rawRequest?: any }).rawRequest;
+  const forwardedForHeader = rawRequest?.headers?.['x-forwarded-for'];
+  const forwardedForValue = Array.isArray(forwardedForHeader)
+    ? String(forwardedForHeader[0] || '')
+    : String(forwardedForHeader || '');
+  const forwardedIp = forwardedForValue.split(',')[0]?.trim() || '';
+  const requestIp = forwardedIp || String(rawRequest?.ip || '');
+  const userAgent = String(rawRequest?.headers?.['user-agent'] || '');
+  const clientAnonId = normalizeSecretClientAnonId(data?.clientAnonId);
+  const projectTag = String(process.env.GCLOUD_PROJECT || 'cdelu');
+  const pepper = String(
+    process.env.SECRETS_FINGERPRINT_PEPPER || 'change_me_secretos_pepper_v1'
+  );
+
+  const rawIdentity = [
+    requestIp,
+    userAgent,
+    clientAnonId,
+    projectTag
+  ].join('|');
+
+  return crypto
+    .createHash('sha256')
+    .update(`${pepper}|${rawIdentity}`)
+    .digest('hex');
+};
+
+const createSecretAlias = (fingerprintHash: string, scope: string): string => {
+  const aliasSeed = crypto
+    .createHash('sha1')
+    .update(`${fingerprintHash}|${scope}`)
+    .digest('hex')
+    .slice(0, 8);
+  const numeric = Number.parseInt(aliasSeed, 16) % 10000;
+  return `Anon${String(numeric).padStart(4, '0')}`;
+};
+
+type SecretTrend = 'up' | 'down' | 'stable';
+
+type SecretRankResult = {
+  score: number;
+  hotScore: number;
+  controversyScore: number;
+  trend: SecretTrend;
+};
+
+const computeSecretRank = (
+  upVotesCount: number,
+  downVotesCount: number,
+  commentsCount: number,
+  createdAtMs: number
+): SecretRankResult => {
+  const safeUp = Math.max(0, Math.floor(Number(upVotesCount) || 0));
+  const safeDown = Math.max(0, Math.floor(Number(downVotesCount) || 0));
+  const safeComments = Math.max(0, Math.floor(Number(commentsCount) || 0));
+  const totalVotes = safeUp + safeDown;
+  const score = safeUp - safeDown;
+  const ageHours = Math.max(0, (Date.now() - createdAtMs) / (60 * 60 * 1000));
+  const engagementBoost = Math.log10(Math.max(1, totalVotes + safeComments + 1));
+  const hotScoreRaw = score * 1.25 + safeComments * 0.8 + engagementBoost * 2.2 - ageHours * 0.06;
+  const controversyScoreRaw =
+    totalVotes > 0
+      ? (Math.min(safeUp, safeDown) / totalVotes) * Math.log2(totalVotes + 1) * 100
+      : 0;
+
+  let trend: SecretTrend = 'stable';
+  if (score >= 4 || hotScoreRaw >= 3) trend = 'up';
+  else if (score <= -3) trend = 'down';
+
+  return {
+    score,
+    hotScore: Number(hotScoreRaw.toFixed(4)),
+    controversyScore: Number(controversyScoreRaw.toFixed(4)),
+    trend
+  };
 };
 
 const clampInteger = (value: unknown, min: number, max: number, fallback: number): number => {
@@ -1140,6 +1305,525 @@ export const toggleContentLike = functions.https.onCall(async (data, context) =>
       status: 'ok',
       liked: true,
       contentId
+    };
+  });
+});
+
+// 2. Secrets
+export const createSecretCallable = functions.https.onCall(async (data, context) => {
+  const text = sanitizeSecretText(data?.text, SECRET_TEXT_MAX_LENGTH);
+  if (text.length < SECRET_TEXT_MIN_LENGTH) {
+    throw new functions.https.HttpsError(
+      'invalid-argument',
+      `El secreto debe tener al menos ${SECRET_TEXT_MIN_LENGTH} caracteres.`
+    );
+  }
+  if (!hasMeaningfulSecretText(text)) {
+    throw new functions.https.HttpsError(
+      'invalid-argument',
+      'Escribe un texto real, no solo emojis o simbolos.'
+    );
+  }
+
+  const sex = normalizeSecretSex(data?.sex);
+  const age = normalizeSecretAge(data?.age);
+  const category = normalizeSecretCategory(data?.category);
+  const zone = normalizeSecretZone(data?.zone);
+  const fingerprintHash = buildSecretFingerprintHash(data, context);
+  const nowMs = Date.now();
+  const nowTs = admin.firestore.Timestamp.fromMillis(nowMs);
+  const oneDayMs = 24 * 60 * 60 * 1000;
+
+  const modulesConfigRef = db.collection('_config').doc('modules');
+  const rateLimitRef = db.collection('secret_rate_limits').doc(fingerprintHash);
+  const fingerprintRef = db.collection('secret_fingerprints').doc(fingerprintHash);
+
+  return db.runTransaction(async (tx) => {
+    const [modulesConfigSnap, rateLimitSnap, fingerprintSnap] = await Promise.all([
+      tx.get(modulesConfigRef),
+      tx.get(rateLimitRef),
+      tx.get(fingerprintRef)
+    ]);
+
+    if (!isSecretsModuleEnabled(modulesConfigSnap.data())) {
+      throw new functions.https.HttpsError(
+        'failed-precondition',
+        'El modulo de secretos esta deshabilitado.'
+      );
+    }
+
+    const rateLimitData = rateLimitSnap.data() || {};
+    const lastSecretAtMs = timestampToMillisOrZero(rateLimitData.lastSecretAt);
+    if (lastSecretAtMs > 0) {
+      const elapsed = nowMs - lastSecretAtMs;
+      if (elapsed < SECRET_CREATE_COOLDOWN_MS) {
+        const remainingMin = Math.max(
+          1,
+          Math.ceil((SECRET_CREATE_COOLDOWN_MS - elapsed) / (60 * 1000))
+        );
+        throw new functions.https.HttpsError(
+          'failed-precondition',
+          `Debes esperar ${remainingMin} min para publicar otro secreto.`
+        );
+      }
+    }
+
+    let dailyWindowStartMs = timestampToMillisOrZero(rateLimitData.dailyWindowStart);
+    let dailyCount = Number(rateLimitData.dailyCount || 0);
+    if (!dailyWindowStartMs || nowMs - dailyWindowStartMs >= oneDayMs) {
+      dailyWindowStartMs = nowMs;
+      dailyCount = 0;
+    }
+
+    if (dailyCount >= SECRET_DAILY_LIMIT) {
+      throw new functions.https.HttpsError(
+        'resource-exhausted',
+        'Alcanzaste el limite diario de secretos anonimos.'
+      );
+    }
+
+    const secretRef = db.collection('content').doc();
+    const alias = createSecretAlias(fingerprintHash, secretRef.id);
+    const initialRank = computeSecretRank(0, 0, 0, nowMs);
+
+    tx.set(secretRef, {
+      module: 'secrets',
+      type: 'secret',
+      source: 'anonymous',
+      isOficial: false,
+      titulo: '',
+      descripcion: text,
+      category: category || null,
+      zone: zone || null,
+      sex,
+      age,
+      anonAlias: alias,
+      stats: {
+        upVotesCount: 0,
+        downVotesCount: 0,
+        commentsCount: 0,
+        reportsCount: 0,
+        viewsCount: 0,
+        totalVotesCount: 0
+      },
+      rank: {
+        score: initialRank.score,
+        hotScore: initialRank.hotScore,
+        controversyScore: initialRank.controversyScore,
+        trend: initialRank.trend
+      },
+      moderation: {
+        status: 'active',
+        reason: null,
+        reviewedBy: null,
+        reviewedAt: null
+      },
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      deletedAt: null
+    });
+
+    const nextRateLimit: Record<string, unknown> = {
+      lastSecretAt: nowTs,
+      dailyCount: dailyCount + 1,
+      dailyWindowStart: admin.firestore.Timestamp.fromMillis(dailyWindowStartMs),
+      expiresAt: admin.firestore.Timestamp.fromMillis(nowMs + SECRET_FINGERPRINT_TTL_MS),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    };
+
+    const preservedLastCommentAt = rateLimitData.lastCommentAt;
+    if (preservedLastCommentAt instanceof admin.firestore.Timestamp) {
+      nextRateLimit.lastCommentAt = preservedLastCommentAt;
+    }
+
+    tx.set(rateLimitRef, nextRateLimit, { merge: true });
+
+    const existingFirstSeenAt =
+      (fingerprintSnap.data()?.firstSeenAt instanceof admin.firestore.Timestamp)
+        ? fingerprintSnap.data()?.firstSeenAt
+        : nowTs;
+
+    tx.set(
+      fingerprintRef,
+      {
+        firstSeenAt: existingFirstSeenAt,
+        lastSeenAt: nowTs,
+        expiresAt: admin.firestore.Timestamp.fromMillis(nowMs + SECRET_FINGERPRINT_TTL_MS),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    );
+
+    return {
+      status: 'ok',
+      secretId: secretRef.id,
+      anonAlias: alias
+    };
+  });
+});
+
+export const voteSecretCallable = functions.https.onCall(async (data, context) => {
+  const secretId = typeof data?.secretId === 'string' ? data.secretId.trim() : '';
+  const voteRaw = Number(data?.vote);
+  const vote = voteRaw === -1 ? -1 : 1;
+  if (!secretId) {
+    throw new functions.https.HttpsError('invalid-argument', 'secretId es obligatorio.');
+  }
+  if (voteRaw !== 1 && voteRaw !== -1) {
+    throw new functions.https.HttpsError('invalid-argument', 'vote debe ser 1 o -1.');
+  }
+
+  const fingerprintHash = buildSecretFingerprintHash(data, context);
+  const nowMs = Date.now();
+  const nowTs = admin.firestore.Timestamp.fromMillis(nowMs);
+
+  const modulesConfigRef = db.collection('_config').doc('modules');
+  const secretRef = db.collection('content').doc(secretId);
+  const voteRef = secretRef.collection('secret_votes').doc(fingerprintHash);
+  const fingerprintRef = db.collection('secret_fingerprints').doc(fingerprintHash);
+
+  return db.runTransaction(async (tx) => {
+    const [modulesConfigSnap, secretSnap, voteSnap, fingerprintSnap] = await Promise.all([
+      tx.get(modulesConfigRef),
+      tx.get(secretRef),
+      tx.get(voteRef),
+      tx.get(fingerprintRef)
+    ]);
+
+    if (!isSecretsModuleEnabled(modulesConfigSnap.data())) {
+      throw new functions.https.HttpsError(
+        'failed-precondition',
+        'El modulo de secretos esta deshabilitado.'
+      );
+    }
+    if (!secretSnap.exists) {
+      throw new functions.https.HttpsError('not-found', 'El secreto no existe.');
+    }
+
+    const secretData = secretSnap.data() || {};
+    if (secretData.module !== 'secrets' || secretData.deletedAt != null) {
+      throw new functions.https.HttpsError('failed-precondition', 'El secreto no esta disponible.');
+    }
+    const moderationStatus = sanitizeBoundedString(secretData?.moderation?.status, 40) || 'active';
+    if (moderationStatus !== 'active') {
+      throw new functions.https.HttpsError(
+        'failed-precondition',
+        'Este secreto no acepta interacciones por moderacion.'
+      );
+    }
+
+    const previousVote = voteSnap.exists
+      ? Number(voteSnap.data()?.vote || 0)
+      : 0;
+    if (previousVote === vote) {
+      return {
+        status: 'ok',
+        secretId,
+        unchanged: true,
+        vote
+      };
+    }
+
+    let upVotesCount = Math.max(0, Math.floor(Number(secretData?.stats?.upVotesCount || 0)));
+    let downVotesCount = Math.max(0, Math.floor(Number(secretData?.stats?.downVotesCount || 0)));
+    const commentsCount = Math.max(0, Math.floor(Number(secretData?.stats?.commentsCount || 0)));
+
+    if (previousVote === 1) upVotesCount = Math.max(0, upVotesCount - 1);
+    if (previousVote === -1) downVotesCount = Math.max(0, downVotesCount - 1);
+
+    if (vote === 1) upVotesCount += 1;
+    if (vote === -1) downVotesCount += 1;
+
+    const createdAtMs = timestampToMillisOrZero(secretData.createdAt) || nowMs;
+    const rank = computeSecretRank(upVotesCount, downVotesCount, commentsCount, createdAtMs);
+
+    const existingVoteCreatedAt = voteSnap.data()?.createdAt;
+    tx.set(
+      voteRef,
+      {
+        vote,
+        createdAt: existingVoteCreatedAt instanceof admin.firestore.Timestamp
+          ? existingVoteCreatedAt
+          : admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    );
+
+    tx.update(secretRef, {
+      'stats.upVotesCount': upVotesCount,
+      'stats.downVotesCount': downVotesCount,
+      'stats.totalVotesCount': upVotesCount + downVotesCount,
+      'rank.score': rank.score,
+      'rank.hotScore': rank.hotScore,
+      'rank.controversyScore': rank.controversyScore,
+      'rank.trend': rank.trend,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    const existingFirstSeenAt =
+      (fingerprintSnap.data()?.firstSeenAt instanceof admin.firestore.Timestamp)
+        ? fingerprintSnap.data()?.firstSeenAt
+        : nowTs;
+
+    tx.set(
+      fingerprintRef,
+      {
+        firstSeenAt: existingFirstSeenAt,
+        lastSeenAt: nowTs,
+        expiresAt: admin.firestore.Timestamp.fromMillis(nowMs + SECRET_FINGERPRINT_TTL_MS),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    );
+
+    return {
+      status: 'ok',
+      secretId,
+      vote,
+      upVotesCount,
+      downVotesCount,
+      score: rank.score,
+      trend: rank.trend
+    };
+  });
+});
+
+export const createSecretCommentCallable = functions.https.onCall(async (data, context) => {
+  const secretId = typeof data?.secretId === 'string' ? data.secretId.trim() : '';
+  if (!secretId) {
+    throw new functions.https.HttpsError('invalid-argument', 'secretId es obligatorio.');
+  }
+
+  const text = sanitizeSecretText(data?.text, SECRET_COMMENT_MAX_LENGTH);
+  if (text.length < SECRET_COMMENT_MIN_LENGTH) {
+    throw new functions.https.HttpsError(
+      'invalid-argument',
+      `El comentario debe tener al menos ${SECRET_COMMENT_MIN_LENGTH} caracteres.`
+    );
+  }
+  if (!hasMeaningfulSecretText(text)) {
+    throw new functions.https.HttpsError(
+      'invalid-argument',
+      'Escribe un comentario valido.'
+    );
+  }
+
+  const fingerprintHash = buildSecretFingerprintHash(data, context);
+  const nowMs = Date.now();
+  const nowTs = admin.firestore.Timestamp.fromMillis(nowMs);
+
+  const modulesConfigRef = db.collection('_config').doc('modules');
+  const secretRef = db.collection('content').doc(secretId);
+  const rateLimitRef = db.collection('secret_rate_limits').doc(fingerprintHash);
+  const fingerprintRef = db.collection('secret_fingerprints').doc(fingerprintHash);
+
+  return db.runTransaction(async (tx) => {
+    const [modulesConfigSnap, secretSnap, rateLimitSnap, fingerprintSnap] = await Promise.all([
+      tx.get(modulesConfigRef),
+      tx.get(secretRef),
+      tx.get(rateLimitRef),
+      tx.get(fingerprintRef)
+    ]);
+
+    if (!isSecretsModuleEnabled(modulesConfigSnap.data())) {
+      throw new functions.https.HttpsError(
+        'failed-precondition',
+        'El modulo de secretos esta deshabilitado.'
+      );
+    }
+    if (!secretSnap.exists) {
+      throw new functions.https.HttpsError('not-found', 'El secreto no existe.');
+    }
+
+    const secretData = secretSnap.data() || {};
+    if (secretData.module !== 'secrets' || secretData.deletedAt != null) {
+      throw new functions.https.HttpsError('failed-precondition', 'El secreto no esta disponible.');
+    }
+    const moderationStatus = sanitizeBoundedString(secretData?.moderation?.status, 40) || 'active';
+    if (moderationStatus !== 'active') {
+      throw new functions.https.HttpsError(
+        'failed-precondition',
+        'Este secreto no permite comentarios.'
+      );
+    }
+
+    const rateLimitData = rateLimitSnap.data() || {};
+    const lastCommentAtMs = timestampToMillisOrZero(rateLimitData.lastCommentAt);
+    if (lastCommentAtMs > 0) {
+      const elapsed = nowMs - lastCommentAtMs;
+      if (elapsed < SECRET_COMMENT_COOLDOWN_MS) {
+        const remaining = Math.max(1, Math.ceil((SECRET_COMMENT_COOLDOWN_MS - elapsed) / 1000));
+        throw new functions.https.HttpsError(
+          'failed-precondition',
+          `Espera ${remaining}s antes de comentar de nuevo.`
+        );
+      }
+    }
+
+    const commentRef = secretRef.collection('secret_comments').doc();
+    const alias = createSecretAlias(fingerprintHash, `${secretId}:${commentRef.id}`);
+
+    const upVotesCount = Math.max(0, Math.floor(Number(secretData?.stats?.upVotesCount || 0)));
+    const downVotesCount = Math.max(0, Math.floor(Number(secretData?.stats?.downVotesCount || 0)));
+    const commentsCount = Math.max(0, Math.floor(Number(secretData?.stats?.commentsCount || 0))) + 1;
+    const createdAtMs = timestampToMillisOrZero(secretData.createdAt) || nowMs;
+    const rank = computeSecretRank(upVotesCount, downVotesCount, commentsCount, createdAtMs);
+
+    tx.set(commentRef, {
+      text,
+      anonAlias: alias,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      deletedAt: null,
+      score: 0,
+      reportsCount: 0
+    });
+
+    tx.update(secretRef, {
+      'stats.commentsCount': commentsCount,
+      'rank.score': rank.score,
+      'rank.hotScore': rank.hotScore,
+      'rank.controversyScore': rank.controversyScore,
+      'rank.trend': rank.trend,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    const nextRateLimit: Record<string, unknown> = {
+      lastCommentAt: nowTs,
+      expiresAt: admin.firestore.Timestamp.fromMillis(nowMs + SECRET_FINGERPRINT_TTL_MS),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    };
+    const preservedLastSecretAt = rateLimitData.lastSecretAt;
+    const preservedDailyCount = Number(rateLimitData.dailyCount || 0);
+    const preservedDailyWindowStart = rateLimitData.dailyWindowStart;
+    if (preservedLastSecretAt instanceof admin.firestore.Timestamp) {
+      nextRateLimit.lastSecretAt = preservedLastSecretAt;
+    }
+    if (preservedDailyCount > 0) {
+      nextRateLimit.dailyCount = preservedDailyCount;
+    }
+    if (preservedDailyWindowStart instanceof admin.firestore.Timestamp) {
+      nextRateLimit.dailyWindowStart = preservedDailyWindowStart;
+    }
+
+    tx.set(rateLimitRef, nextRateLimit, { merge: true });
+
+    const existingFirstSeenAt =
+      (fingerprintSnap.data()?.firstSeenAt instanceof admin.firestore.Timestamp)
+        ? fingerprintSnap.data()?.firstSeenAt
+        : nowTs;
+
+    tx.set(
+      fingerprintRef,
+      {
+        firstSeenAt: existingFirstSeenAt,
+        lastSeenAt: nowTs,
+        expiresAt: admin.firestore.Timestamp.fromMillis(nowMs + SECRET_FINGERPRINT_TTL_MS),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    );
+
+    return {
+      status: 'ok',
+      secretId,
+      commentId: commentRef.id,
+      anonAlias: alias
+    };
+  });
+});
+
+export const reportSecretCallable = functions.https.onCall(async (data, context) => {
+  const secretId = typeof data?.secretId === 'string' ? data.secretId.trim() : '';
+  if (!secretId) {
+    throw new functions.https.HttpsError('invalid-argument', 'secretId es obligatorio.');
+  }
+
+  const reason = normalizeSecretReportReason(data?.reason);
+  const fingerprintHash = buildSecretFingerprintHash(data, context);
+  const nowMs = Date.now();
+  const nowTs = admin.firestore.Timestamp.fromMillis(nowMs);
+
+  const modulesConfigRef = db.collection('_config').doc('modules');
+  const secretRef = db.collection('content').doc(secretId);
+  const reportRef = secretRef.collection('secret_reports').doc(fingerprintHash);
+  const fingerprintRef = db.collection('secret_fingerprints').doc(fingerprintHash);
+
+  return db.runTransaction(async (tx) => {
+    const [modulesConfigSnap, secretSnap, reportSnap, fingerprintSnap] = await Promise.all([
+      tx.get(modulesConfigRef),
+      tx.get(secretRef),
+      tx.get(reportRef),
+      tx.get(fingerprintRef)
+    ]);
+
+    if (!isSecretsModuleEnabled(modulesConfigSnap.data())) {
+      throw new functions.https.HttpsError(
+        'failed-precondition',
+        'El modulo de secretos esta deshabilitado.'
+      );
+    }
+    if (!secretSnap.exists) {
+      throw new functions.https.HttpsError('not-found', 'El secreto no existe.');
+    }
+
+    const secretData = secretSnap.data() || {};
+    if (secretData.module !== 'secrets' || secretData.deletedAt != null) {
+      throw new functions.https.HttpsError('failed-precondition', 'El secreto no esta disponible.');
+    }
+
+    if (reportSnap.exists) {
+      return {
+        status: 'already_reported',
+        secretId
+      };
+    }
+
+    const reportsCount = Math.max(0, Math.floor(Number(secretData?.stats?.reportsCount || 0))) + 1;
+    const currentStatus = sanitizeBoundedString(secretData?.moderation?.status, 40) || 'active';
+    const currentReason = secretData?.moderation?.reason ?? null;
+
+    let nextStatus = currentStatus;
+    let nextReason = currentReason;
+    if (currentStatus === 'active' && reportsCount >= SECRET_AUTO_HIDE_REPORT_THRESHOLD) {
+      nextStatus = 'hidden_auto';
+      nextReason = 'report_threshold';
+    }
+
+    tx.set(reportRef, {
+      reason,
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    tx.update(secretRef, {
+      'stats.reportsCount': reportsCount,
+      'moderation.status': nextStatus,
+      'moderation.reason': nextReason,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    const existingFirstSeenAt =
+      (fingerprintSnap.data()?.firstSeenAt instanceof admin.firestore.Timestamp)
+        ? fingerprintSnap.data()?.firstSeenAt
+        : nowTs;
+
+    tx.set(
+      fingerprintRef,
+      {
+        firstSeenAt: existingFirstSeenAt,
+        lastSeenAt: nowTs,
+        expiresAt: admin.firestore.Timestamp.fromMillis(nowMs + SECRET_FINGERPRINT_TTL_MS),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    );
+
+    return {
+      status: 'ok',
+      secretId,
+      reportsCount,
+      moderationStatus: nextStatus
     };
   });
 });
