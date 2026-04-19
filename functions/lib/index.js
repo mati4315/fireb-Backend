@@ -41,6 +41,7 @@ const NOTIFICATION_DEVICE_ID_MAX_LENGTH = 120;
 const SECRET_TEXT_MIN_LENGTH = 12;
 const SECRET_TEXT_MAX_LENGTH = 280;
 const SECRET_TEXT_MAX_ABSOLUTE = 500;
+const SECRET_NUMERIC_ID_START = 8301641;
 const SECRET_COMMENT_MIN_LENGTH = 2;
 const SECRET_COMMENT_MAX_LENGTH = 300;
 const SECRET_ZONE_MAX_LENGTH = 48;
@@ -1170,13 +1171,15 @@ exports.createSecretCallable = functions.https.onCall(async (data, context) => {
     const oneDayMs = 24 * 60 * 60 * 1000;
     const modulesConfigRef = db.collection('_config').doc('modules');
     const secretSettingsRef = db.collection('_config').doc('secret_settings');
+    const secretCounterRef = db.collection('_counters').doc('secret_ids');
     const rateLimitRef = db.collection('secret_rate_limits').doc(fingerprintHash);
     const fingerprintRef = db.collection('secret_fingerprints').doc(fingerprintHash);
     return db.runTransaction(async (tx) => {
         var _a, _b;
-        const [modulesConfigSnap, secretSettingsSnap, rateLimitSnap, fingerprintSnap] = await Promise.all([
+        const [modulesConfigSnap, secretSettingsSnap, secretCounterSnap, rateLimitSnap, fingerprintSnap] = await Promise.all([
             tx.get(modulesConfigRef),
             tx.get(secretSettingsRef),
+            tx.get(secretCounterRef),
             tx.get(rateLimitRef),
             tx.get(fingerprintRef)
         ]);
@@ -1192,13 +1195,17 @@ exports.createSecretCallable = functions.https.onCall(async (data, context) => {
             throw new functions.https.HttpsError('invalid-argument', 'Escribe un texto real, no solo emojis o simbolos.');
         }
         const rateLimitData = rateLimitSnap.data() || {};
-        const lastSecretAtMs = timestampToMillisOrZero(rateLimitData.lastSecretAt);
-        if (lastSecretAtMs > 0) {
-            const elapsed = nowMs - lastSecretAtMs;
-            if (elapsed < runtimeSettings.createCooldownMs) {
-                const remainingMin = Math.max(1, Math.ceil((runtimeSettings.createCooldownMs - elapsed) / (60 * 1000)));
-                throw new functions.https.HttpsError('failed-precondition', `Debes esperar ${remainingMin} min para publicar otro secreto.`);
-            }
+        let burstWindowStartMs = timestampToMillisOrZero(rateLimitData.burstWindowStart);
+        let burstCount = Number(rateLimitData.burstCount || 0);
+        // Reiniciar ráfaga si ya pasó el tiempo
+        if (!burstWindowStartMs || nowMs - burstWindowStartMs >= runtimeSettings.createCooldownMs) {
+            burstWindowStartMs = nowMs;
+            burstCount = 0;
+        }
+        if (burstCount >= 3) {
+            const elapsed = nowMs - burstWindowStartMs;
+            const remainingMin = Math.max(1, Math.ceil((runtimeSettings.createCooldownMs - elapsed) / (60 * 1000)));
+            throw new functions.https.HttpsError('failed-precondition', `Has publicado demasiados secretos rapido. Espera ${remainingMin} min para publicar otro.`);
         }
         let dailyWindowStartMs = timestampToMillisOrZero(rateLimitData.dailyWindowStart);
         let dailyCount = Number(rateLimitData.dailyCount || 0);
@@ -1209,8 +1216,23 @@ exports.createSecretCallable = functions.https.onCall(async (data, context) => {
         if (dailyCount >= runtimeSettings.dailyLimit) {
             throw new functions.https.HttpsError('resource-exhausted', 'Alcanzaste el limite diario de secretos anonimos.');
         }
-        const secretRef = db.collection('content').doc();
-        const alias = createSecretAlias(fingerprintHash, secretRef.id);
+        const counterData = secretCounterSnap.data() || {};
+        const lastIssuedId = Math.max(SECRET_NUMERIC_ID_START - 1, Math.floor(Number(counterData.lastIssuedId || 0)));
+        let nextSecretNumericId = lastIssuedId + 1;
+        let secretRef = db.collection('content').doc(String(nextSecretNumericId));
+        let secretSnap = await tx.get(secretRef);
+        while (secretSnap.exists) {
+            nextSecretNumericId += 1;
+            secretRef = db.collection('content').doc(String(nextSecretNumericId));
+            secretSnap = await tx.get(secretRef);
+        }
+        tx.set(secretCounterRef, {
+            lastIssuedId: nextSecretNumericId,
+            startFrom: SECRET_NUMERIC_ID_START,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+        const secretId = String(nextSecretNumericId);
+        const alias = createSecretAlias(fingerprintHash, secretId);
         const initialRank = computeSecretRank(0, 0, 0, nowMs);
         tx.set(secretRef, {
             module: 'secrets',
@@ -1252,6 +1274,8 @@ exports.createSecretCallable = functions.https.onCall(async (data, context) => {
             lastSecretAt: nowTs,
             dailyCount: dailyCount + 1,
             dailyWindowStart: admin.firestore.Timestamp.fromMillis(dailyWindowStartMs),
+            burstWindowStart: admin.firestore.Timestamp.fromMillis(burstWindowStartMs),
+            burstCount: burstCount + 1,
             expiresAt: admin.firestore.Timestamp.fromMillis(nowMs + SECRET_FINGERPRINT_TTL_MS),
             updatedAt: admin.firestore.FieldValue.serverTimestamp()
         };
@@ -1271,7 +1295,7 @@ exports.createSecretCallable = functions.https.onCall(async (data, context) => {
         }, { merge: true });
         return {
             status: 'ok',
-            secretId: secretRef.id,
+            secretId,
             anonAlias: alias
         };
     });
