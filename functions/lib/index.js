@@ -40,12 +40,11 @@ const NOTIFICATION_RETENTION_DAYS = 30;
 const NOTIFICATION_DEVICE_ID_MAX_LENGTH = 120;
 const SECRET_TEXT_MIN_LENGTH = 12;
 const SECRET_TEXT_MAX_LENGTH = 280;
+const SECRET_TEXT_MAX_ABSOLUTE = 500;
 const SECRET_COMMENT_MIN_LENGTH = 2;
 const SECRET_COMMENT_MAX_LENGTH = 300;
 const SECRET_ZONE_MAX_LENGTH = 48;
 const SECRET_REPORT_REASON_MAX_LENGTH = 140;
-const SECRET_CREATE_COOLDOWN_MS = 30 * 60 * 1000;
-const SECRET_COMMENT_COOLDOWN_MS = 20 * 1000;
 const SECRET_DAILY_LIMIT = 5;
 const SECRET_FINGERPRINT_TTL_MS = 72 * 60 * 60 * 1000;
 const SECRET_AUTO_HIDE_REPORT_THRESHOLD = 6;
@@ -268,6 +267,23 @@ const createSecretAlias = (fingerprintHash, scope) => {
         .slice(0, 8);
     const numeric = Number.parseInt(aliasSeed, 16) % 10000;
     return `Anon${String(numeric).padStart(4, '0')}`;
+};
+const resolveSecretRuntimeSettings = (data) => {
+    const maxTextLength = clampInteger(data === null || data === void 0 ? void 0 : data.maxTextLength, 120, 500, SECRET_TEXT_MAX_LENGTH);
+    const minTextLengthRaw = clampInteger(data === null || data === void 0 ? void 0 : data.minTextLength, 1, 80, SECRET_TEXT_MIN_LENGTH);
+    const minTextLength = Math.min(minTextLengthRaw, maxTextLength);
+    const createCooldownMinutes = clampInteger(data === null || data === void 0 ? void 0 : data.createCooldownMinutes, 1, 240, 30);
+    const commentCooldownSeconds = clampInteger(data === null || data === void 0 ? void 0 : data.commentCooldownSeconds, 1, 300, 20);
+    const dailyLimit = clampInteger(data === null || data === void 0 ? void 0 : data.dailyLimit, 1, 30, SECRET_DAILY_LIMIT);
+    const autoHideReportsThreshold = clampInteger(data === null || data === void 0 ? void 0 : data.autoHideReportsThreshold, 1, 100, SECRET_AUTO_HIDE_REPORT_THRESHOLD);
+    return {
+        minTextLength,
+        maxTextLength,
+        createCooldownMs: createCooldownMinutes * 60 * 1000,
+        commentCooldownMs: commentCooldownSeconds * 1000,
+        dailyLimit,
+        autoHideReportsThreshold
+    };
 };
 const computeSecretRank = (upVotesCount, downVotesCount, commentsCount, createdAtMs) => {
     const safeUp = Math.max(0, Math.floor(Number(upVotesCount) || 0));
@@ -1143,13 +1159,7 @@ exports.toggleContentLike = functions.https.onCall(async (data, context) => {
 });
 // 2. Secrets
 exports.createSecretCallable = functions.https.onCall(async (data, context) => {
-    const text = sanitizeSecretText(data === null || data === void 0 ? void 0 : data.text, SECRET_TEXT_MAX_LENGTH);
-    if (text.length < SECRET_TEXT_MIN_LENGTH) {
-        throw new functions.https.HttpsError('invalid-argument', `El secreto debe tener al menos ${SECRET_TEXT_MIN_LENGTH} caracteres.`);
-    }
-    if (!hasMeaningfulSecretText(text)) {
-        throw new functions.https.HttpsError('invalid-argument', 'Escribe un texto real, no solo emojis o simbolos.');
-    }
+    const textRaw = sanitizeSecretText(data === null || data === void 0 ? void 0 : data.text, SECRET_TEXT_MAX_ABSOLUTE);
     const sex = normalizeSecretSex(data === null || data === void 0 ? void 0 : data.sex);
     const age = normalizeSecretAge(data === null || data === void 0 ? void 0 : data.age);
     const category = normalizeSecretCategory(data === null || data === void 0 ? void 0 : data.category);
@@ -1159,24 +1169,34 @@ exports.createSecretCallable = functions.https.onCall(async (data, context) => {
     const nowTs = admin.firestore.Timestamp.fromMillis(nowMs);
     const oneDayMs = 24 * 60 * 60 * 1000;
     const modulesConfigRef = db.collection('_config').doc('modules');
+    const secretSettingsRef = db.collection('_config').doc('secret_settings');
     const rateLimitRef = db.collection('secret_rate_limits').doc(fingerprintHash);
     const fingerprintRef = db.collection('secret_fingerprints').doc(fingerprintHash);
     return db.runTransaction(async (tx) => {
         var _a, _b;
-        const [modulesConfigSnap, rateLimitSnap, fingerprintSnap] = await Promise.all([
+        const [modulesConfigSnap, secretSettingsSnap, rateLimitSnap, fingerprintSnap] = await Promise.all([
             tx.get(modulesConfigRef),
+            tx.get(secretSettingsRef),
             tx.get(rateLimitRef),
             tx.get(fingerprintRef)
         ]);
         if (!isSecretsModuleEnabled(modulesConfigSnap.data())) {
             throw new functions.https.HttpsError('failed-precondition', 'El modulo de secretos esta deshabilitado.');
         }
+        const runtimeSettings = resolveSecretRuntimeSettings(secretSettingsSnap.data());
+        const text = sanitizeSecretText(textRaw, runtimeSettings.maxTextLength);
+        if (text.length < runtimeSettings.minTextLength) {
+            throw new functions.https.HttpsError('invalid-argument', `El secreto debe tener al menos ${runtimeSettings.minTextLength} caracteres.`);
+        }
+        if (!hasMeaningfulSecretText(text)) {
+            throw new functions.https.HttpsError('invalid-argument', 'Escribe un texto real, no solo emojis o simbolos.');
+        }
         const rateLimitData = rateLimitSnap.data() || {};
         const lastSecretAtMs = timestampToMillisOrZero(rateLimitData.lastSecretAt);
         if (lastSecretAtMs > 0) {
             const elapsed = nowMs - lastSecretAtMs;
-            if (elapsed < SECRET_CREATE_COOLDOWN_MS) {
-                const remainingMin = Math.max(1, Math.ceil((SECRET_CREATE_COOLDOWN_MS - elapsed) / (60 * 1000)));
+            if (elapsed < runtimeSettings.createCooldownMs) {
+                const remainingMin = Math.max(1, Math.ceil((runtimeSettings.createCooldownMs - elapsed) / (60 * 1000)));
                 throw new functions.https.HttpsError('failed-precondition', `Debes esperar ${remainingMin} min para publicar otro secreto.`);
             }
         }
@@ -1186,7 +1206,7 @@ exports.createSecretCallable = functions.https.onCall(async (data, context) => {
             dailyWindowStartMs = nowMs;
             dailyCount = 0;
         }
-        if (dailyCount >= SECRET_DAILY_LIMIT) {
+        if (dailyCount >= runtimeSettings.dailyLimit) {
             throw new functions.https.HttpsError('resource-exhausted', 'Alcanzaste el limite diario de secretos anonimos.');
         }
         const secretRef = db.collection('content').doc();
@@ -1373,13 +1393,15 @@ exports.createSecretCommentCallable = functions.https.onCall(async (data, contex
     const nowMs = Date.now();
     const nowTs = admin.firestore.Timestamp.fromMillis(nowMs);
     const modulesConfigRef = db.collection('_config').doc('modules');
+    const secretSettingsRef = db.collection('_config').doc('secret_settings');
     const secretRef = db.collection('content').doc(secretId);
     const rateLimitRef = db.collection('secret_rate_limits').doc(fingerprintHash);
     const fingerprintRef = db.collection('secret_fingerprints').doc(fingerprintHash);
     return db.runTransaction(async (tx) => {
         var _a, _b, _c, _d, _e, _f;
-        const [modulesConfigSnap, secretSnap, rateLimitSnap, fingerprintSnap] = await Promise.all([
+        const [modulesConfigSnap, secretSettingsSnap, secretSnap, rateLimitSnap, fingerprintSnap] = await Promise.all([
             tx.get(modulesConfigRef),
+            tx.get(secretSettingsRef),
             tx.get(secretRef),
             tx.get(rateLimitRef),
             tx.get(fingerprintRef)
@@ -1398,12 +1420,13 @@ exports.createSecretCommentCallable = functions.https.onCall(async (data, contex
         if (moderationStatus !== 'active') {
             throw new functions.https.HttpsError('failed-precondition', 'Este secreto no permite comentarios.');
         }
+        const runtimeSettings = resolveSecretRuntimeSettings(secretSettingsSnap.data());
         const rateLimitData = rateLimitSnap.data() || {};
         const lastCommentAtMs = timestampToMillisOrZero(rateLimitData.lastCommentAt);
         if (lastCommentAtMs > 0) {
             const elapsed = nowMs - lastCommentAtMs;
-            if (elapsed < SECRET_COMMENT_COOLDOWN_MS) {
-                const remaining = Math.max(1, Math.ceil((SECRET_COMMENT_COOLDOWN_MS - elapsed) / 1000));
+            if (elapsed < runtimeSettings.commentCooldownMs) {
+                const remaining = Math.max(1, Math.ceil((runtimeSettings.commentCooldownMs - elapsed) / 1000));
                 throw new functions.https.HttpsError('failed-precondition', `Espera ${remaining}s antes de comentar de nuevo.`);
             }
         }
@@ -1476,13 +1499,15 @@ exports.reportSecretCallable = functions.https.onCall(async (data, context) => {
     const nowMs = Date.now();
     const nowTs = admin.firestore.Timestamp.fromMillis(nowMs);
     const modulesConfigRef = db.collection('_config').doc('modules');
+    const secretSettingsRef = db.collection('_config').doc('secret_settings');
     const secretRef = db.collection('content').doc(secretId);
     const reportRef = secretRef.collection('secret_reports').doc(fingerprintHash);
     const fingerprintRef = db.collection('secret_fingerprints').doc(fingerprintHash);
     return db.runTransaction(async (tx) => {
         var _a, _b, _c, _d, _e, _f;
-        const [modulesConfigSnap, secretSnap, reportSnap, fingerprintSnap] = await Promise.all([
+        const [modulesConfigSnap, secretSettingsSnap, secretSnap, reportSnap, fingerprintSnap] = await Promise.all([
             tx.get(modulesConfigRef),
+            tx.get(secretSettingsRef),
             tx.get(secretRef),
             tx.get(reportRef),
             tx.get(fingerprintRef)
@@ -1503,12 +1528,13 @@ exports.reportSecretCallable = functions.https.onCall(async (data, context) => {
                 secretId
             };
         }
+        const runtimeSettings = resolveSecretRuntimeSettings(secretSettingsSnap.data());
         const reportsCount = Math.max(0, Math.floor(Number(((_a = secretData === null || secretData === void 0 ? void 0 : secretData.stats) === null || _a === void 0 ? void 0 : _a.reportsCount) || 0))) + 1;
         const currentStatus = sanitizeBoundedString((_b = secretData === null || secretData === void 0 ? void 0 : secretData.moderation) === null || _b === void 0 ? void 0 : _b.status, 40) || 'active';
         const currentReason = (_d = (_c = secretData === null || secretData === void 0 ? void 0 : secretData.moderation) === null || _c === void 0 ? void 0 : _c.reason) !== null && _d !== void 0 ? _d : null;
         let nextStatus = currentStatus;
         let nextReason = currentReason;
-        if (currentStatus === 'active' && reportsCount >= SECRET_AUTO_HIDE_REPORT_THRESHOLD) {
+        if (currentStatus === 'active' && reportsCount >= runtimeSettings.autoHideReportsThreshold) {
             nextStatus = 'hidden_auto';
             nextReason = 'report_threshold';
         }
