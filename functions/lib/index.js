@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.onAdEventCreated = exports.purgeOldNotifications = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.getUsersSocialConnections = exports.updateUserManagement = exports.markAllNotificationsRead = exports.markNotificationRead = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateHomeFeedPreference = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.refreshSecretRankings = exports.refreshSecretRankingsCallable = exports.moderateSecretCallable = exports.getSecretModerationQueueCallable = exports.reportSecretCallable = exports.createSecretCommentCallable = exports.voteSecretCallable = exports.createSecretCallable = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = void 0;
+exports.onAdEventCreated = exports.purgeOldNotifications = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.getUsersSocialConnections = exports.updateUserManagement = exports.markAllNotificationsRead = exports.markNotificationRead = exports.sendTestPushToAllUsers = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateHomeFeedPreference = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.refreshSecretRankings = exports.refreshSecretRankingsCallable = exports.moderateSecretCallable = exports.getSecretModerationQueueCallable = exports.reportSecretCallable = exports.createSecretCommentCallable = exports.voteSecretCallable = exports.createSecretCallable = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = void 0;
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const path = require("path");
@@ -38,6 +38,9 @@ const CONTENT_SLUG_MAX_LENGTH = 96;
 const NOTIFICATION_PAGE_SIZE = 300;
 const NOTIFICATION_RETENTION_DAYS = 30;
 const NOTIFICATION_DEVICE_ID_MAX_LENGTH = 120;
+const NOTIFICATION_TOPIC_ALL = 'all_users';
+const NOTIFICATION_TOPIC_ANDROID = 'android_users';
+const NOTIFICATION_TOPIC_WEB = 'web_users';
 const SECRET_TEXT_MIN_LENGTH = 12;
 const SECRET_TEXT_MAX_LENGTH = 280;
 const SECRET_TEXT_MAX_ABSOLUTE = 500;
@@ -758,6 +761,34 @@ const sendPushToNotificationDevices = async (notificationRef, recipientUserId, n
         batch.delete(ref);
     }
     await batch.commit();
+};
+const getNotificationTopicsForPlatform = (platform) => {
+    if (platform === 'android') {
+        return [NOTIFICATION_TOPIC_ALL, NOTIFICATION_TOPIC_ANDROID];
+    }
+    return [NOTIFICATION_TOPIC_ALL, NOTIFICATION_TOPIC_WEB];
+};
+const subscribeTokenToPushTopics = async (token, platform) => {
+    const topics = getNotificationTopicsForPlatform(platform);
+    await Promise.all(topics.map(async (topic) => {
+        try {
+            await admin.messaging().subscribeToTopic([token], topic);
+        }
+        catch (error) {
+            console.warn(`No se pudo suscribir token a topic ${topic}:`, error);
+        }
+    }));
+};
+const unsubscribeTokenFromPushTopics = async (token, platform) => {
+    const topics = getNotificationTopicsForPlatform(platform);
+    await Promise.all(topics.map(async (topic) => {
+        try {
+            await admin.messaging().unsubscribeFromTopic([token], topic);
+        }
+        catch (error) {
+            console.warn(`No se pudo desuscribir token de topic ${topic}:`, error);
+        }
+    }));
 };
 const writeNotificationEvent = async (input) => {
     var _a, _b, _c, _d;
@@ -2138,6 +2169,7 @@ exports.registerNotificationDevice = functions.https.onCall(async (data, context
         }
         await batch.commit();
     }
+    await subscribeTokenToPushTopics(token, platform);
     return {
         ok: true,
         deviceId,
@@ -2157,12 +2189,37 @@ exports.unregisterNotificationDevice = functions.https.onCall(async (data, conte
         throw new functions.https.HttpsError('invalid-argument', 'Debes enviar deviceId o token.');
     }
     const refsToDelete = [];
+    const devicesToUnsubscribe = [];
     if (deviceId) {
-        refsToDelete.push(devicesCollection.doc(deviceId));
+        const targetRef = devicesCollection.doc(deviceId);
+        const targetSnap = await targetRef.get();
+        if (targetSnap.exists) {
+            const targetData = targetSnap.data() || {};
+            const targetToken = sanitizeBoundedString(targetData.token, 4096);
+            const targetPlatformRaw = sanitizeBoundedString(targetData.platform, 20).toLowerCase();
+            if (targetToken && (targetPlatformRaw === 'web' || targetPlatformRaw === 'android')) {
+                devicesToUnsubscribe.push({
+                    token: targetToken,
+                    platform: targetPlatformRaw
+                });
+            }
+        }
+        refsToDelete.push(targetRef);
     }
     else {
         const tokenMatches = await devicesCollection.where('token', '==', token).get();
-        refsToDelete.push(...tokenMatches.docs.map((docSnap) => docSnap.ref));
+        for (const docSnap of tokenMatches.docs) {
+            const deviceData = docSnap.data() || {};
+            const targetToken = sanitizeBoundedString(deviceData.token, 4096);
+            const targetPlatformRaw = sanitizeBoundedString(deviceData.platform, 20).toLowerCase();
+            if (targetToken && (targetPlatformRaw === 'web' || targetPlatformRaw === 'android')) {
+                devicesToUnsubscribe.push({
+                    token: targetToken,
+                    platform: targetPlatformRaw
+                });
+            }
+            refsToDelete.push(docSnap.ref);
+        }
     }
     if (refsToDelete.length > 0) {
         const batch = db.batch();
@@ -2171,9 +2228,52 @@ exports.unregisterNotificationDevice = functions.https.onCall(async (data, conte
         }
         await batch.commit();
     }
+    if (devicesToUnsubscribe.length > 0) {
+        await Promise.all(devicesToUnsubscribe.map((entry) => unsubscribeTokenFromPushTopics(entry.token, entry.platform)));
+    }
     return {
         ok: true,
         removed: refsToDelete.length
+    };
+});
+exports.sendTestPushToAllUsers = functions.https.onCall(async (data, context) => {
+    await assertAdminUser(context.auth);
+    const title = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.title, 120) || 'Prueba de notificaciones';
+    const body = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.body, 220) || 'Este es un test push para todos los usuarios.';
+    const targetPath = safeNotificationPath(data === null || data === void 0 ? void 0 : data.targetPath, '/notificaciones');
+    const platformRaw = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.platform, 20).toLowerCase();
+    const topic = platformRaw === 'android'
+        ? NOTIFICATION_TOPIC_ANDROID
+        : platformRaw === 'web'
+            ? NOTIFICATION_TOPIC_WEB
+            : NOTIFICATION_TOPIC_ALL;
+    if (platformRaw && platformRaw !== 'android' && platformRaw !== 'web' && platformRaw !== 'all') {
+        throw new functions.https.HttpsError('invalid-argument', 'platform debe ser "all", "android" o "web".');
+    }
+    const messageId = await admin.messaging().send({
+        topic,
+        notification: {
+            title,
+            body
+        },
+        data: {
+            type: 'admin_broadcast_test',
+            targetPath,
+            sentAt: new Date().toISOString()
+        },
+        android: {
+            priority: 'high'
+        },
+        webpush: {
+            fcmOptions: {
+                link: targetPath
+            }
+        }
+    });
+    return {
+        ok: true,
+        topic,
+        messageId
     };
 });
 exports.markNotificationRead = functions.https.onCall(async (data, context) => {
