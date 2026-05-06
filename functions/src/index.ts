@@ -84,6 +84,7 @@ const NOTIFICATION_DEVICE_ID_MAX_LENGTH = 120;
 const NOTIFICATION_TOPIC_ALL = 'all_users';
 const NOTIFICATION_TOPIC_ANDROID = 'android_users';
 const NOTIFICATION_TOPIC_WEB = 'web_users';
+const ANDROID_PUSH_CHANNEL_ID = 'general_notifications';
 const SECRET_TEXT_MIN_LENGTH = 12;
 const SECRET_TEXT_MAX_LENGTH = 280;
 const SECRET_TEXT_MAX_ABSOLUTE = 500;
@@ -1002,6 +1003,8 @@ const sendPushToNotificationDevices = async (
     android: {
       priority: 'high',
       notification: {
+        channelId: ANDROID_PUSH_CHANNEL_ID,
+        sound: 'default',
         clickAction: 'FLUTTER_NOTIFICATION_CLICK'
       }
     },
@@ -2915,7 +2918,11 @@ export const sendTestPushToAllUsers = functions.https.onCall(async (data, contex
       sentAt: new Date().toISOString()
     },
     android: {
-      priority: 'high'
+      priority: 'high',
+      notification: {
+        channelId: ANDROID_PUSH_CHANNEL_ID,
+        sound: 'default'
+      }
     },
     webpush: {
       fcmOptions: {
