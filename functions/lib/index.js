@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.onAdEventCreated = exports.purgeOldNotifications = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.getUsersSocialConnections = exports.updateUserManagement = exports.markAllNotificationsRead = exports.markNotificationRead = exports.sendTestPushToAllUsers = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateHomeFeedPreference = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.refreshSecretRankings = exports.refreshSecretRankingsCallable = exports.moderateSecretCallable = exports.getSecretModerationQueueCallable = exports.reportSecretCallable = exports.createSecretCommentCallable = exports.voteSecretCallable = exports.createSecretCallable = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = void 0;
+exports.onAdEventCreated = exports.purgeOldNotifications = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onCommunityPostsReceived = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.getUsersSocialConnections = exports.updateUserManagement = exports.markAllNotificationsRead = exports.markNotificationRead = exports.sendTestPushToAllUsers = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateHomeFeedPreference = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.refreshSecretRankings = exports.refreshSecretRankingsCallable = exports.moderateSecretCallable = exports.getSecretModerationQueueCallable = exports.reportSecretCallable = exports.createSecretCommentCallable = exports.voteSecretCallable = exports.createSecretCallable = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = void 0;
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const path = require("path");
@@ -2942,11 +2942,124 @@ exports.onOfficialNewsReceived = functions.database
         if (!normalizedPostId) {
             console.warn(`News ${newsId} synced without postId/publicId`);
         }
-        console.log(`âœ… Noticia sincronizada en Firestore: ${newsId}`);
+        console.log(`✅ Noticia sincronizada en Firestore: ${newsId}`);
         return null;
     }
     catch (error) {
-        console.error(`âŒ FallÃ³ la sincronizaciÃ³n de RTDB a Firestore para ${newsId}:`, error);
+        console.error(`❌ Falló la sincronización de RTDB a Firestore para ${newsId}:`, error);
+        return null;
+    }
+});
+// 5.5 Integración de Publicaciones Scraping a la Comunidad via Realtime Database
+exports.onCommunityPostsReceived = functions.database
+    .ref('/c/{postId}')
+    .onWrite(async (change, context) => {
+    var _a, _b, _c, _d;
+    const { postId } = context.params;
+    const afterData = change.after.val();
+    if (!afterData) {
+        console.log(`ℹ️ Community post ${postId} was deleted from RTDB. Ignoring in Firestore.`);
+        return null;
+    }
+    try {
+        const parseDateCandidate = (value) => {
+            if (!value)
+                return null;
+            if (value instanceof admin.firestore.Timestamp)
+                return value;
+            if (value instanceof Date && !isNaN(value.getTime())) {
+                return admin.firestore.Timestamp.fromDate(value);
+            }
+            if (typeof value === 'number' && Number.isFinite(value)) {
+                const asMs = value > 1e12 ? value : value * 1000;
+                const parsedNumeric = new Date(asMs);
+                if (!isNaN(parsedNumeric.getTime())) {
+                    return admin.firestore.Timestamp.fromDate(parsedNumeric);
+                }
+                return null;
+            }
+            if (typeof value !== 'string')
+                return null;
+            const raw = value.trim();
+            if (!raw)
+                return null;
+            const parsedNative = new Date(raw);
+            if (!isNaN(parsedNative.getTime())) {
+                return admin.firestore.Timestamp.fromDate(parsedNative);
+            }
+            const isoLike = raw.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/);
+            if (isoLike) {
+                const [, y, m, d, h, min, s] = isoLike;
+                const parsedIsoLike = new Date(Number(y), Number(m) - 1, Number(d), Number(h), Number(min), Number(s || '0'));
+                if (!isNaN(parsedIsoLike.getTime())) {
+                    return admin.firestore.Timestamp.fromDate(parsedIsoLike);
+                }
+            }
+            const latamLike = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/);
+            if (latamLike) {
+                const [, d, m, y, h, min, s] = latamLike;
+                const parsedLatam = new Date(Number(y), Number(m) - 1, Number(d), Number(h || '0'), Number(min || '0'), Number(s || '0'));
+                if (!isNaN(parsedLatam.getTime())) {
+                    return admin.firestore.Timestamp.fromDate(parsedLatam);
+                }
+            }
+            return null;
+        };
+        const contentRef = db.collection('content').doc(postId);
+        const existingSnap = await contentRef.get();
+        const existingCreatedAt = existingSnap.exists ? (_a = existingSnap.data()) === null || _a === void 0 ? void 0 : _a.createdAt : null;
+        const parsedCreatedAt = parseDateCandidate(afterData.createdAt);
+        const parsedUpdatedAt = parseDateCandidate(afterData.updatedAt);
+        const createdAtTs = parsedCreatedAt || (existingCreatedAt instanceof admin.firestore.Timestamp ? existingCreatedAt : admin.firestore.FieldValue.serverTimestamp());
+        const updatedAtTs = parsedUpdatedAt || admin.firestore.FieldValue.serverTimestamp();
+        const normalizeUrlCandidate = (value) => {
+            if (typeof value !== 'string')
+                return '';
+            return value.trim().slice(0, 2400);
+        };
+        const rawImages = Array.isArray(afterData.images) ? afterData.images : [];
+        const normalizedImages = Array.from(new Set(rawImages.map((value) => normalizeUrlCandidate(value)).filter((value) => value.length > 0)));
+        const imagesV2 = normalizedImages.map((url) => ({
+            url,
+            thumbUrl: url
+        }));
+        const firestorePayload = {
+            type: 'post',
+            source: 'scraping',
+            module: 'community',
+            externalId: postId,
+            id_unico: afterData.id_unico || postId,
+            titulo: afterData.author_name || 'Comunidad',
+            descripcion: afterData.content || '',
+            images: normalizedImages,
+            imagesV2,
+            userId: afterData.author_id || 'community_user',
+            userName: afterData.author_name || 'Usuario Comunidad',
+            userProfilePicUrl: '',
+            group_name: afterData.group_name || '',
+            group_url: afterData.group_url || '',
+            video_links: Array.isArray(afterData.video_links) ? afterData.video_links : [],
+            stats: {
+                likesCount: ((_b = afterData.stats) === null || _b === void 0 ? void 0 : _b.likesCount) || 0,
+                commentsCount: ((_c = afterData.stats) === null || _c === void 0 ? void 0 : _c.commentsCount) || 0,
+                viewsCount: ((_d = afterData.stats) === null || _d === void 0 ? void 0 : _d.viewsCount) || 0
+            },
+            createdAt: createdAtTs,
+            updatedAt: updatedAtTs,
+            deletedAt: afterData.deletedAt || null,
+            isOficial: false,
+            originalUrl: afterData.post_url || '',
+            category: afterData.group_name || 'Comunidad',
+            tags: Array.isArray(afterData.tags) ? afterData.tags : [],
+            custom_fields: afterData.custom_fields || {},
+            ingestedAt: admin.firestore.FieldValue.serverTimestamp()
+        };
+        await db.collection('content').doc(postId).set(firestorePayload, { merge: true });
+        console.log(`✅ Publicación de la comunidad sincronizada en Firestore: ${postId}`);
+        return null;
+    }
+    catch (error) {
+        console.error(`❌ Falló la sincronización de comunidad a Firestore para ${postId}:`, error);
         return null;
     }
 });
