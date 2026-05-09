@@ -1055,8 +1055,8 @@ const getHostingFtpConfig = () => {
     const host = process.env.HOSTING_FTP_HOST || '';
     const user = process.env.HOSTING_FTP_USER || '';
     const password = process.env.HOSTING_FTP_PASSWORD || '';
-    const basePath = process.env.HOSTING_FTP_BASE_PATH || '/domains/cdelu.ar/public_html/imagenes';
-    const publicBaseUrl = process.env.HOSTING_PUBLIC_BASE_URL || 'https://cdelu.ar/imagenes';
+    const basePath = process.env.HOSTING_FTP_BASE_PATH || '/56fe2b5f022bb112/files/domains/bot.cdelu.io/public_html/images';
+    const publicBaseUrl = process.env.HOSTING_PUBLIC_BASE_URL || 'https://bot.cdelu.io/images';
     const port = Number(process.env.HOSTING_FTP_PORT || 21);
     if (!host || !user || !password) {
         throw new functions.https.HttpsError('failed-precondition', 'Falta configurar credenciales FTP del hosting.');
@@ -3141,7 +3141,7 @@ exports.uploadCommunityImageToHosting = functions.https.onCall(async (data, cont
     if (!relativePathRaw) {
         throw new functions.https.HttpsError('invalid-argument', 'Ruta de imagen invalida.');
     }
-    const relativePath = sanitizePathSegment(relativePathRaw).replace(/^imagenes\//, '');
+    const relativePath = sanitizePathSegment(relativePathRaw).replace(/^(?:imagenes|images)\//, '');
     const allowedPrefix = `posts/${userId}/`;
     const allowedAvatarPrefix = `avatars/${userId}/`;
     if (!relativePath.startsWith(allowedPrefix) && !relativePath.startsWith(allowedAvatarPrefix)) {

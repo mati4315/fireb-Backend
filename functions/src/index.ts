@@ -1387,8 +1387,8 @@ const getHostingFtpConfig = () => {
   const host = process.env.HOSTING_FTP_HOST || '';
   const user = process.env.HOSTING_FTP_USER || '';
   const password = process.env.HOSTING_FTP_PASSWORD || '';
-  const basePath = process.env.HOSTING_FTP_BASE_PATH || '/domains/cdelu.ar/public_html/imagenes';
-  const publicBaseUrl = process.env.HOSTING_PUBLIC_BASE_URL || 'https://cdelu.ar/imagenes';
+  const basePath = process.env.HOSTING_FTP_BASE_PATH || '/56fe2b5f022bb112/files/domains/bot.cdelu.io/public_html/images';
+  const publicBaseUrl = process.env.HOSTING_PUBLIC_BASE_URL || 'https://bot.cdelu.io/images';
   const port = Number(process.env.HOSTING_FTP_PORT || 21);
 
   if (!host || !user || !password) {
@@ -3509,7 +3509,7 @@ export const onContentCreated = functions.firestore
     const isCommunityPost =
       contentData.module === 'community' || contentData.type === 'post';
     if (!isCommunityPost || !contentData.userId) return;
-    
+
     try {
       await db.collection('users').doc(contentData.userId).update({
         'stats.postsCount': admin.firestore.FieldValue.increment(1)
@@ -3724,33 +3724,33 @@ export const onOfficialNewsReceived = functions.database
         externalSource: 'wordpress_plugin',
         postId: postIdNumber,
         publicId: normalizedPostId,
-        
+
         titulo: afterData.titulo || 'Sin TÃ­tulo',
         descripcion: afterData.descripcion || '',
         images: normalizedImages,
         imagesV2,
         imgMiniatura: coverThumbnailUrl,
-        
+
         userId: afterData.userId || 'wp_official',
         userName: afterData.userName || 'RedacciÃ³n CdeluAR',
         userProfilePicUrl: afterData.userProfilePicUrl || '',
-        
+
         stats: {
           likesCount: afterData.stats?.likesCount || 0,
           commentsCount: afterData.stats?.commentsCount || 0,
           viewsCount: afterData.stats?.viewsCount || 0
         },
-        
+
         createdAt: createdAtTs,
         updatedAt: updatedAtTs,
         deletedAt: null,
         isOficial: true,
-        
+
         originalUrl: afterData.originalUrl || '',
         category: afterData.category || '',
         tags: Array.isArray(afterData.tags) ? afterData.tags : [],
         custom_fields: afterData.custom_fields || {},
-        
+
         ingestedAt: admin.firestore.FieldValue.serverTimestamp()
       };
 
@@ -3866,9 +3866,9 @@ export const onCommunityPostsReceived = functions.database
       const parsedCreatedAt = parseDateCandidate(afterData.createdAt);
       const parsedUpdatedAt = parseDateCandidate(afterData.updatedAt);
 
-      const createdAtTs: admin.firestore.FieldValue | admin.firestore.Timestamp = 
+      const createdAtTs: admin.firestore.FieldValue | admin.firestore.Timestamp =
         parsedCreatedAt || (existingCreatedAt instanceof admin.firestore.Timestamp ? existingCreatedAt : admin.firestore.FieldValue.serverTimestamp());
-      const updatedAtTs: admin.firestore.FieldValue | admin.firestore.Timestamp = 
+      const updatedAtTs: admin.firestore.FieldValue | admin.firestore.Timestamp =
         parsedUpdatedAt || admin.firestore.FieldValue.serverTimestamp();
 
       const normalizeUrlCandidate = (value: unknown): string => {
@@ -3880,7 +3880,7 @@ export const onCommunityPostsReceived = functions.database
       const normalizedImages = Array.from(
         new Set(rawImages.map((value: unknown) => normalizeUrlCandidate(value)).filter((value: string) => value.length > 0))
       );
-      
+
       const imagesV2 = normalizedImages.map((url) => ({
         url,
         thumbUrl: url
@@ -3892,36 +3892,36 @@ export const onCommunityPostsReceived = functions.database
         module: 'community',
         externalId: postId,
         id_unico: afterData.id_unico || postId,
-        
+
         titulo: afterData.author_name || 'Comunidad',
         descripcion: afterData.content || '',
         images: normalizedImages,
         imagesV2,
-        
+
         userId: afterData.author_id || 'community_user',
         userName: afterData.author_name || 'Usuario Comunidad',
         userProfilePicUrl: '',
-        
+
         group_name: afterData.group_name || '',
         group_url: afterData.group_url || '',
         video_links: Array.isArray(afterData.video_links) ? afterData.video_links : [],
-        
+
         stats: {
           likesCount: afterData.stats?.likesCount || 0,
           commentsCount: afterData.stats?.commentsCount || 0,
           viewsCount: afterData.stats?.viewsCount || 0
         },
-        
+
         createdAt: createdAtTs,
         updatedAt: updatedAtTs,
         deletedAt: afterData.deletedAt || null,
         isOficial: false,
-        
+
         originalUrl: afterData.post_url || '',
         category: afterData.group_name || 'Comunidad',
         tags: Array.isArray(afterData.tags) ? afterData.tags : [],
         custom_fields: afterData.custom_fields || {},
-        
+
         ingestedAt: admin.firestore.FieldValue.serverTimestamp()
       };
 
@@ -4018,7 +4018,7 @@ export const uploadCommunityImageToHosting = functions.https.onCall(async (data,
     throw new functions.https.HttpsError('invalid-argument', 'Ruta de imagen invalida.');
   }
 
-  const relativePath = sanitizePathSegment(relativePathRaw).replace(/^imagenes\//, '');
+  const relativePath = sanitizePathSegment(relativePathRaw).replace(/^(?:imagenes|images)\//, '');
   const allowedPrefix = `posts/${userId}/`;
   const allowedAvatarPrefix = `avatars/${userId}/`;
   if (!relativePath.startsWith(allowedPrefix) && !relativePath.startsWith(allowedAvatarPrefix)) {
@@ -4895,4 +4895,3 @@ export const onAdEventCreated = functions.firestore
       return null;
     }
   });
-
