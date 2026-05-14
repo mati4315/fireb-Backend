@@ -6,7 +6,8 @@
     "shell": "npm run build && firebase functions:shell",
     "start": "npm run shell",
     "deploy": "npm run build && firebase deploy --only functions",
-    "logs": "firebase functions:log"
+    "logs": "firebase functions:log",
+    "backup:avatars": "node scripts/backup-avatars.js"
   },
   "engines": {
     "node": "22"

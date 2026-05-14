@@ -3795,6 +3795,12 @@ export const onCommunityPostsReceived = functions.database
       return null;
     }
 
+    // Skip reserved IDs that would fail in Firestore
+    if (postId.startsWith('__') && postId.endsWith('__')) {
+      console.log(`⚠️ Skipping reserved test ID: ${postId}`);
+      return null;
+    }
+
     try {
       const parseDateCandidate = (value: unknown): admin.firestore.Timestamp | null => {
         if (!value) return null;
@@ -4020,8 +4026,13 @@ export const uploadCommunityImageToHosting = functions.https.onCall(async (data,
 
   const relativePath = sanitizePathSegment(relativePathRaw).replace(/^(?:imagenes|images)\//, '');
   const allowedPrefix = `posts/${userId}/`;
-  const allowedAvatarPrefix = `avatars/${userId}/`;
-  if (!relativePath.startsWith(allowedPrefix) && !relativePath.startsWith(allowedAvatarPrefix)) {
+  const allowedAvatarPrefix = `AVATAR/${userId}/`;
+  const legacyAvatarPrefix = `avatars/${userId}/`;
+  if (
+    !relativePath.startsWith(allowedPrefix) &&
+    !relativePath.startsWith(allowedAvatarPrefix) &&
+    !relativePath.startsWith(legacyAvatarPrefix)
+  ) {
     throw new functions.https.HttpsError('permission-denied', 'Ruta de subida no permitida.');
   }
 
@@ -4030,7 +4041,10 @@ export const uploadCommunityImageToHosting = functions.https.onCall(async (data,
   const fileNameBase = path.posix.basename(relativePath, ext || undefined)
     .replace(/[^a-zA-Z0-9_-]/g, '-')
     .slice(0, 80) || `${Date.now()}`;
-  const targetRelativePath = `${path.posix.dirname(relativePath)}/${fileNameBase}${safeExt}`.replace(/\/+/g, '/');
+  const normalizedUploadPath = relativePath.startsWith(legacyAvatarPrefix)
+    ? relativePath.replace(/^avatars\//, 'AVATAR/')
+    : relativePath;
+  const targetRelativePath = `${path.posix.dirname(normalizedUploadPath)}/${fileNameBase}${safeExt}`.replace(/\/+/g, '/');
 
   const ftpConfig = getHostingFtpConfig();
   const remoteFilePath = `${ftpConfig.basePath}/${targetRelativePath}`.replace(/\/+/g, '/');

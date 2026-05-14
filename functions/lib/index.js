@@ -3143,8 +3143,11 @@ exports.uploadCommunityImageToHosting = functions.https.onCall(async (data, cont
     }
     const relativePath = sanitizePathSegment(relativePathRaw).replace(/^(?:imagenes|images)\//, '');
     const allowedPrefix = `posts/${userId}/`;
-    const allowedAvatarPrefix = `avatars/${userId}/`;
-    if (!relativePath.startsWith(allowedPrefix) && !relativePath.startsWith(allowedAvatarPrefix)) {
+    const allowedAvatarPrefix = `AVATAR/${userId}/`;
+    const legacyAvatarPrefix = `avatars/${userId}/`;
+    if (!relativePath.startsWith(allowedPrefix) &&
+        !relativePath.startsWith(allowedAvatarPrefix) &&
+        !relativePath.startsWith(legacyAvatarPrefix)) {
         throw new functions.https.HttpsError('permission-denied', 'Ruta de subida no permitida.');
     }
     const ext = path.posix.extname(relativePath).toLowerCase();
@@ -3152,7 +3155,10 @@ exports.uploadCommunityImageToHosting = functions.https.onCall(async (data, cont
     const fileNameBase = path.posix.basename(relativePath, ext || undefined)
         .replace(/[^a-zA-Z0-9_-]/g, '-')
         .slice(0, 80) || `${Date.now()}`;
-    const targetRelativePath = `${path.posix.dirname(relativePath)}/${fileNameBase}${safeExt}`.replace(/\/+/g, '/');
+    const normalizedUploadPath = relativePath.startsWith(legacyAvatarPrefix)
+        ? relativePath.replace(/^avatars\//, 'AVATAR/')
+        : relativePath;
+    const targetRelativePath = `${path.posix.dirname(normalizedUploadPath)}/${fileNameBase}${safeExt}`.replace(/\/+/g, '/');
     const ftpConfig = getHostingFtpConfig();
     const remoteFilePath = `${ftpConfig.basePath}/${targetRelativePath}`.replace(/\/+/g, '/');
     const remoteDir = path.posix.dirname(remoteFilePath);
