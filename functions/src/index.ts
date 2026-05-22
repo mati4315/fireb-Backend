@@ -68,6 +68,8 @@ const LOTTERY_MAX_MAX_NUMBER = 200;
 const LOTTERY_DEFAULT_MAX_TICKETS_PER_USER = 1;
 const LOTTERY_MIN_TICKETS_PER_USER = 1;
 const LOTTERY_MAX_TICKETS_PER_USER = 5;
+const LOTTERY_MAX_EXTRA_TICKETS_PER_USER = LOTTERY_MAX_MAX_NUMBER;
+const LOTTERY_USER_EXTRA_TICKETS_COLLECTION = 'lottery_user_ticket_extras';
 const LOTTERY_ENTRY_SCHEMA_VERSION = 2;
 const LOTTERY_ENTRY_DOC_PREFIX = 'n_';
 const LOTTERY_MIGRATION_PAGE_SIZE = 400;
@@ -604,6 +606,30 @@ const normalizeLotteryMaxTicketsPerUser = (value: unknown): number => {
     LOTTERY_MAX_TICKETS_PER_USER,
     LOTTERY_DEFAULT_MAX_TICKETS_PER_USER
   );
+};
+
+const normalizeLotteryExtraTickets = (value: unknown): number => {
+  return clampInteger(
+    value,
+    0,
+    LOTTERY_MAX_EXTRA_TICKETS_PER_USER,
+    0
+  );
+};
+
+const toLotteryUserExtraDocId = (lotteryId: string, userId: string): string => {
+  return `${lotteryId}__${userId}`;
+};
+
+const getLotteryEffectiveMaxTickets = (
+  lotteryMaxTicketsPerUser: number,
+  extraTickets: number,
+  lotteryMaxNumber: number
+): number => {
+  const base = normalizeLotteryMaxTicketsPerUser(lotteryMaxTicketsPerUser);
+  const extra = normalizeLotteryExtraTickets(extraTickets);
+  const maxNumber = normalizeLotteryMaxNumber(lotteryMaxNumber);
+  return Math.max(1, Math.min(maxNumber, base + extra));
 };
 
 const parseSelectedLotteryNumber = (value: unknown): number | null => {
@@ -1389,6 +1415,31 @@ const getHostingFtpConfig = () => {
   const password = process.env.HOSTING_FTP_PASSWORD || '';
   const basePath = process.env.HOSTING_FTP_BASE_PATH || '/56fe2b5f022bb112/files/domains/bot.cdelu.io/public_html/images';
   const publicBaseUrl = process.env.HOSTING_PUBLIC_BASE_URL || 'https://bot.cdelu.io/images';
+  const port = Number(process.env.HOSTING_FTP_PORT || 21);
+
+  if (!host || !user || !password) {
+    throw new functions.https.HttpsError(
+      'failed-precondition',
+      'Falta configurar credenciales FTP del hosting.'
+    );
+  }
+
+  return {
+    host,
+    user,
+    password,
+    port: Number.isFinite(port) ? port : 21,
+    basePath,
+    publicBaseUrl: publicBaseUrl.replace(/\/$/, '')
+  };
+};
+
+const getHostingAvatarFtpConfig = () => {
+  const host = process.env.HOSTING_FTP_HOST || '';
+  const user = process.env.HOSTING_FTP_USER || '';
+  const password = process.env.HOSTING_FTP_PASSWORD || '';
+  const basePath = process.env.HOSTING_FTP_AVATAR_BASE_PATH || '/56fe2b5f022bb112/files/domains/bot.cdelu.io/public_html';
+  const publicBaseUrl = process.env.HOSTING_AVATAR_PUBLIC_BASE_URL || 'https://bot.cdelu.io';
   const port = Number(process.env.HOSTING_FTP_PORT || 21);
 
   if (!host || !user || !password) {
@@ -3204,6 +3255,179 @@ export const getUsersSocialConnections = functions.https.onCall(async (data, con
   };
 });
 
+export const getLotteryUserTicketExtras = functions.https.onCall(async (data, context) => {
+  const requesterUid = context.auth?.uid || '';
+  if (!requesterUid) {
+    throw new functions.https.HttpsError(
+      'unauthenticated',
+      'Debes iniciar sesion para consultar tickets extra.'
+    );
+  }
+
+  const requestedUserId = sanitizeBoundedString(data?.userId, 128);
+  const targetUserId = requestedUserId || requesterUid;
+  if (targetUserId !== requesterUid) {
+    await assertAdminUser(context.auth);
+  }
+
+  const snapshot = await db
+    .collection(LOTTERY_USER_EXTRA_TICKETS_COLLECTION)
+    .where('userId', '==', targetUserId)
+    .limit(400)
+    .get();
+
+  const records: Record<string, number> = {};
+  for (const docSnap of snapshot.docs) {
+    const row = docSnap.data() || {};
+    const lotteryId = sanitizeBoundedString(row.lotteryId, 128);
+    if (!lotteryId) continue;
+    const extraTickets = normalizeLotteryExtraTickets(row.extraTickets);
+    if (extraTickets <= 0) continue;
+    records[lotteryId] = extraTickets;
+  }
+
+  return {
+    ok: true,
+    userId: targetUserId,
+    records
+  };
+});
+
+export const listLotteriesForAdmin = functions.https.onCall(async (_data, context) => {
+  await assertAdminUser(context.auth);
+
+  const snapshot = await db
+    .collection('lotteries')
+    .where('deletedAt', '==', null)
+    .orderBy('createdAt', 'desc')
+    .limit(300)
+    .get();
+
+  const lotteries = snapshot.docs.map((lotteryDoc) => {
+    const row = lotteryDoc.data() || {};
+    return {
+      id: lotteryDoc.id,
+      title: sanitizeBoundedString(row.title, 150) || '(Sin titulo)',
+      status: sanitizeBoundedString(row.status, 40) || 'draft',
+      maxNumber: normalizeLotteryMaxNumber(row.maxNumber),
+      maxTicketsPerUser: normalizeLotteryMaxTicketsPerUser(row.maxTicketsPerUser)
+    };
+  });
+
+  return {
+    ok: true,
+    lotteries
+  };
+});
+
+export const grantLotteryUserExtraTickets = functions.https.onCall(async (data, context) => {
+  await assertAdminUser(context.auth);
+
+  const adminUid = context.auth?.uid || 'system';
+  const adminEmail = sanitizeBoundedString((context.auth?.token || {}).email, 320).toLowerCase();
+  const userId = sanitizeBoundedString(data?.userId, 128);
+  const lotteryId = sanitizeBoundedString(data?.lotteryId, 128);
+  const quantity = clampInteger(data?.quantity, 1, LOTTERY_MAX_EXTRA_TICKETS_PER_USER, 1);
+
+  if (!userId) {
+    throw new functions.https.HttpsError('invalid-argument', 'userId es obligatorio.');
+  }
+  if (!lotteryId) {
+    throw new functions.https.HttpsError('invalid-argument', 'lotteryId es obligatorio.');
+  }
+
+  const userRef = db.collection('users').doc(userId);
+  const lotteryRef = db.collection('lotteries').doc(lotteryId);
+  const extraRef = db
+    .collection(LOTTERY_USER_EXTRA_TICKETS_COLLECTION)
+    .doc(toLotteryUserExtraDocId(lotteryId, userId));
+
+  return db.runTransaction(async (tx) => {
+    const [userSnap, lotterySnap, extraSnap] = await Promise.all([
+      tx.get(userRef),
+      tx.get(lotteryRef),
+      tx.get(extraRef)
+    ]);
+
+    if (!userSnap.exists) {
+      throw new functions.https.HttpsError('not-found', 'Usuario no encontrado.');
+    }
+    if (!lotterySnap.exists) {
+      throw new functions.https.HttpsError('not-found', 'Loteria no encontrada.');
+    }
+
+    const lotteryData = lotterySnap.data() || {};
+    if (lotteryData.deletedAt != null) {
+      throw new functions.https.HttpsError(
+        'failed-precondition',
+        'No se pueden asignar tickets extra en una loteria eliminada.'
+      );
+    }
+
+    const currentExtra = normalizeLotteryExtraTickets(extraSnap.data()?.extraTickets);
+    const nextExtra = normalizeLotteryExtraTickets(currentExtra + quantity);
+    if (nextExtra === currentExtra) {
+      throw new functions.https.HttpsError(
+        'failed-precondition',
+        'No se puede aumentar mas el cupo de tickets extra para este usuario.'
+      );
+    }
+
+    const maxNumber = normalizeLotteryMaxNumber(lotteryData.maxNumber);
+    const baseLimit = normalizeLotteryMaxTicketsPerUser(lotteryData.maxTicketsPerUser);
+    const effectiveLimit = getLotteryEffectiveMaxTickets(baseLimit, nextExtra, maxNumber);
+    const lotteryTitle = sanitizeBoundedString(lotteryData.title, 150) || 'Loteria';
+
+    const payload: Record<string, unknown> = {
+      userId,
+      lotteryId,
+      extraTickets: nextExtra,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedBy: adminUid,
+      updatedByEmail: adminEmail
+    };
+    if (!extraSnap.exists) {
+      payload.createdAt = admin.firestore.FieldValue.serverTimestamp();
+    }
+
+    tx.set(extraRef, payload, { merge: true });
+
+    const notificationRef = db.collection('users').doc(userId).collection('notifications').doc();
+    const notificationMessage = `Se te agregaron ${nextExtra - currentExtra} ticket(s) extra en la loteria "${lotteryTitle}".`;
+    tx.set(notificationRef, {
+      type: 'system',
+      recipientUserId: userId,
+      actorUserId: adminUid,
+      actorName: 'Sistema',
+      actorUsername: 'sistema',
+      actorProfilePictureUrl: '',
+      contentId: lotteryId,
+      contentModule: 'community',
+      contentPublicRef: '',
+      contentSlug: '',
+      commentId: '',
+      replyId: '',
+      targetPath: '/loteria',
+      systemMessage: notificationMessage,
+      eventCount: 1,
+      isRead: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      lastEventAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    return {
+      ok: true,
+      userId,
+      lotteryId,
+      added: nextExtra - currentExtra,
+      extraTickets: nextExtra,
+      baseLimit,
+      effectiveLimit
+    };
+  });
+});
+
 export const syncPublicUserProfile = functions.firestore
   .document('users/{userId}')
   .onWrite(async (change, context) => {
@@ -4046,7 +4270,10 @@ export const uploadCommunityImageToHosting = functions.https.onCall(async (data,
     : relativePath;
   const targetRelativePath = `${path.posix.dirname(normalizedUploadPath)}/${fileNameBase}${safeExt}`.replace(/\/+/g, '/');
 
-  const ftpConfig = getHostingFtpConfig();
+  const isAvatarUpload =
+    normalizedUploadPath.startsWith(allowedAvatarPrefix) ||
+    normalizedUploadPath.startsWith('AVATAR/');
+  const ftpConfig = isAvatarUpload ? getHostingAvatarFtpConfig() : getHostingFtpConfig();
   const remoteFilePath = `${ftpConfig.basePath}/${targetRelativePath}`.replace(/\/+/g, '/');
   const remoteDir = path.posix.dirname(remoteFilePath);
   const publicUrl = `${ftpConfig.publicBaseUrl}/${targetRelativePath}`;
@@ -4355,17 +4582,21 @@ export const enterLottery = functions.https.onCall(async (data, context) => {
   const modulesConfigRef = db.collection('_config').doc('modules');
   const lotteryRef = db.collection('lotteries').doc(lotteryId);
   const entryRef = lotteryRef.collection('entries').doc(toLotteryEntryDocId(selectedNumber));
+  const extraTicketsRef = db
+    .collection(LOTTERY_USER_EXTRA_TICKETS_COLLECTION)
+    .doc(toLotteryUserExtraDocId(lotteryId, userId));
   const userEntriesQuery = lotteryRef
     .collection('entries')
     .where('userId', '==', userId)
-    .limit(LOTTERY_MAX_TICKETS_PER_USER + 2);
+    .limit(LOTTERY_MAX_MAX_NUMBER + 2);
 
   return db.runTransaction(async (tx) => {
-    const [modulesConfigSnap, lotterySnap, entrySnap, userEntriesSnap] = await Promise.all([
+    const [modulesConfigSnap, lotterySnap, entrySnap, userEntriesSnap, extraTicketsSnap] = await Promise.all([
       tx.get(modulesConfigRef),
       tx.get(lotteryRef),
       tx.get(entryRef),
-      tx.get(userEntriesQuery)
+      tx.get(userEntriesQuery),
+      tx.get(extraTicketsRef)
     ]);
 
     if (!isLotteryModuleEnabled(modulesConfigSnap.data())) {
@@ -4430,6 +4661,12 @@ export const enterLottery = functions.https.onCall(async (data, context) => {
 
     const maxNumber = normalizeLotteryMaxNumber(lotteryData.maxNumber);
     const maxTicketsPerUser = normalizeLotteryMaxTicketsPerUser(lotteryData.maxTicketsPerUser);
+    const extraTickets = normalizeLotteryExtraTickets(extraTicketsSnap.data()?.extraTickets);
+    const effectiveMaxTicketsPerUser = getLotteryEffectiveMaxTickets(
+      maxTicketsPerUser,
+      extraTickets,
+      maxNumber
+    );
     if (selectedNumber < 1 || selectedNumber > maxNumber) {
       throw new functions.https.HttpsError(
         'failed-precondition',
@@ -4448,7 +4685,8 @@ export const enterLottery = functions.https.onCall(async (data, context) => {
           lotteryId,
           selectedNumber,
           participantsCount: currentParticipants,
-          userTicketsCount: Math.max(1, userTicketsCount)
+          userTicketsCount: Math.max(1, userTicketsCount),
+          effectiveMaxTicketsPerUser
         };
       }
       throw new functions.https.HttpsError(
@@ -4457,10 +4695,10 @@ export const enterLottery = functions.https.onCall(async (data, context) => {
       );
     }
 
-    if (userTicketsCount >= maxTicketsPerUser) {
+    if (userTicketsCount >= effectiveMaxTicketsPerUser) {
       throw new functions.https.HttpsError(
         'failed-precondition',
-        `limit-reached: Alcanzaste el maximo de ${maxTicketsPerUser} numeros para esta loteria.`
+        `limit-reached: Alcanzaste el maximo de ${effectiveMaxTicketsPerUser} numeros para esta loteria.`
       );
     }
 
@@ -4496,7 +4734,8 @@ export const enterLottery = functions.https.onCall(async (data, context) => {
       lotteryId,
       selectedNumber,
       participantsCount: currentParticipants + 1,
-      userTicketsCount: userTicketsCount + 1
+      userTicketsCount: userTicketsCount + 1,
+      effectiveMaxTicketsPerUser
     };
   });
 });

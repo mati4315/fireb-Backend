@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.onAdEventCreated = exports.purgeOldNotifications = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onCommunityPostsReceived = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.getUsersSocialConnections = exports.updateUserManagement = exports.markAllNotificationsRead = exports.markNotificationRead = exports.sendTestPushToAllUsers = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateHomeFeedPreference = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.refreshSecretRankings = exports.refreshSecretRankingsCallable = exports.moderateSecretCallable = exports.getSecretModerationQueueCallable = exports.reportSecretCallable = exports.createSecretCommentCallable = exports.voteSecretCallable = exports.createSecretCallable = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = void 0;
+exports.onAdEventCreated = exports.purgeOldNotifications = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onCommunityPostsReceived = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.grantLotteryUserExtraTickets = exports.listLotteriesForAdmin = exports.getLotteryUserTicketExtras = exports.getUsersSocialConnections = exports.updateUserManagement = exports.markAllNotificationsRead = exports.markNotificationRead = exports.sendTestPushToAllUsers = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateHomeFeedPreference = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.refreshSecretRankings = exports.refreshSecretRankingsCallable = exports.moderateSecretCallable = exports.getSecretModerationQueueCallable = exports.reportSecretCallable = exports.createSecretCommentCallable = exports.voteSecretCallable = exports.createSecretCallable = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = void 0;
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const path = require("path");
@@ -25,6 +25,8 @@ const LOTTERY_MAX_MAX_NUMBER = 200;
 const LOTTERY_DEFAULT_MAX_TICKETS_PER_USER = 1;
 const LOTTERY_MIN_TICKETS_PER_USER = 1;
 const LOTTERY_MAX_TICKETS_PER_USER = 5;
+const LOTTERY_MAX_EXTRA_TICKETS_PER_USER = LOTTERY_MAX_MAX_NUMBER;
+const LOTTERY_USER_EXTRA_TICKETS_COLLECTION = 'lottery_user_ticket_extras';
 const LOTTERY_ENTRY_SCHEMA_VERSION = 2;
 const LOTTERY_ENTRY_DOC_PREFIX = 'n_';
 const LOTTERY_MIGRATION_PAGE_SIZE = 400;
@@ -428,6 +430,18 @@ const normalizeLotteryMaxNumber = (value) => {
 };
 const normalizeLotteryMaxTicketsPerUser = (value) => {
     return clampInteger(value, LOTTERY_MIN_TICKETS_PER_USER, LOTTERY_MAX_TICKETS_PER_USER, LOTTERY_DEFAULT_MAX_TICKETS_PER_USER);
+};
+const normalizeLotteryExtraTickets = (value) => {
+    return clampInteger(value, 0, LOTTERY_MAX_EXTRA_TICKETS_PER_USER, 0);
+};
+const toLotteryUserExtraDocId = (lotteryId, userId) => {
+    return `${lotteryId}__${userId}`;
+};
+const getLotteryEffectiveMaxTickets = (lotteryMaxTicketsPerUser, extraTickets, lotteryMaxNumber) => {
+    const base = normalizeLotteryMaxTicketsPerUser(lotteryMaxTicketsPerUser);
+    const extra = normalizeLotteryExtraTickets(extraTickets);
+    const maxNumber = normalizeLotteryMaxNumber(lotteryMaxNumber);
+    return Math.max(1, Math.min(maxNumber, base + extra));
 };
 const parseSelectedLotteryNumber = (value) => {
     const parsed = Number(value);
@@ -1057,6 +1071,25 @@ const getHostingFtpConfig = () => {
     const password = process.env.HOSTING_FTP_PASSWORD || '';
     const basePath = process.env.HOSTING_FTP_BASE_PATH || '/56fe2b5f022bb112/files/domains/bot.cdelu.io/public_html/images';
     const publicBaseUrl = process.env.HOSTING_PUBLIC_BASE_URL || 'https://bot.cdelu.io/images';
+    const port = Number(process.env.HOSTING_FTP_PORT || 21);
+    if (!host || !user || !password) {
+        throw new functions.https.HttpsError('failed-precondition', 'Falta configurar credenciales FTP del hosting.');
+    }
+    return {
+        host,
+        user,
+        password,
+        port: Number.isFinite(port) ? port : 21,
+        basePath,
+        publicBaseUrl: publicBaseUrl.replace(/\/$/, '')
+    };
+};
+const getHostingAvatarFtpConfig = () => {
+    const host = process.env.HOSTING_FTP_HOST || '';
+    const user = process.env.HOSTING_FTP_USER || '';
+    const password = process.env.HOSTING_FTP_PASSWORD || '';
+    const basePath = process.env.HOSTING_FTP_AVATAR_BASE_PATH || '/56fe2b5f022bb112/files/domains/bot.cdelu.io/public_html';
+    const publicBaseUrl = process.env.HOSTING_AVATAR_PUBLIC_BASE_URL || 'https://bot.cdelu.io';
     const port = Number(process.env.HOSTING_FTP_PORT || 21);
     if (!host || !user || !password) {
         throw new functions.https.HttpsError('failed-precondition', 'Falta configurar credenciales FTP del hosting.');
@@ -2489,6 +2522,153 @@ exports.getUsersSocialConnections = functions.https.onCall(async (data, context)
         records
     };
 });
+exports.getLotteryUserTicketExtras = functions.https.onCall(async (data, context) => {
+    var _a;
+    const requesterUid = ((_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid) || '';
+    if (!requesterUid) {
+        throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para consultar tickets extra.');
+    }
+    const requestedUserId = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.userId, 128);
+    const targetUserId = requestedUserId || requesterUid;
+    if (targetUserId !== requesterUid) {
+        await assertAdminUser(context.auth);
+    }
+    const snapshot = await db
+        .collection(LOTTERY_USER_EXTRA_TICKETS_COLLECTION)
+        .where('userId', '==', targetUserId)
+        .limit(400)
+        .get();
+    const records = {};
+    for (const docSnap of snapshot.docs) {
+        const row = docSnap.data() || {};
+        const lotteryId = sanitizeBoundedString(row.lotteryId, 128);
+        if (!lotteryId)
+            continue;
+        const extraTickets = normalizeLotteryExtraTickets(row.extraTickets);
+        if (extraTickets <= 0)
+            continue;
+        records[lotteryId] = extraTickets;
+    }
+    return {
+        ok: true,
+        userId: targetUserId,
+        records
+    };
+});
+exports.listLotteriesForAdmin = functions.https.onCall(async (_data, context) => {
+    await assertAdminUser(context.auth);
+    const snapshot = await db
+        .collection('lotteries')
+        .where('deletedAt', '==', null)
+        .orderBy('createdAt', 'desc')
+        .limit(300)
+        .get();
+    const lotteries = snapshot.docs.map((lotteryDoc) => {
+        const row = lotteryDoc.data() || {};
+        return {
+            id: lotteryDoc.id,
+            title: sanitizeBoundedString(row.title, 150) || '(Sin titulo)',
+            status: sanitizeBoundedString(row.status, 40) || 'draft',
+            maxNumber: normalizeLotteryMaxNumber(row.maxNumber),
+            maxTicketsPerUser: normalizeLotteryMaxTicketsPerUser(row.maxTicketsPerUser)
+        };
+    });
+    return {
+        ok: true,
+        lotteries
+    };
+});
+exports.grantLotteryUserExtraTickets = functions.https.onCall(async (data, context) => {
+    var _a, _b;
+    await assertAdminUser(context.auth);
+    const adminUid = ((_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid) || 'system';
+    const adminEmail = sanitizeBoundedString((((_b = context.auth) === null || _b === void 0 ? void 0 : _b.token) || {}).email, 320).toLowerCase();
+    const userId = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.userId, 128);
+    const lotteryId = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.lotteryId, 128);
+    const quantity = clampInteger(data === null || data === void 0 ? void 0 : data.quantity, 1, LOTTERY_MAX_EXTRA_TICKETS_PER_USER, 1);
+    if (!userId) {
+        throw new functions.https.HttpsError('invalid-argument', 'userId es obligatorio.');
+    }
+    if (!lotteryId) {
+        throw new functions.https.HttpsError('invalid-argument', 'lotteryId es obligatorio.');
+    }
+    const userRef = db.collection('users').doc(userId);
+    const lotteryRef = db.collection('lotteries').doc(lotteryId);
+    const extraRef = db
+        .collection(LOTTERY_USER_EXTRA_TICKETS_COLLECTION)
+        .doc(toLotteryUserExtraDocId(lotteryId, userId));
+    return db.runTransaction(async (tx) => {
+        var _a;
+        const [userSnap, lotterySnap, extraSnap] = await Promise.all([
+            tx.get(userRef),
+            tx.get(lotteryRef),
+            tx.get(extraRef)
+        ]);
+        if (!userSnap.exists) {
+            throw new functions.https.HttpsError('not-found', 'Usuario no encontrado.');
+        }
+        if (!lotterySnap.exists) {
+            throw new functions.https.HttpsError('not-found', 'Loteria no encontrada.');
+        }
+        const lotteryData = lotterySnap.data() || {};
+        if (lotteryData.deletedAt != null) {
+            throw new functions.https.HttpsError('failed-precondition', 'No se pueden asignar tickets extra en una loteria eliminada.');
+        }
+        const currentExtra = normalizeLotteryExtraTickets((_a = extraSnap.data()) === null || _a === void 0 ? void 0 : _a.extraTickets);
+        const nextExtra = normalizeLotteryExtraTickets(currentExtra + quantity);
+        if (nextExtra === currentExtra) {
+            throw new functions.https.HttpsError('failed-precondition', 'No se puede aumentar mas el cupo de tickets extra para este usuario.');
+        }
+        const maxNumber = normalizeLotteryMaxNumber(lotteryData.maxNumber);
+        const baseLimit = normalizeLotteryMaxTicketsPerUser(lotteryData.maxTicketsPerUser);
+        const effectiveLimit = getLotteryEffectiveMaxTickets(baseLimit, nextExtra, maxNumber);
+        const lotteryTitle = sanitizeBoundedString(lotteryData.title, 150) || 'Loteria';
+        const payload = {
+            userId,
+            lotteryId,
+            extraTickets: nextExtra,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            updatedBy: adminUid,
+            updatedByEmail: adminEmail
+        };
+        if (!extraSnap.exists) {
+            payload.createdAt = admin.firestore.FieldValue.serverTimestamp();
+        }
+        tx.set(extraRef, payload, { merge: true });
+        const notificationRef = db.collection('users').doc(userId).collection('notifications').doc();
+        const notificationMessage = `Se te agregaron ${nextExtra - currentExtra} ticket(s) extra en la loteria "${lotteryTitle}".`;
+        tx.set(notificationRef, {
+            type: 'system',
+            recipientUserId: userId,
+            actorUserId: adminUid,
+            actorName: 'Sistema',
+            actorUsername: 'sistema',
+            actorProfilePictureUrl: '',
+            contentId: lotteryId,
+            contentModule: 'community',
+            contentPublicRef: '',
+            contentSlug: '',
+            commentId: '',
+            replyId: '',
+            targetPath: '/loteria',
+            systemMessage: notificationMessage,
+            eventCount: 1,
+            isRead: false,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            lastEventAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        return {
+            ok: true,
+            userId,
+            lotteryId,
+            added: nextExtra - currentExtra,
+            extraTickets: nextExtra,
+            baseLimit,
+            effectiveLimit
+        };
+    });
+});
 exports.syncPublicUserProfile = functions.firestore
     .document('users/{userId}')
     .onWrite(async (change, context) => {
@@ -2961,6 +3141,11 @@ exports.onCommunityPostsReceived = functions.database
         console.log(`ℹ️ Community post ${postId} was deleted from RTDB. Ignoring in Firestore.`);
         return null;
     }
+    // Skip reserved IDs that would fail in Firestore
+    if (postId.startsWith('__') && postId.endsWith('__')) {
+        console.log(`⚠️ Skipping reserved test ID: ${postId}`);
+        return null;
+    }
     try {
         const parseDateCandidate = (value) => {
             if (!value)
@@ -3159,7 +3344,9 @@ exports.uploadCommunityImageToHosting = functions.https.onCall(async (data, cont
         ? relativePath.replace(/^avatars\//, 'AVATAR/')
         : relativePath;
     const targetRelativePath = `${path.posix.dirname(normalizedUploadPath)}/${fileNameBase}${safeExt}`.replace(/\/+/g, '/');
-    const ftpConfig = getHostingFtpConfig();
+    const isAvatarUpload = normalizedUploadPath.startsWith(allowedAvatarPrefix) ||
+        normalizedUploadPath.startsWith('AVATAR/');
+    const ftpConfig = isAvatarUpload ? getHostingAvatarFtpConfig() : getHostingFtpConfig();
     const remoteFilePath = `${ftpConfig.basePath}/${targetRelativePath}`.replace(/\/+/g, '/');
     const remoteDir = path.posix.dirname(remoteFilePath);
     const publicUrl = `${ftpConfig.publicBaseUrl}/${targetRelativePath}`;
@@ -3401,16 +3588,21 @@ exports.enterLottery = functions.https.onCall(async (data, context) => {
     const modulesConfigRef = db.collection('_config').doc('modules');
     const lotteryRef = db.collection('lotteries').doc(lotteryId);
     const entryRef = lotteryRef.collection('entries').doc(toLotteryEntryDocId(selectedNumber));
+    const extraTicketsRef = db
+        .collection(LOTTERY_USER_EXTRA_TICKETS_COLLECTION)
+        .doc(toLotteryUserExtraDocId(lotteryId, userId));
     const userEntriesQuery = lotteryRef
         .collection('entries')
         .where('userId', '==', userId)
-        .limit(LOTTERY_MAX_TICKETS_PER_USER + 2);
+        .limit(LOTTERY_MAX_MAX_NUMBER + 2);
     return db.runTransaction(async (tx) => {
-        const [modulesConfigSnap, lotterySnap, entrySnap, userEntriesSnap] = await Promise.all([
+        var _a;
+        const [modulesConfigSnap, lotterySnap, entrySnap, userEntriesSnap, extraTicketsSnap] = await Promise.all([
             tx.get(modulesConfigRef),
             tx.get(lotteryRef),
             tx.get(entryRef),
-            tx.get(userEntriesQuery)
+            tx.get(userEntriesQuery),
+            tx.get(extraTicketsRef)
         ]);
         if (!isLotteryModuleEnabled(modulesConfigSnap.data())) {
             throw new functions.https.HttpsError('failed-precondition', 'module-disabled: El modulo de loteria esta deshabilitado.');
@@ -3448,6 +3640,8 @@ exports.enterLottery = functions.https.onCall(async (data, context) => {
             : 0;
         const maxNumber = normalizeLotteryMaxNumber(lotteryData.maxNumber);
         const maxTicketsPerUser = normalizeLotteryMaxTicketsPerUser(lotteryData.maxTicketsPerUser);
+        const extraTickets = normalizeLotteryExtraTickets((_a = extraTicketsSnap.data()) === null || _a === void 0 ? void 0 : _a.extraTickets);
+        const effectiveMaxTicketsPerUser = getLotteryEffectiveMaxTickets(maxTicketsPerUser, extraTickets, maxNumber);
         if (selectedNumber < 1 || selectedNumber > maxNumber) {
             throw new functions.https.HttpsError('failed-precondition', `out-of-range: Debes seleccionar un numero entre 1 y ${maxNumber}.`);
         }
@@ -3461,13 +3655,14 @@ exports.enterLottery = functions.https.onCall(async (data, context) => {
                     lotteryId,
                     selectedNumber,
                     participantsCount: currentParticipants,
-                    userTicketsCount: Math.max(1, userTicketsCount)
+                    userTicketsCount: Math.max(1, userTicketsCount),
+                    effectiveMaxTicketsPerUser
                 };
             }
             throw new functions.https.HttpsError('already-exists', 'number-taken: El numero seleccionado ya esta ocupado.');
         }
-        if (userTicketsCount >= maxTicketsPerUser) {
-            throw new functions.https.HttpsError('failed-precondition', `limit-reached: Alcanzaste el maximo de ${maxTicketsPerUser} numeros para esta loteria.`);
+        if (userTicketsCount >= effectiveMaxTicketsPerUser) {
+            throw new functions.https.HttpsError('failed-precondition', `limit-reached: Alcanzaste el maximo de ${effectiveMaxTicketsPerUser} numeros para esta loteria.`);
         }
         const entryPayload = {
             userId,
@@ -3495,7 +3690,8 @@ exports.enterLottery = functions.https.onCall(async (data, context) => {
             lotteryId,
             selectedNumber,
             participantsCount: currentParticipants + 1,
-            userTicketsCount: userTicketsCount + 1
+            userTicketsCount: userTicketsCount + 1,
+            effectiveMaxTicketsPerUser
         };
     });
 });
