@@ -1069,7 +1069,7 @@ const getHostingFtpConfig = () => {
     const host = process.env.HOSTING_FTP_HOST || '';
     const user = process.env.HOSTING_FTP_USER || '';
     const password = process.env.HOSTING_FTP_PASSWORD || '';
-    const basePath = process.env.HOSTING_FTP_BASE_PATH || '/56fe2b5f022bb112/files/domains/bot.cdelu.io/public_html/images';
+    const basePath = process.env.HOSTING_FTP_BASE_PATH || '/domains/bot.cdelu.io/public_html/images';
     const publicBaseUrl = process.env.HOSTING_PUBLIC_BASE_URL || 'https://bot.cdelu.io/images';
     const port = Number(process.env.HOSTING_FTP_PORT || 21);
     if (!host || !user || !password) {
@@ -1088,7 +1088,7 @@ const getHostingAvatarFtpConfig = () => {
     const host = process.env.HOSTING_FTP_HOST || '';
     const user = process.env.HOSTING_FTP_USER || '';
     const password = process.env.HOSTING_FTP_PASSWORD || '';
-    const basePath = process.env.HOSTING_FTP_AVATAR_BASE_PATH || '/56fe2b5f022bb112/files/domains/bot.cdelu.io/public_html';
+    const basePath = process.env.HOSTING_FTP_AVATAR_BASE_PATH || '/domains/bot.cdelu.io/public_html';
     const publicBaseUrl = process.env.HOSTING_AVATAR_PUBLIC_BASE_URL || 'https://bot.cdelu.io';
     const port = Number(process.env.HOSTING_FTP_PORT || 21);
     if (!host || !user || !password) {
@@ -3579,6 +3579,10 @@ exports.enterLottery = functions.https.onCall(async (data, context) => {
     await ensureLotteryEntriesSchemaV2(lotteryId);
     const userDocSnap = await db.collection('users').doc(userId).get();
     const userData = userDocSnap.data() || {};
+    const userRecord = await admin.auth().getUser(userId);
+    const providerIds = (userRecord.providerData || []).map((provider) => provider.providerId);
+    const hasSocialAccount = providerIds.includes('google.com') || providerIds.includes('facebook.com');
+    const isVerifiedUser = userData.isVerified === true;
     const token = (((_b = context.auth) === null || _b === void 0 ? void 0 : _b.token) || {});
     const fallbackEmail = typeof token.email === 'string' ? token.email : '';
     const fallbackName = fallbackEmail ? fallbackEmail.split('@')[0] : 'Usuario';
@@ -3618,6 +3622,10 @@ exports.enterLottery = functions.https.onCall(async (data, context) => {
         const lotteryData = lotterySnap.data() || {};
         if (lotteryData.deletedAt != null) {
             throw new functions.https.HttpsError('failed-precondition', 'lottery-inactive: La loteria ya no esta disponible.');
+        }
+        const isFree = lotteryData.isFree !== false;
+        if (isFree && !hasSocialAccount && !isVerifiedUser) {
+            throw new functions.https.HttpsError('failed-precondition', 'unverified-account: Solo los usuarios con al menos una cuenta social vinculada y verificada (Google o Facebook) pueden participar en las loterías gratuitas.');
         }
         const lotteryStatus = (lotteryData.status || 'draft');
         if (lotteryStatus !== 'active') {
