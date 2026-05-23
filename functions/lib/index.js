@@ -3505,14 +3505,17 @@ const ensureLotteryEntriesSchemaV2 = async (lotteryId) => {
             const userIdRaw = typeof sourceData.userId === 'string' ? sourceData.userId.trim() : '';
             const fallbackUserId = planned.source.id;
             const userId = userIdRaw || fallbackUserId;
+            const userUsernameRaw = typeof sourceData.userUsername === 'string' ? sourceData.userUsername.trim() : '';
             const userNameRaw = typeof sourceData.userName === 'string' ? sourceData.userName.trim() : '';
             const userName = userNameRaw || 'Usuario';
+            const userUsername = userUsernameRaw.slice(0, 30);
             const profilePicRaw = typeof sourceData.userProfilePicUrl === 'string'
                 ? sourceData.userProfilePicUrl.trim()
                 : '';
             const payload = {
                 userId,
                 userName: userName.slice(0, 120),
+                userUsername,
                 userProfilePicUrl: profilePicRaw,
                 lotteryId,
                 selectedNumber: planned.selectedNumber,
@@ -3583,7 +3586,9 @@ exports.enterLottery = functions.https.onCall(async (data, context) => {
     const userProfilePicRaw = typeof userData.profilePictureUrl === 'string'
         ? userData.profilePictureUrl
         : '';
+    const userUsernameRaw = typeof userData.username === 'string' ? userData.username : '';
     const userName = userNameRaw.trim().slice(0, 120) || 'Usuario';
+    const userUsername = userUsernameRaw.trim().slice(0, 30);
     const userProfilePicUrl = userProfilePicRaw.trim();
     const modulesConfigRef = db.collection('_config').doc('modules');
     const lotteryRef = db.collection('lotteries').doc(lotteryId);
@@ -3667,6 +3672,7 @@ exports.enterLottery = functions.https.onCall(async (data, context) => {
         const entryPayload = {
             userId,
             userName,
+            userUsername,
             userProfilePicUrl,
             lotteryId,
             selectedNumber,
