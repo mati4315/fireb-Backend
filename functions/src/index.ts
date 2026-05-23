@@ -987,7 +987,7 @@ const loadNotificationActorIdentity = async (actorUserId: string): Promise<Notif
 const sendPushToNotificationDevices = async (
   notificationRef: FirebaseFirestore.DocumentReference<FirebaseFirestore.DocumentData>,
   recipientUserId: string,
-  notificationType: NotificationType,
+  notificationType: NotificationType | 'system',
   actorName: string,
   targetPath: string
 ): Promise<void> => {
@@ -1014,12 +1014,25 @@ const sendPushToNotificationDevices = async (
 
   if (uniqueTokens.length === 0) return;
 
-  const pushText = buildPushTextForNotification(notificationType, actorName);
+  let title = '';
+  let body = '';
+
+  if (notificationType === 'system') {
+    const snap = await notificationRef.get();
+    const docData = snap.data() || {};
+    title = 'Sorteo Ganado! 🏆';
+    body = typeof docData.systemMessage === 'string' && docData.systemMessage ? docData.systemMessage : 'Felicidades! Has ganado un sorteo.';
+  } else {
+    const pushText = buildPushTextForNotification(notificationType, actorName);
+    title = pushText.title;
+    body = pushText.body;
+  }
+
   const sendResult = await admin.messaging().sendEachForMulticast({
     tokens: uniqueTokens,
     notification: {
-      title: pushText.title,
-      body: pushText.body
+      title,
+      body
     },
     data: {
       notificationId: notificationRef.id,
@@ -4773,7 +4786,7 @@ export const drawLotteryWinner = functions.https.onCall(async (data, context) =>
   const modulesConfigRef = db.collection('_config').doc('modules');
   const lotteryRef = db.collection('lotteries').doc(lotteryId);
 
-  return db.runTransaction(async (tx) => {
+  const result = await db.runTransaction(async (tx) => {
     const [modulesConfigSnap, lotterySnap] = await Promise.all([
       tx.get(modulesConfigRef),
       tx.get(lotteryRef)
@@ -4870,9 +4883,83 @@ export const drawLotteryWinner = functions.https.onCall(async (data, context) =>
         userProfilePicUrl: winnerProfilePic,
         selectedNumber: winnerSelectedNumber
       },
-      participantsCount
+      participantsCount,
+      lotteryTitle: lotteryData.title || lotteryData.nombre || 'Sorteo',
+      hasPremio: lotteryData.hasPremio !== false,
+      premioType: lotteryData.premioType || 'dinero',
+      premioDinero: typeof lotteryData.premioDinero === 'number' ? lotteryData.premioDinero : null,
+      premioOtros: typeof lotteryData.premioOtros === 'string' ? lotteryData.premioOtros : ''
     };
   });
+
+  // Emitir notificación del sistema y push al ganador fuera de la transacción
+  try {
+    const winnerUserId = result.winner.userId;
+    const lotteryTitle = result.lotteryTitle;
+    const winnerSelectedNumber = result.winner.selectedNumber;
+
+    let premioMsg = '';
+    if (result.hasPremio) {
+      if (result.premioType === 'dinero' && result.premioDinero !== null) {
+        premioMsg = `un premio de $${result.premioDinero} ARS`;
+      } else if (result.premioType === 'otros' && result.premioOtros) {
+        premioMsg = `el premio "${result.premioOtros}"`;
+      } else {
+        premioMsg = 'el premio mayor';
+      }
+    } else {
+      premioMsg = 'el premio mayor';
+    }
+
+    const systemMessage = `🏆 ¡Felicidades! Has ganado el sorteo "${lotteryTitle}" con el número #${winnerSelectedNumber}. Tu premio es ${premioMsg}.`;
+
+    const notificationRef = db.collection('users')
+      .doc(winnerUserId)
+      .collection('notifications')
+      .doc();
+
+    await notificationRef.set({
+      type: 'system',
+      recipientUserId: winnerUserId,
+      actorUserId: 'system',
+      actorName: 'Sorteos Bot',
+      actorUsername: 'system',
+      actorProfilePictureUrl: 'https://bot.cdelu.io/images/logo.png',
+      contentId: lotteryId,
+      contentModule: '',
+      contentPublicRef: '',
+      contentSlug: '',
+      commentId: '',
+      replyId: '',
+      targetPath: '/perfil',
+      isRead: false,
+      readAt: null,
+      eventCount: 1,
+      systemMessage,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      lastEventAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    // Enviar alerta push
+    await sendPushToNotificationDevices(
+      notificationRef,
+      winnerUserId,
+      'system',
+      'Sorteos Bot',
+      '/perfil'
+    ).catch((err) => console.warn('Error sending winner push notification:', err));
+
+  } catch (error) {
+    console.error('Error recording winner notification:', error);
+  }
+
+  return {
+    status: result.status,
+    lotteryId: result.lotteryId,
+    winner: result.winner,
+    participantsCount: result.participantsCount
+  };
 });
 
 // 10. Surveys vote callable (single vote per user/survey)
