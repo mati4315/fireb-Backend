@@ -10,6 +10,7 @@ const stream_1 = require("stream");
 const crypto = require("crypto");
 const ftp = require("basic-ftp");
 const sharp = require("sharp");
+const WebSocket = require("ws");
 admin.initializeApp();
 const db = admin.firestore();
 const MAX_SURVEY_OPTIONS_SELECTED = 10;
@@ -3570,6 +3571,51 @@ const ensureLotteryEntriesSchemaV2 = async (lotteryId) => {
         throw error;
     }
 };
+function publishLotteryBallToOBS(number, name, profilePicUrl = '') {
+    const wsUrl = process.env.WS_LOTTERY_URL || 'ws://localhost:688';
+    const wsToken = process.env.WS_LOTTERY_TOKEN || '';
+    if (!wsUrl)
+        return;
+    try {
+        const ws = new WebSocket(wsUrl);
+        let settled = false;
+        const done = () => {
+            if (settled)
+                return;
+            settled = true;
+            try {
+                ws.close();
+            }
+            catch (_a) { }
+        };
+        const timeout = setTimeout(() => {
+            console.warn('[lottery] OBS WS publish timed out');
+            done();
+        }, 3000);
+        ws.on('open', () => {
+            clearTimeout(timeout);
+            const payload = {
+                type: 'TRIGGER_BALL',
+                number,
+                name,
+                profilePicUrl,
+                eventId: `entry_${number}_${Date.now()}`
+            };
+            if (wsToken)
+                payload.token = wsToken;
+            ws.send(JSON.stringify(payload));
+            done();
+        });
+        ws.on('error', (err) => {
+            clearTimeout(timeout);
+            console.warn('[lottery] OBS WS publish error:', err.message);
+            done();
+        });
+    }
+    catch (err) {
+        console.warn('[lottery] OBS WS publish not available:', err.message);
+    }
+}
 // 8. Lottery entry callable (number-based entries, supports multiple tickets per user)
 exports.enterLottery = functions.https.onCall(async (data, context) => {
     var _a, _b;
@@ -3616,7 +3662,7 @@ exports.enterLottery = functions.https.onCall(async (data, context) => {
         .collection('entries')
         .where('userId', '==', userId)
         .limit(LOTTERY_MAX_MAX_NUMBER + 2);
-    return db.runTransaction(async (tx) => {
+    const entryResult = await db.runTransaction(async (tx) => {
         var _a;
         const [modulesConfigSnap, lotterySnap, entrySnap, userEntriesSnap, extraTicketsSnap] = await Promise.all([
             tx.get(modulesConfigRef),
@@ -3720,6 +3766,10 @@ exports.enterLottery = functions.https.onCall(async (data, context) => {
             effectiveMaxTicketsPerUser
         };
     });
+    if (entryResult.status === 'ok') {
+        publishLotteryBallToOBS(entryResult.selectedNumber, userName, userProfilePicUrl);
+    }
+    return entryResult;
 });
 // 9. Lottery draw callable (staff-only)
 exports.drawLotteryWinner = functions.https.onCall(async (data, context) => {

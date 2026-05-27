@@ -1,0 +1,4 @@
+hacer un deploy 
+ingresar a  D:\FIREBASE\Backend\functions
+luego
+npm run deploy
