@@ -1116,6 +1116,180 @@ const getHostingAvatarFtpConfig = () => {
         publicBaseUrl: publicBaseUrl.replace(/\/$/, '')
     };
 };
+const normalizeHostedRelativePath = (value) => {
+    return value
+        .replace(/\\/g, '/')
+        .replace(/^\/+/, '')
+        .replace(/\/+/g, '/')
+        .trim();
+};
+const extractHostedRelativePaths = (value, publicBaseUrl) => {
+    const results = new Set();
+    const publicBase = publicBaseUrl.replace(/\/+$/, '');
+    const pushPath = (candidate) => {
+        const normalized = normalizeHostedRelativePath(candidate);
+        if (!normalized || normalized.includes('..'))
+            return;
+        results.add(normalized.replace(/^avatars\//i, 'AVATAR/'));
+    };
+    const pushFromString = (raw) => {
+        const value = raw.trim();
+        if (!value)
+            return;
+        const directPath = normalizeHostedRelativePath(value);
+        if (/^(posts|AVATAR|avatars)\//i.test(directPath)) {
+            pushPath(directPath);
+            return;
+        }
+        if (/^https?:\/\//i.test(value)) {
+            try {
+                const urlObj = new URL(value);
+                const baseObj = new URL(publicBase);
+                if (urlObj.origin !== baseObj.origin)
+                    return;
+                const basePath = normalizeHostedRelativePath(baseObj.pathname);
+                let relativePath = normalizeHostedRelativePath(urlObj.pathname);
+                if (basePath && relativePath.toLowerCase().startsWith(`${basePath.toLowerCase()}/`)) {
+                    relativePath = relativePath.slice(basePath.length + 1);
+                }
+                else if (relativePath.toLowerCase().startsWith('images/')) {
+                    relativePath = relativePath.slice('images/'.length);
+                }
+                else if (relativePath.toLowerCase().startsWith('imagenes/')) {
+                    relativePath = relativePath.slice('imagenes/'.length);
+                }
+                if (relativePath) {
+                    pushPath(decodeURIComponent(relativePath));
+                }
+            }
+            catch (_a) {
+                const base = publicBase.replace(/\/+$/, '');
+                if (value.startsWith(`${base}/`)) {
+                    pushPath(decodeURIComponent(value.slice(base.length + 1)));
+                }
+            }
+        }
+    };
+    const visit = (entry) => {
+        if (!entry)
+            return;
+        if (typeof entry === 'string') {
+            pushFromString(entry);
+            return;
+        }
+        if (Array.isArray(entry)) {
+            for (const item of entry)
+                visit(item);
+            return;
+        }
+        if (typeof entry === 'object') {
+            const imageEntry = entry;
+            pushFromString(String(imageEntry.path || ''));
+            pushFromString(String(imageEntry.thumbPath || ''));
+            pushFromString(String(imageEntry.url || ''));
+            pushFromString(String(imageEntry.thumbUrl || ''));
+            pushFromString(String(imageEntry.image || ''));
+            pushFromString(String(imageEntry.imageUrl || ''));
+            pushFromString(String(imageEntry.thumbnail || ''));
+            pushFromString(String(imageEntry.thumbnailUrl || ''));
+            pushFromString(String(imageEntry.imgMiniatura || ''));
+            pushFromString(String(imageEntry.img_miniatura || ''));
+            pushFromString(String(imageEntry.coverImage || ''));
+            pushFromString(String(imageEntry.coverThumbnailUrl || ''));
+        }
+    };
+    visit(value);
+    return Array.from(results);
+};
+const deriveHostingThumbRelativePath = (relativePath) => {
+    const normalized = normalizeHostedRelativePath(relativePath);
+    if (!normalized)
+        return null;
+    const ext = path.posix.extname(normalized);
+    if (!ext)
+        return null;
+    const dir = path.posix.dirname(normalized);
+    const baseName = path.posix.basename(normalized, ext);
+    if (baseName.endsWith('_t') || baseName.endsWith('_') || baseName.endsWith('-thumb')) {
+        return normalized;
+    }
+    if (baseName.endsWith('_o')) {
+        return path.posix.join(dir, `${baseName.slice(0, -2)}_t${ext}`);
+    }
+    return path.posix.join(dir, `${baseName}_${ext}`);
+};
+const cleanupHostingRelativePath = async (ftpClient, ftpConfig, relativePath) => {
+    const cleaned = normalizeHostedRelativePath(relativePath);
+    if (!cleaned || cleaned.includes('..'))
+        return false;
+    const remotePath = `${ftpConfig.basePath}/${cleaned}`.replace(/\/+/g, '/');
+    try {
+        await ftpClient.remove(remotePath);
+        return true;
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/not found|no such file|550/i.test(message)) {
+            console.warn(`No se pudo borrar archivo remoto ${cleaned}:`, error);
+        }
+        return false;
+    }
+};
+const cleanupCommunityPostHostingMedia = async (postData) => {
+    var _a, _b, _c, _d, _e;
+    const publicBaseUrl = process.env.HOSTING_PUBLIC_BASE_URL || 'https://bot.cdelu.io/images';
+    const ftpConfig = getHostingFtpConfig();
+    const paths = new Set();
+    const addPaths = (value) => {
+        for (const candidate of extractHostedRelativePaths(value, publicBaseUrl)) {
+            paths.add(candidate);
+        }
+    };
+    addPaths(postData.imagesV2);
+    addPaths(postData.images);
+    addPaths(postData.imgMiniatura);
+    addPaths(postData.img_miniatura);
+    addPaths(postData.thumbnail);
+    addPaths(postData.thumbnailUrl);
+    addPaths(postData.coverThumbnailUrl);
+    addPaths((_a = postData.custom_fields) === null || _a === void 0 ? void 0 : _a.image);
+    addPaths((_b = postData.custom_fields) === null || _b === void 0 ? void 0 : _b.imgMiniatura);
+    addPaths((_c = postData.custom_fields) === null || _c === void 0 ? void 0 : _c.img_miniatura);
+    addPaths((_d = postData.custom_fields) === null || _d === void 0 ? void 0 : _d.thumbnail);
+    addPaths((_e = postData.custom_fields) === null || _e === void 0 ? void 0 : _e.thumbnailUrl);
+    for (const imageEntry of Array.isArray(postData.imagesV2) ? postData.imagesV2 : []) {
+        if (!imageEntry || typeof imageEntry !== 'object')
+            continue;
+        const entry = imageEntry;
+        if (typeof entry.path === 'string')
+            paths.add(normalizeHostedRelativePath(entry.path));
+        if (typeof entry.thumbPath === 'string')
+            paths.add(normalizeHostedRelativePath(entry.thumbPath));
+    }
+    const derivedThumbs = Array.from(paths)
+        .map((relativePath) => deriveHostingThumbRelativePath(relativePath))
+        .filter((relativePath) => Boolean(relativePath));
+    for (const relativePath of derivedThumbs) {
+        paths.add(relativePath);
+    }
+    const ftpClient = new ftp.Client(30000);
+    ftpClient.ftp.verbose = false;
+    try {
+        await ftpClient.access({
+            host: ftpConfig.host,
+            user: ftpConfig.user,
+            password: ftpConfig.password,
+            port: ftpConfig.port,
+            secure: false
+        });
+        for (const relativePath of paths) {
+            await cleanupHostingRelativePath(ftpClient, ftpConfig, relativePath);
+        }
+    }
+    finally {
+        ftpClient.close();
+    }
+};
 // 1. Likes
 exports.onLikeAdded = functions.firestore
     .document('content/{contentId}/likes/{userId}')
@@ -2936,6 +3110,13 @@ exports.onContentDeleted = functions.firestore
         const wasAlive = beforeData.deletedAt == null;
         const isNowDeleted = afterData.deletedAt != null;
         if (wasAlive && isNowDeleted) {
+            try {
+                await cleanupCommunityPostHostingMedia(afterData);
+                console.log(`🧹 Community media deleted for ${contentId}`);
+            }
+            catch (mediaError) {
+                console.error(`⚠️ Failed to delete community media for ${contentId}:`, mediaError);
+            }
             const userId = afterData.userId;
             await db.collection('users').doc(userId).update({
                 'stats.postsCount': admin.firestore.FieldValue.increment(-1),
@@ -3147,7 +3328,7 @@ exports.onOfficialNewsReceived = functions.database
 exports.onCommunityPostsReceived = functions.database
     .ref('/c/{postId}')
     .onWrite(async (change, context) => {
-    var _a, _b, _c, _d;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o;
     const { postId } = context.params;
     const afterData = change.after.val();
     if (!afterData) {
@@ -3215,12 +3396,77 @@ exports.onCommunityPostsReceived = functions.database
                 return '';
             return value.trim().slice(0, 2400);
         };
-        const rawImages = Array.isArray(afterData.images) ? afterData.images : [];
-        const normalizedImages = Array.from(new Set(rawImages.map((value) => normalizeUrlCandidate(value)).filter((value) => value.length > 0)));
-        const imagesV2 = normalizedImages.map((url) => ({
-            url,
-            thumbUrl: url
-        }));
+        const normalizeImageEntry = (entry) => {
+            if (typeof entry === 'string') {
+                const url = normalizeUrlCandidate(entry);
+                return url ? { url, thumbUrl: null } : null;
+            }
+            if (!entry || typeof entry !== 'object')
+                return null;
+            const imageEntry = entry;
+            const url = normalizeUrlCandidate(imageEntry.url);
+            if (!url)
+                return null;
+            const thumbCandidate = normalizeUrlCandidate(imageEntry.thumbUrl) ||
+                normalizeUrlCandidate(imageEntry.thumbnailUrl) ||
+                normalizeUrlCandidate(imageEntry.thumbnail) ||
+                normalizeUrlCandidate(imageEntry.imgMiniatura) ||
+                normalizeUrlCandidate(imageEntry.img_miniatura) ||
+                null;
+            return {
+                url,
+                thumbUrl: thumbCandidate && thumbCandidate !== url ? thumbCandidate : null
+            };
+        };
+        const explicitImagesV2 = Array.isArray(afterData.imagesV2)
+            ? afterData.imagesV2
+                .map((entry) => normalizeImageEntry(entry))
+                .filter((entry) => Boolean(entry))
+            : [];
+        const fallbackImageEntries = [
+            ...(Array.isArray(afterData.images) ? afterData.images : []),
+            afterData.image,
+            afterData.imageUrl,
+            afterData.coverImage,
+            afterData.imgMiniatura,
+            afterData.img_miniatura,
+            afterData.thumbnail,
+            afterData.thumbnailUrl,
+            afterData.coverThumbnailUrl,
+            (_b = afterData.custom_fields) === null || _b === void 0 ? void 0 : _b.image,
+            (_c = afterData.custom_fields) === null || _c === void 0 ? void 0 : _c.imgMiniatura,
+            (_d = afterData.custom_fields) === null || _d === void 0 ? void 0 : _d.img_miniatura,
+            (_e = afterData.custom_fields) === null || _e === void 0 ? void 0 : _e.thumbnail,
+            (_f = afterData.custom_fields) === null || _f === void 0 ? void 0 : _f.thumbnailUrl
+        ]
+            .flatMap((entry) => {
+            if (Array.isArray(entry))
+                return entry;
+            return [entry];
+        })
+            .map((entry) => normalizeImageEntry(entry))
+            .filter((entry) => Boolean(entry));
+        const mergedImages = [...explicitImagesV2, ...fallbackImageEntries];
+        const normalizedImages = Array.from(new Set(mergedImages.map((entry) => entry.url))).filter((value) => value.length > 0);
+        const legacyMiniThumb = normalizeUrlCandidate(afterData.imgMiniatura) ||
+            normalizeUrlCandidate(afterData.img_miniatura) ||
+            normalizeUrlCandidate(afterData.thumbnailUrl) ||
+            normalizeUrlCandidate(afterData.coverThumbnailUrl) ||
+            normalizeUrlCandidate((_g = afterData.custom_fields) === null || _g === void 0 ? void 0 : _g.imgMiniatura) ||
+            normalizeUrlCandidate((_h = afterData.custom_fields) === null || _h === void 0 ? void 0 : _h.img_miniatura) ||
+            normalizeUrlCandidate((_j = afterData.custom_fields) === null || _j === void 0 ? void 0 : _j.thumbnailUrl) ||
+            '';
+        const imagesV2 = normalizedImages.map((url, index) => {
+            const matched = mergedImages.find((entry) => entry.url === url);
+            const thumbUrl = (matched === null || matched === void 0 ? void 0 : matched.thumbUrl) ||
+                (index === 0 && legacyMiniThumb ? legacyMiniThumb : null) ||
+                url;
+            return {
+                url,
+                thumbUrl
+            };
+        });
+        const imgMiniatura = legacyMiniThumb || ((_k = imagesV2[0]) === null || _k === void 0 ? void 0 : _k.thumbUrl) || normalizedImages[0] || '';
         const firestorePayload = {
             type: 'post',
             source: 'scraping',
@@ -3231,6 +3477,7 @@ exports.onCommunityPostsReceived = functions.database
             descripcion: afterData.content || '',
             images: normalizedImages,
             imagesV2,
+            imgMiniatura,
             userId: afterData.author_id || 'community_user',
             userName: afterData.author_name || 'Usuario Comunidad',
             userProfilePicUrl: '',
@@ -3238,9 +3485,9 @@ exports.onCommunityPostsReceived = functions.database
             group_url: afterData.group_url || '',
             video_links: Array.isArray(afterData.video_links) ? afterData.video_links : [],
             stats: {
-                likesCount: ((_b = afterData.stats) === null || _b === void 0 ? void 0 : _b.likesCount) || 0,
-                commentsCount: ((_c = afterData.stats) === null || _c === void 0 ? void 0 : _c.commentsCount) || 0,
-                viewsCount: ((_d = afterData.stats) === null || _d === void 0 ? void 0 : _d.viewsCount) || 0
+                likesCount: ((_l = afterData.stats) === null || _l === void 0 ? void 0 : _l.likesCount) || 0,
+                commentsCount: ((_m = afterData.stats) === null || _m === void 0 ? void 0 : _m.commentsCount) || 0,
+                viewsCount: ((_o = afterData.stats) === null || _o === void 0 ? void 0 : _o.viewsCount) || 0
             },
             createdAt: createdAtTs,
             updatedAt: updatedAtTs,

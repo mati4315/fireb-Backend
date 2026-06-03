@@ -26,7 +26,7 @@ const FTP_CONFIG = {
 };
 
 const BOT_URL_PREFIX  = 'https://bot.cdelu.io/images/';
-const BOT_FTP_PREFIX  = '/}/bot.cdelu.io/public_html/images/';
+const BOT_FTP_PREFIX  = '/domains/bot.cdelu.io/public_html/images/';
 const STORAGE_BUCKET  = 'cdeluar-ddefc.firebasestorage.app';
 
 const serviceAccount = require(path.join(__dirname, 'firebase-sa-key.json'));
@@ -65,6 +65,18 @@ function extractUrls(post) {
   if (Array.isArray(post.images))   post.images.forEach(add);
   if (Array.isArray(post.imagesV2)) post.imagesV2.forEach(o => { add(o?.url); add(o?.thumbUrl); });
   return [...urls];
+}
+
+async function deleteDocumentTree(docRef) {
+  const subcollections = await docRef.listCollections();
+  for (const collectionRef of subcollections) {
+    const childDocs = await collectionRef.listDocuments();
+    for (const childDocRef of childDocs) {
+      await deleteDocumentTree(childDocRef);
+    }
+  }
+
+  await docRef.delete();
 }
 
 async function ftpDelete(client, ftpPath) {

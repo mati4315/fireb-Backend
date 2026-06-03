@@ -17,6 +17,8 @@
     "test:likes-rules": "node scripts/test-likes-rules.js",
     "test:survey-rules": "node scripts/test-survey-rules.js",
     "test:lottery-rules": "node scripts/test-lottery-rules.js",
+    "delete:community-posts": "node scripts/delete-community-posts.js",
+    "delete:community-posts:dry": "node scripts/delete-community-posts.js --dry-run",
     "backfill:content-module": "node scripts/backfill-content-module.js",
     "backfill:content-module:dry": "node scripts/backfill-content-module.js --dry-run",
     "backfill:content-slugs": "node scripts/backfill-content-slugs.js",
