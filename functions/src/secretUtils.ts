@@ -2,7 +2,7 @@ import * as admin from 'firebase-admin';
 import * as functions from 'firebase-functions';
 import * as crypto from 'crypto';
 
-const db = admin.firestore();
+const getDb = () => admin.firestore();
 
 export const SECRET_TEXT_MIN_LENGTH = 12;
 export const SECRET_TEXT_MAX_LENGTH = 280;
@@ -340,7 +340,7 @@ export const buildSecretRankingsSnapshot = (
 };
 
 export const refreshSecretRankingsInternal = async (): Promise<Record<string, unknown>> => {
-  const snapshot = await db.collection('content')
+  const snapshot = await getDb().collection('content')
     .where('module', '==', 'secrets')
     .where('deletedAt', '==', null)
     .where('moderation.status', '==', 'active')
@@ -353,6 +353,6 @@ export const refreshSecretRankingsInternal = async (): Promise<Record<string, un
     .map(toSecretRankingItem);
 
   const rankings = buildSecretRankingsSnapshot(rankingItems);
-  await db.collection('_config').doc('secret_rankings').set(rankings, { merge: true });
+  await getDb().collection('_config').doc('secret_rankings').set(rankings, { merge: true });
   return rankings;
 };

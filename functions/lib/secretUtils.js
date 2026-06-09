@@ -3,7 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.refreshSecretRankingsInternal = exports.buildSecretRankingsSnapshot = exports.takeUniqueSecretRankingItems = exports.toSecretRankingItem = exports.isSecretActiveForRanking = exports.computeSecretRank = exports.resolveSecretRuntimeSettings = exports.createSecretAlias = exports.buildSecretFingerprintHash = exports.timestampToMillisOrZero = exports.normalizeSecretClientAnonId = exports.normalizeSecretReportReason = exports.normalizeSecretAge = exports.normalizeSecretZone = exports.normalizeSecretSex = exports.normalizeSecretCategory = exports.sanitizeSecretText = exports.hasMeaningfulSecretText = exports.SECRET_RANKINGS_LIST_LIMIT = exports.SECRET_RANKINGS_SAMPLE_LIMIT = exports.SECRET_AUTO_HIDE_REPORT_THRESHOLD = exports.SECRET_FINGERPRINT_TTL_MS = exports.SECRET_DAILY_LIMIT = exports.SECRET_REPORT_REASON_MAX_LENGTH = exports.SECRET_ZONE_MAX_LENGTH = exports.SECRET_COMMENT_MAX_LENGTH = exports.SECRET_COMMENT_MIN_LENGTH = exports.SECRET_NUMERIC_ID_START = exports.SECRET_TEXT_MAX_ABSOLUTE = exports.SECRET_TEXT_MAX_LENGTH = exports.SECRET_TEXT_MIN_LENGTH = void 0;
 const admin = require("firebase-admin");
 const crypto = require("crypto");
-const db = admin.firestore();
+const getDb = () => admin.firestore();
 exports.SECRET_TEXT_MIN_LENGTH = 12;
 exports.SECRET_TEXT_MAX_LENGTH = 280;
 exports.SECRET_TEXT_MAX_ABSOLUTE = 500;
@@ -267,7 +267,7 @@ const buildSecretRankingsSnapshot = (allItems) => {
 };
 exports.buildSecretRankingsSnapshot = buildSecretRankingsSnapshot;
 const refreshSecretRankingsInternal = async () => {
-    const snapshot = await db.collection('content')
+    const snapshot = await getDb().collection('content')
         .where('module', '==', 'secrets')
         .where('deletedAt', '==', null)
         .where('moderation.status', '==', 'active')
@@ -278,7 +278,7 @@ const refreshSecretRankingsInternal = async () => {
         .filter((docSnap) => (0, exports.isSecretActiveForRanking)(docSnap.data() || {}))
         .map(exports.toSecretRankingItem);
     const rankings = (0, exports.buildSecretRankingsSnapshot)(rankingItems);
-    await db.collection('_config').doc('secret_rankings').set(rankings, { merge: true });
+    await getDb().collection('_config').doc('secret_rankings').set(rankings, { merge: true });
     return rankings;
 };
 exports.refreshSecretRankingsInternal = refreshSecretRankingsInternal;
