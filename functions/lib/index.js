@@ -7,904 +7,39 @@ const path = require("path");
 const os = require("os");
 const fs = require("fs/promises");
 const stream_1 = require("stream");
-const crypto = require("crypto");
-const ftp = require("basic-ftp");
-const sharp = require("sharp");
-const WebSocket = require("ws");
+const contentUtils_1 = require("./contentUtils");
+const notificationUtils_1 = require("./notificationUtils");
+const secretUtils_1 = require("./secretUtils");
+const lotteryUtils_1 = require("./lotteryUtils");
+const userUtils_1 = require("./userUtils");
+const moduleUtils_1 = require("./moduleUtils");
+const notificationRuntimeUtils_1 = require("./notificationRuntimeUtils");
 admin.initializeApp();
 const db = admin.firestore();
 const MAX_SURVEY_OPTIONS_SELECTED = 10;
 const SURVEY_COMPLETE_BATCH_SIZE = 200;
 const COMMUNITY_THUMB_MAX_SIDE = 480;
 const MAX_HOSTING_UPLOAD_BYTES = 6 * 1024 * 1024;
-const USER_PROPAGATION_QUERY_PAGE_SIZE = 100;
-const USER_PROPAGATION_BATCH_WRITE_LIMIT = 450;
 const LIKE_WRITER_CALLABLE = 'callable_toggle_v1';
-const LOTTERY_DEFAULT_MAX_NUMBER = 100;
-const LOTTERY_MIN_MAX_NUMBER = 10;
-const LOTTERY_MAX_MAX_NUMBER = 200;
-const LOTTERY_DEFAULT_MAX_TICKETS_PER_USER = 1;
-const LOTTERY_MIN_TICKETS_PER_USER = 1;
-const LOTTERY_MAX_TICKETS_PER_USER = 5;
-const LOTTERY_MAX_EXTRA_TICKETS_PER_USER = LOTTERY_MAX_MAX_NUMBER;
-const LOTTERY_USER_EXTRA_TICKETS_COLLECTION = 'lottery_user_ticket_extras';
-const LOTTERY_ENTRY_SCHEMA_VERSION = 2;
-const LOTTERY_ENTRY_DOC_PREFIX = 'n_';
-const LOTTERY_MIGRATION_PAGE_SIZE = 400;
-const LOTTERY_MIGRATION_BATCH_SIZE = 400;
-const MAX_LOTTERY_DRAW_ENTRIES = 5000;
 const COMMUNITY_THUMBNAIL_BUCKET = process.env.COMMUNITY_IMAGES_BUCKET || 'cdeluar-ddefc-storage';
-const USERNAME_MIN_LENGTH = 3;
-const USERNAME_MAX_LENGTH = 30;
-const USERNAME_REGEX = /^[a-z0-9_]+$/;
 const CONTENT_SLUG_MAX_LENGTH = 96;
 const NOTIFICATION_PAGE_SIZE = 300;
 const NOTIFICATION_RETENTION_DAYS = 30;
 const NOTIFICATION_DEVICE_ID_MAX_LENGTH = 120;
-const NOTIFICATION_TOPIC_ALL = 'all_users';
-const NOTIFICATION_TOPIC_ANDROID = 'android_users';
-const NOTIFICATION_TOPIC_WEB = 'web_users';
-const ANDROID_PUSH_CHANNEL_ID = 'general_notifications';
-const SECRET_TEXT_MIN_LENGTH = 12;
-const SECRET_TEXT_MAX_LENGTH = 280;
-const SECRET_TEXT_MAX_ABSOLUTE = 500;
-const SECRET_NUMERIC_ID_START = 8301641;
-const SECRET_COMMENT_MIN_LENGTH = 2;
-const SECRET_COMMENT_MAX_LENGTH = 300;
-const SECRET_ZONE_MAX_LENGTH = 48;
-const SECRET_REPORT_REASON_MAX_LENGTH = 140;
-const SECRET_DAILY_LIMIT = 5;
-const SECRET_FINGERPRINT_TTL_MS = 72 * 60 * 60 * 1000;
-const SECRET_AUTO_HIDE_REPORT_THRESHOLD = 6;
-const SECRET_RANKINGS_SAMPLE_LIMIT = 450;
-const SECRET_RANKINGS_LIST_LIMIT = 12;
-const USER_DEFAULT_FEED_TAB_VALUES = new Set([
-    'todo',
-    'news',
-    'post',
-    'surveys',
-    'lottery'
-]);
-const NOTIFICATION_TYPE_DEFAULTS = {
-    likes: true,
-    comments: true,
-    replies: true,
-    follows: true
+const loadFtpClient = async () => {
+    const ftpModule = await Promise.resolve().then(() => require('basic-ftp'));
+    return ftpModule.default
+        ? ftpModule.default
+        : ftpModule;
 };
-const PERMANENT_FCM_TOKEN_ERROR_CODES = new Set([
-    'messaging/invalid-registration-token',
-    'messaging/registration-token-not-registered'
-]);
-const SECRET_CATEGORY_VALUES = new Set([
-    'rumores',
-    'relaciones',
-    'trabajo_negocios',
-    'denuncia_light',
-    'random_divertido'
-]);
-const SECRET_SEX_VALUES = new Set([
-    'no_responder',
-    'hombre',
-    'mujer'
-]);
+const loadSharp = async () => {
+    var _a;
+    const sharpModule = await Promise.resolve().then(() => require('sharp'));
+    return ((_a = sharpModule.default) !== null && _a !== void 0 ? _a : sharpModule);
+};
 const buildCommentRef = (contentId, commentId) => db.collection('content').doc(contentId).collection('comments').doc(commentId);
-const inferContentModule = (contentData) => {
-    if ((contentData === null || contentData === void 0 ? void 0 : contentData.module) === 'news' || (contentData === null || contentData === void 0 ? void 0 : contentData.type) === 'news') {
-        return 'news';
-    }
-    return 'community';
-};
-const normalizeContentSlug = (value) => {
-    const raw = typeof value === 'string' ? value : '';
-    const normalized = raw
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '')
-        .replace(/-+/g, '-');
-    const trimmed = normalized.slice(0, CONTENT_SLUG_MAX_LENGTH).replace(/-+$/g, '');
-    return trimmed || 'contenido';
-};
-const buildContentSlugKey = (moduleName, slug) => `${moduleName}__${slug}`;
-const normalizeNewsPublicIdScalar = (value) => {
-    if (typeof value === 'number' && Number.isFinite(value)) {
-        const parsed = Math.floor(value);
-        return parsed > 0 ? String(parsed) : '';
-    }
-    if (typeof value === 'string') {
-        const raw = value.trim().replace(/^id:?/i, '');
-        if (!/^\d+$/.test(raw))
-            return '';
-        const parsed = Number(raw);
-        if (!Number.isFinite(parsed))
-            return '';
-        const normalized = Math.floor(parsed);
-        return normalized > 0 ? String(normalized) : '';
-    }
-    return '';
-};
-const normalizeNewsPublicId = (value) => {
-    const queue = [value];
-    while (queue.length > 0) {
-        const candidate = queue.shift();
-        const normalized = normalizeNewsPublicIdScalar(candidate);
-        if (normalized)
-            return normalized;
-        if (Array.isArray(candidate)) {
-            queue.push(...candidate);
-            continue;
-        }
-        if (candidate && typeof candidate === 'object') {
-            const record = candidate;
-            queue.push(record.publicId, record.postId, record.postID, record.id, record.value, record.rendered);
-        }
-    }
-    return '';
-};
-const buildContentPublicIdKey = (moduleName, publicId) => `${moduleName}__${publicId}`;
-const extractNewsPublicIdFromPayload = (payload) => {
-    var _a, _b, _c, _d;
-    const candidates = [
-        payload === null || payload === void 0 ? void 0 : payload.publicId,
-        payload === null || payload === void 0 ? void 0 : payload.postId,
-        payload === null || payload === void 0 ? void 0 : payload.postID,
-        payload === null || payload === void 0 ? void 0 : payload.id,
-        payload === null || payload === void 0 ? void 0 : payload.wpPostId,
-        payload === null || payload === void 0 ? void 0 : payload.wordpressId,
-        (_a = payload === null || payload === void 0 ? void 0 : payload.custom_fields) === null || _a === void 0 ? void 0 : _a.postId,
-        (_b = payload === null || payload === void 0 ? void 0 : payload.custom_fields) === null || _b === void 0 ? void 0 : _b.postID,
-        (_c = payload === null || payload === void 0 ? void 0 : payload.custom_fields) === null || _c === void 0 ? void 0 : _c.id,
-        (_d = payload === null || payload === void 0 ? void 0 : payload.custom_fields) === null || _d === void 0 ? void 0 : _d.wpPostId
-    ];
-    for (const candidate of candidates) {
-        const normalized = normalizeNewsPublicId(candidate);
-        if (normalized)
-            return normalized;
-    }
-    return '';
-};
-const buildContentSlugBase = (contentData) => {
-    const title = typeof (contentData === null || contentData === void 0 ? void 0 : contentData.titulo) === 'string' ? contentData.titulo.trim() : '';
-    if (title)
-        return normalizeContentSlug(title);
-    const moduleName = inferContentModule(contentData);
-    return moduleName === 'news' ? 'noticia' : 'publicacion';
-};
-const isLikeModuleEnabledForContent = (modulesConfig, moduleName) => {
-    var _a, _b, _c, _d;
-    const likesConfig = (_a = modulesConfig === null || modulesConfig === void 0 ? void 0 : modulesConfig.likes) !== null && _a !== void 0 ? _a : {};
-    const likesEnabled = (_b = likesConfig.enabled) !== null && _b !== void 0 ? _b : true;
-    const likesNewsEnabled = (_c = likesConfig.newsEnabled) !== null && _c !== void 0 ? _c : true;
-    const likesCommunityEnabled = (_d = likesConfig.communityEnabled) !== null && _d !== void 0 ? _d : true;
-    if (!likesEnabled)
-        return false;
-    return moduleName === 'news' ? likesNewsEnabled : likesCommunityEnabled;
-};
-const isNotificationsModuleEnabled = (modulesConfig) => {
-    var _a, _b;
-    const notificationsConfig = (_a = modulesConfig === null || modulesConfig === void 0 ? void 0 : modulesConfig.notifications) !== null && _a !== void 0 ? _a : {};
-    return (_b = notificationsConfig.enabled) !== null && _b !== void 0 ? _b : true;
-};
-const isLotteryModuleEnabled = (modulesConfig) => {
-    var _a, _b;
-    const lotteryConfig = (_a = modulesConfig === null || modulesConfig === void 0 ? void 0 : modulesConfig.lottery) !== null && _a !== void 0 ? _a : {};
-    return (_b = lotteryConfig.enabled) !== null && _b !== void 0 ? _b : true;
-};
-const isSecretsModuleEnabled = (modulesConfig) => {
-    var _a, _b;
-    const secretsConfig = (_a = modulesConfig === null || modulesConfig === void 0 ? void 0 : modulesConfig.secrets) !== null && _a !== void 0 ? _a : {};
-    return (_b = secretsConfig.enabled) !== null && _b !== void 0 ? _b : true;
-};
-const collapseWhitespace = (value) => value.replace(/\s+/g, ' ').trim();
-const hasMeaningfulSecretText = (value) => /[0-9A-Za-z\u00C0-\u024F]/.test(value);
-const sanitizeSecretText = (value, maxLength) => {
-    const asString = typeof value === 'string' ? value : '';
-    return collapseWhitespace(asString).slice(0, maxLength);
-};
-const normalizeSecretCategory = (value) => {
-    const normalized = sanitizeBoundedString(value, 40).toLowerCase();
-    if (!normalized)
-        return null;
-    return SECRET_CATEGORY_VALUES.has(normalized) ? normalized : null;
-};
-const normalizeSecretSex = (value) => {
-    const normalized = sanitizeBoundedString(value, 20).toLowerCase();
-    if (SECRET_SEX_VALUES.has(normalized)) {
-        return normalized;
-    }
-    return 'no_responder';
-};
-const normalizeSecretZone = (value) => {
-    const sanitized = sanitizeSecretText(value, SECRET_ZONE_MAX_LENGTH);
-    return sanitized || null;
-};
-const normalizeSecretAge = (value) => {
-    if (value == null || value === '')
-        return null;
-    const parsed = Number(value);
-    if (!Number.isFinite(parsed))
-        return null;
-    const normalized = Math.floor(parsed);
-    if (normalized < 13 || normalized > 99)
-        return null;
-    return normalized;
-};
-const normalizeSecretReportReason = (value) => {
-    const reason = sanitizeSecretText(value, SECRET_REPORT_REASON_MAX_LENGTH);
-    return reason || 'contenido_inapropiado';
-};
-const normalizeSecretClientAnonId = (value) => {
-    const raw = sanitizeBoundedString(value, 120);
-    return raw.replace(/[^a-zA-Z0-9_-]/g, '');
-};
-const timestampToMillisOrZero = (value) => {
-    if (value instanceof admin.firestore.Timestamp)
-        return value.toMillis();
-    return 0;
-};
-const buildSecretFingerprintHash = (data, context) => {
-    var _a, _b, _c;
-    const rawRequest = context.rawRequest;
-    const forwardedForHeader = (_a = rawRequest === null || rawRequest === void 0 ? void 0 : rawRequest.headers) === null || _a === void 0 ? void 0 : _a['x-forwarded-for'];
-    const forwardedForValue = Array.isArray(forwardedForHeader)
-        ? String(forwardedForHeader[0] || '')
-        : String(forwardedForHeader || '');
-    const forwardedIp = ((_b = forwardedForValue.split(',')[0]) === null || _b === void 0 ? void 0 : _b.trim()) || '';
-    const requestIp = forwardedIp || String((rawRequest === null || rawRequest === void 0 ? void 0 : rawRequest.ip) || '');
-    const userAgent = String(((_c = rawRequest === null || rawRequest === void 0 ? void 0 : rawRequest.headers) === null || _c === void 0 ? void 0 : _c['user-agent']) || '');
-    const clientAnonId = normalizeSecretClientAnonId(data === null || data === void 0 ? void 0 : data.clientAnonId);
-    const projectTag = String(process.env.GCLOUD_PROJECT || 'cdelu');
-    const pepper = String(process.env.SECRETS_FINGERPRINT_PEPPER || 'change_me_secretos_pepper_v1');
-    const rawIdentity = [
-        requestIp,
-        userAgent,
-        clientAnonId,
-        projectTag
-    ].join('|');
-    return crypto
-        .createHash('sha256')
-        .update(`${pepper}|${rawIdentity}`)
-        .digest('hex');
-};
-const createSecretAlias = (fingerprintHash, scope) => {
-    const aliasSeed = crypto
-        .createHash('sha1')
-        .update(`${fingerprintHash}|${scope}`)
-        .digest('hex')
-        .slice(0, 8);
-    const numeric = Number.parseInt(aliasSeed, 16) % 10000;
-    return `Anon${String(numeric).padStart(4, '0')}`;
-};
-const resolveSecretRuntimeSettings = (data) => {
-    const maxTextLength = clampInteger(data === null || data === void 0 ? void 0 : data.maxTextLength, 120, 500, SECRET_TEXT_MAX_LENGTH);
-    const minTextLengthRaw = clampInteger(data === null || data === void 0 ? void 0 : data.minTextLength, 1, 80, SECRET_TEXT_MIN_LENGTH);
-    const minTextLength = Math.min(minTextLengthRaw, maxTextLength);
-    const createCooldownMinutes = clampInteger(data === null || data === void 0 ? void 0 : data.createCooldownMinutes, 1, 240, 30);
-    const commentCooldownSeconds = clampInteger(data === null || data === void 0 ? void 0 : data.commentCooldownSeconds, 1, 300, 20);
-    const dailyLimit = clampInteger(data === null || data === void 0 ? void 0 : data.dailyLimit, 1, 30, SECRET_DAILY_LIMIT);
-    const autoHideReportsThreshold = clampInteger(data === null || data === void 0 ? void 0 : data.autoHideReportsThreshold, 1, 100, SECRET_AUTO_HIDE_REPORT_THRESHOLD);
-    return {
-        minTextLength,
-        maxTextLength,
-        createCooldownMs: createCooldownMinutes * 60 * 1000,
-        commentCooldownMs: commentCooldownSeconds * 1000,
-        dailyLimit,
-        autoHideReportsThreshold
-    };
-};
-const computeSecretRank = (upVotesCount, downVotesCount, commentsCount, createdAtMs) => {
-    const safeUp = Math.max(0, Math.floor(Number(upVotesCount) || 0));
-    const safeDown = Math.max(0, Math.floor(Number(downVotesCount) || 0));
-    const safeComments = Math.max(0, Math.floor(Number(commentsCount) || 0));
-    const totalVotes = safeUp + safeDown;
-    const score = safeUp - safeDown;
-    const ageHours = Math.max(0, (Date.now() - createdAtMs) / (60 * 60 * 1000));
-    const engagementBoost = Math.log10(Math.max(1, totalVotes + safeComments + 1));
-    const hotScoreRaw = score * 1.25 + safeComments * 0.8 + engagementBoost * 2.2 - ageHours * 0.06;
-    const controversyScoreRaw = totalVotes > 0
-        ? (Math.min(safeUp, safeDown) / totalVotes) * Math.log2(totalVotes + 1) * 100
-        : 0;
-    let trend = 'stable';
-    if (score >= 4 || hotScoreRaw >= 3)
-        trend = 'up';
-    else if (score <= -3)
-        trend = 'down';
-    return {
-        score,
-        hotScore: Number(hotScoreRaw.toFixed(4)),
-        controversyScore: Number(controversyScoreRaw.toFixed(4)),
-        trend
-    };
-};
-const isSecretActiveForRanking = (data) => {
-    var _a;
-    if ((data === null || data === void 0 ? void 0 : data.module) !== 'secrets')
-        return false;
-    if ((data === null || data === void 0 ? void 0 : data.deletedAt) != null)
-        return false;
-    const moderationStatus = sanitizeBoundedString((_a = data === null || data === void 0 ? void 0 : data.moderation) === null || _a === void 0 ? void 0 : _a.status, 40) || 'active';
-    return moderationStatus === 'active';
-};
-const toSecretRankingItem = (secretDoc) => {
-    var _a, _b, _c, _d;
-    const data = secretDoc.data() || {};
-    const createdAtMs = timestampToMillisOrZero(data.createdAt) || Date.now();
-    const upVotesCount = Math.max(0, Math.floor(Number(((_a = data === null || data === void 0 ? void 0 : data.stats) === null || _a === void 0 ? void 0 : _a.upVotesCount) || 0)));
-    const downVotesCount = Math.max(0, Math.floor(Number(((_b = data === null || data === void 0 ? void 0 : data.stats) === null || _b === void 0 ? void 0 : _b.downVotesCount) || 0)));
-    const commentsCount = Math.max(0, Math.floor(Number(((_c = data === null || data === void 0 ? void 0 : data.stats) === null || _c === void 0 ? void 0 : _c.commentsCount) || 0)));
-    const reportsCount = Math.max(0, Math.floor(Number(((_d = data === null || data === void 0 ? void 0 : data.stats) === null || _d === void 0 ? void 0 : _d.reportsCount) || 0)));
-    const totalVotesCount = upVotesCount + downVotesCount;
-    const rank = computeSecretRank(upVotesCount, downVotesCount, commentsCount, createdAtMs);
-    return {
-        secretId: secretDoc.id,
-        textPreview: sanitizeSecretText(data.descripcion, 220),
-        category: sanitizeBoundedString(data.category, 40),
-        zone: sanitizeBoundedString(data.zone, 60),
-        createdAtMs,
-        commentsCount,
-        upVotesCount,
-        downVotesCount,
-        totalVotesCount,
-        reportsCount,
-        trend: rank.trend,
-        score: rank.score,
-        hotScore: rank.hotScore,
-        controversyScore: rank.controversyScore
-    };
-};
-const takeUniqueSecretRankingItems = (items, maxItems = SECRET_RANKINGS_LIST_LIMIT) => {
-    const unique = new Set();
-    const result = [];
-    for (const item of items) {
-        if (unique.has(item.secretId))
-            continue;
-        unique.add(item.secretId);
-        result.push(item);
-        if (result.length >= maxItems)
-            break;
-    }
-    return result;
-};
-const buildSecretRankingsSnapshot = (allItems) => {
-    const nowMs = Date.now();
-    const dayAgoMs = nowMs - (24 * 60 * 60 * 1000);
-    const topDay = takeUniqueSecretRankingItems(allItems
-        .filter((item) => item.createdAtMs >= dayAgoMs)
-        .sort((a, b) => b.hotScore - a.hotScore || b.score - a.score || b.createdAtMs - a.createdAtMs));
-    const mostCommented = takeUniqueSecretRankingItems([...allItems].sort((a, b) => b.commentsCount - a.commentsCount || b.hotScore - a.hotScore));
-    const mostVoted = takeUniqueSecretRankingItems([...allItems].sort((a, b) => b.totalVotesCount - a.totalVotesCount || b.hotScore - a.hotScore));
-    const mostPolemic = takeUniqueSecretRankingItems([...allItems]
-        .filter((item) => item.totalVotesCount >= 3)
-        .sort((a, b) => b.controversyScore - a.controversyScore ||
-        b.totalVotesCount - a.totalVotesCount ||
-        b.createdAtMs - a.createdAtMs));
-    return {
-        version: 2,
-        generatedAtMs: nowMs,
-        generatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        source: {
-            sampleSize: allItems.length,
-            listLimit: SECRET_RANKINGS_LIST_LIMIT
-        },
-        windows: {
-            dayStartMs: dayAgoMs
-        },
-        lists: {
-            topDay,
-            mostCommented,
-            mostVoted,
-            mostPolemic
-        }
-    };
-};
-const refreshSecretRankingsInternal = async () => {
-    const snapshot = await db.collection('content')
-        .where('module', '==', 'secrets')
-        .where('deletedAt', '==', null)
-        .where('moderation.status', '==', 'active')
-        .orderBy('createdAt', 'desc')
-        .limit(SECRET_RANKINGS_SAMPLE_LIMIT)
-        .get();
-    const rankingItems = snapshot.docs
-        .filter((docSnap) => isSecretActiveForRanking(docSnap.data() || {}))
-        .map(toSecretRankingItem);
-    const rankings = buildSecretRankingsSnapshot(rankingItems);
-    await db.collection('_config').doc('secret_rankings').set(rankings, { merge: true });
-    return rankings;
-};
-const clampInteger = (value, min, max, fallback) => {
-    const raw = Number(value);
-    if (!Number.isFinite(raw))
-        return fallback;
-    const parsed = Math.floor(raw);
-    if (!Number.isFinite(parsed))
-        return fallback;
-    if (parsed < min)
-        return min;
-    if (parsed > max)
-        return max;
-    return parsed;
-};
-const normalizeLotteryMaxNumber = (value) => {
-    return clampInteger(value, LOTTERY_MIN_MAX_NUMBER, LOTTERY_MAX_MAX_NUMBER, LOTTERY_DEFAULT_MAX_NUMBER);
-};
-const normalizeLotteryMaxTicketsPerUser = (value) => {
-    return clampInteger(value, LOTTERY_MIN_TICKETS_PER_USER, LOTTERY_MAX_TICKETS_PER_USER, LOTTERY_DEFAULT_MAX_TICKETS_PER_USER);
-};
-const normalizeLotteryExtraTickets = (value) => {
-    return clampInteger(value, 0, LOTTERY_MAX_EXTRA_TICKETS_PER_USER, 0);
-};
-const toLotteryUserExtraDocId = (lotteryId, userId) => {
-    return `${lotteryId}__${userId}`;
-};
-const getLotteryEffectiveMaxTickets = (lotteryMaxTicketsPerUser, extraTickets, lotteryMaxNumber) => {
-    const base = normalizeLotteryMaxTicketsPerUser(lotteryMaxTicketsPerUser);
-    const extra = normalizeLotteryExtraTickets(extraTickets);
-    const maxNumber = normalizeLotteryMaxNumber(lotteryMaxNumber);
-    return Math.max(1, Math.min(maxNumber, base + extra));
-};
-const parseSelectedLotteryNumber = (value) => {
-    const parsed = Number(value);
-    if (!Number.isFinite(parsed))
-        return null;
-    const normalized = Math.floor(parsed);
-    if (!Number.isFinite(normalized) || normalized !== parsed)
-        return null;
-    if (normalized <= 0)
-        return null;
-    return normalized;
-};
-const toLotteryEntryDocId = (selectedNumber) => {
-    return `${LOTTERY_ENTRY_DOC_PREFIX}${selectedNumber}`;
-};
-const extractSelectedNumberFromEntryDoc = (entryDoc) => {
-    const data = entryDoc.data() || {};
-    const selectedRaw = parseSelectedLotteryNumber(data.selectedNumber);
-    if (selectedRaw != null)
-        return selectedRaw;
-    const matches = entryDoc.id.match(/^n_(\d+)$/);
-    if (!matches)
-        return null;
-    return parseSelectedLotteryNumber(matches[1]);
-};
-const normalizeRoleAlias = (value) => {
-    return typeof value === 'string'
-        ? value.trim().toLowerCase().replace(/[\s_-]+/g, '')
-        : '';
-};
-const isAdminClaim = (token) => {
-    return token.admin === true ||
-        token.superAdmin === true ||
-        token.super_admin === true;
-};
-const isSystemAdminClaim = (token) => {
-    return token.superAdmin === true ||
-        token.super_admin === true;
-};
-const isStaffRole = (role) => {
-    const normalized = normalizeRoleAlias(role);
-    return normalized === 'colaborador' ||
-        normalized === 'admin' ||
-        normalized === 'administrador' ||
-        normalized === 'superadmin';
-};
-const isAdminRole = (role) => {
-    const normalized = normalizeRoleAlias(role);
-    return normalized === 'admin' ||
-        normalized === 'administrador' ||
-        normalized === 'superadmin';
-};
-const assertStaffUser = async (authContext) => {
-    var _a;
-    const uid = (authContext === null || authContext === void 0 ? void 0 : authContext.uid) || '';
-    if (!uid) {
-        throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para ejecutar esta accion.');
-    }
-    const token = ((authContext === null || authContext === void 0 ? void 0 : authContext.token) || {});
-    const email = typeof token.email === 'string' ? token.email.toLowerCase() : '';
-    if (uid === 'Z4f5ogXDQaNhEY4iBf9jgkPnQMP2' ||
-        email === 'matias4315@gmail.com' ||
-        isAdminClaim(token)) {
-        return;
-    }
-    const userSnap = await db.collection('users').doc(uid).get();
-    const role = (_a = userSnap.data()) === null || _a === void 0 ? void 0 : _a.rol;
-    if (isStaffRole(role))
-        return;
-    throw new functions.https.HttpsError('permission-denied', 'Solo staff puede ejecutar esta accion.');
-};
-const assertSystemAdminUser = (authContext) => {
-    const uid = (authContext === null || authContext === void 0 ? void 0 : authContext.uid) || '';
-    if (!uid) {
-        throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para ejecutar esta accion.');
-    }
-    const token = ((authContext === null || authContext === void 0 ? void 0 : authContext.token) || {});
-    const email = typeof token.email === 'string' ? token.email.toLowerCase() : '';
-    if (uid === 'Z4f5ogXDQaNhEY4iBf9jgkPnQMP2' ||
-        email === 'matias4315@gmail.com' ||
-        isSystemAdminClaim(token)) {
-        return;
-    }
-    throw new functions.https.HttpsError('permission-denied', 'Solo el administrador del sistema puede ejecutar esta accion.');
-};
-const assertAdminUser = async (authContext) => {
-    var _a;
-    const uid = (authContext === null || authContext === void 0 ? void 0 : authContext.uid) || '';
-    if (!uid) {
-        throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para ejecutar esta accion.');
-    }
-    const token = ((authContext === null || authContext === void 0 ? void 0 : authContext.token) || {});
-    const email = typeof token.email === 'string' ? token.email.toLowerCase() : '';
-    if (uid === 'Z4f5ogXDQaNhEY4iBf9jgkPnQMP2' ||
-        email === 'matias4315@gmail.com' ||
-        isAdminClaim(token)) {
-        return;
-    }
-    const userSnap = await db.collection('users').doc(uid).get();
-    const role = (_a = userSnap.data()) === null || _a === void 0 ? void 0 : _a.rol;
-    if (isAdminRole(role))
-        return;
-    throw new functions.https.HttpsError('permission-denied', 'Solo administradores pueden ejecutar esta accion.');
-};
-const sanitizeBoundedString = (value, maxLength) => {
-    if (typeof value !== 'string')
-        return '';
-    return value.trim().slice(0, maxLength);
-};
-const normalizeUserDefaultFeedTab = (value) => {
-    const normalized = sanitizeBoundedString(value, 40).toLowerCase();
-    if (USER_DEFAULT_FEED_TAB_VALUES.has(normalized)) {
-        return normalized;
-    }
-    return 'todo';
-};
-const normalizeUsernameCandidate = (value) => {
-    const raw = sanitizeBoundedString(value, USERNAME_MAX_LENGTH);
-    return raw
-        .toLowerCase()
-        .replace(/[^a-z0-9_]/g, '_')
-        .replace(/_+/g, '_')
-        .replace(/^_+|_+$/g, '');
-};
-const buildFallbackUsername = (userId) => {
-    const compactUid = userId.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20);
-    const base = `user_${compactUid || 'perfil'}`;
-    const trimmed = base.slice(0, USERNAME_MAX_LENGTH);
-    return trimmed.length >= USERNAME_MIN_LENGTH
-        ? trimmed
-        : `${trimmed}${'x'.repeat(USERNAME_MIN_LENGTH - trimmed.length)}`;
-};
-const normalizeUsernameStrict = (value) => {
-    const username = normalizeUsernameCandidate(value);
-    if (username.length < USERNAME_MIN_LENGTH ||
-        username.length > USERNAME_MAX_LENGTH ||
-        !USERNAME_REGEX.test(username)) {
-        throw new functions.https.HttpsError('invalid-argument', `username debe tener entre ${USERNAME_MIN_LENGTH} y ${USERNAME_MAX_LENGTH} caracteres, solo [a-z0-9_].`);
-    }
-    return { username, usernameLower: username };
-};
-const normalizeUsernameLoose = (userId, userData) => {
-    const fromLower = typeof (userData === null || userData === void 0 ? void 0 : userData.usernameLower) === 'string'
-        ? normalizeUsernameCandidate(userData.usernameLower)
-        : '';
-    if (fromLower.length >= USERNAME_MIN_LENGTH &&
-        fromLower.length <= USERNAME_MAX_LENGTH &&
-        USERNAME_REGEX.test(fromLower)) {
-        return { username: fromLower, usernameLower: fromLower };
-    }
-    const fromUsername = normalizeUsernameCandidate(userData === null || userData === void 0 ? void 0 : userData.username);
-    if (fromUsername.length >= USERNAME_MIN_LENGTH &&
-        fromUsername.length <= USERNAME_MAX_LENGTH &&
-        USERNAME_REGEX.test(fromUsername)) {
-        return { username: fromUsername, usernameLower: fromUsername };
-    }
-    const fallback = buildFallbackUsername(userId);
-    return { username: fallback, usernameLower: fallback };
-};
-const toBoolean = (value, fallback) => typeof value === 'boolean' ? value : fallback;
-const ensureNotificationTypeSettings = (value) => {
-    const raw = (value && typeof value === 'object'
-        ? value
-        : {});
-    return {
-        likes: toBoolean(raw.likes, NOTIFICATION_TYPE_DEFAULTS.likes),
-        comments: toBoolean(raw.comments, NOTIFICATION_TYPE_DEFAULTS.comments),
-        replies: toBoolean(raw.replies, NOTIFICATION_TYPE_DEFAULTS.replies),
-        follows: toBoolean(raw.follows, NOTIFICATION_TYPE_DEFAULTS.follows)
-    };
-};
-const isNotificationTypeEnabled = (typeSettings, notificationType) => {
-    if (notificationType === 'like')
-        return typeSettings.likes;
-    if (notificationType === 'comment')
-        return typeSettings.comments;
-    if (notificationType === 'reply')
-        return typeSettings.replies;
-    return typeSettings.follows;
-};
-const buildStableHash = (value) => {
-    let hash = 0;
-    for (let i = 0; i < value.length; i += 1) {
-        hash = (hash * 31 + value.charCodeAt(i)) >>> 0;
-    }
-    return hash.toString(16);
-};
-const sanitizeNotificationDeviceId = (value, fallbackToken, platform) => {
-    const fromInput = typeof value === 'string' ? value.trim() : '';
-    const normalized = fromInput
-        .replace(/[^a-zA-Z0-9_-]/g, '_')
-        .slice(0, NOTIFICATION_DEVICE_ID_MAX_LENGTH);
-    if (normalized)
-        return normalized;
-    return `${platform}_${buildStableHash(fallbackToken)}`.slice(0, NOTIFICATION_DEVICE_ID_MAX_LENGTH);
-};
-const safeNotificationPath = (value, fallback) => {
-    if (typeof value !== 'string')
-        return fallback;
-    const trimmed = value.trim();
-    if (!trimmed.startsWith('/'))
-        return fallback;
-    return trimmed.slice(0, 240) || fallback;
-};
-const buildProfileTargetPath = (actorUsername, actorUserId) => {
-    const profileRef = actorUsername || actorUserId;
-    return `/perfil/${encodeURIComponent(profileRef)}`;
-};
-const buildContentTargetFromDoc = (contentId, contentData) => {
-    const contentModule = inferContentModule(contentData);
-    const contentSlug = normalizeContentSlug((contentData === null || contentData === void 0 ? void 0 : contentData.slug) || (contentData === null || contentData === void 0 ? void 0 : contentData.titulo) || contentId);
-    const contentPublicRef = contentModule === 'news'
-        ? (extractNewsPublicIdFromPayload(contentData) || contentId)
-        : contentId;
-    const targetPath = contentModule === 'news'
-        ? `/noticia/${encodeURIComponent(contentPublicRef)}/${encodeURIComponent(contentSlug)}`
-        : `/c/${encodeURIComponent(contentId)}/${encodeURIComponent(contentSlug)}`;
-    return {
-        contentId,
-        contentModule,
-        contentPublicRef,
-        contentSlug,
-        targetPath
-    };
-};
-const buildPushTextForNotification = (type, actorName) => {
-    const safeActor = actorName || 'Alguien';
-    if (type === 'like') {
-        return {
-            title: 'Nuevo me gusta',
-            body: `${safeActor} le dio me gusta a tu publicacion.`
-        };
-    }
-    if (type === 'comment') {
-        return {
-            title: 'Nuevo comentario',
-            body: `${safeActor} comento tu publicacion.`
-        };
-    }
-    if (type === 'reply') {
-        return {
-            title: 'Nueva respuesta',
-            body: `${safeActor} respondio tu comentario.`
-        };
-    }
-    return {
-        title: 'Nuevo seguidor',
-        body: `${safeActor} empezo a seguirte.`
-    };
-};
-const loadNotificationActorIdentity = async (actorUserId) => {
-    const [userPublicSnap, userPrivateSnap] = await Promise.all([
-        db.collection('users_public').doc(actorUserId).get(),
-        db.collection('users').doc(actorUserId).get()
-    ]);
-    const sourceData = userPublicSnap.exists
-        ? (userPublicSnap.data() || {})
-        : (userPrivateSnap.data() || {});
-    const { usernameLower } = normalizeUsernameLoose(actorUserId, sourceData);
-    const actorName = sanitizeBoundedString(sourceData === null || sourceData === void 0 ? void 0 : sourceData.nombre, 120) || 'Usuario';
-    const actorProfilePictureUrl = sanitizeBoundedString(sourceData === null || sourceData === void 0 ? void 0 : sourceData.profilePictureUrl, 1200);
-    return {
-        userId: actorUserId,
-        actorName,
-        actorUsername: usernameLower,
-        actorProfilePictureUrl
-    };
-};
-const sendPushToNotificationDevices = async (notificationRef, recipientUserId, notificationType, actorName, targetPath) => {
-    var _a;
-    const devicesSnap = await db.collection('users')
-        .doc(recipientUserId)
-        .collection('notification_devices')
-        .where('enabled', '==', true)
-        .get();
-    if (devicesSnap.empty)
-        return;
-    const tokenToDeviceRefs = new Map();
-    const uniqueTokens = [];
-    for (const deviceDoc of devicesSnap.docs) {
-        const token = sanitizeBoundedString((_a = deviceDoc.data()) === null || _a === void 0 ? void 0 : _a.token, 4096);
-        if (!token)
-            continue;
-        const existing = tokenToDeviceRefs.get(token) || [];
-        existing.push(deviceDoc.ref);
-        tokenToDeviceRefs.set(token, existing);
-        if (existing.length === 1)
-            uniqueTokens.push(token);
-    }
-    if (uniqueTokens.length === 0)
-        return;
-    let title = '';
-    let body = '';
-    if (notificationType === 'system') {
-        const snap = await notificationRef.get();
-        const docData = snap.data() || {};
-        title = 'Sorteo Ganado! 🏆';
-        body = typeof docData.systemMessage === 'string' && docData.systemMessage ? docData.systemMessage : 'Felicidades! Has ganado un sorteo.';
-    }
-    else {
-        const pushText = buildPushTextForNotification(notificationType, actorName);
-        title = pushText.title;
-        body = pushText.body;
-    }
-    const sendResult = await admin.messaging().sendEachForMulticast({
-        tokens: uniqueTokens,
-        notification: {
-            title,
-            body
-        },
-        data: {
-            notificationId: notificationRef.id,
-            type: notificationType,
-            targetPath
-        },
-        android: {
-            priority: 'high',
-            notification: {
-                channelId: ANDROID_PUSH_CHANNEL_ID,
-                sound: 'default',
-                clickAction: 'FLUTTER_NOTIFICATION_CLICK'
-            }
-        },
-        webpush: {
-            fcmOptions: {
-                link: targetPath
-            }
-        }
-    });
-    const refsToDelete = [];
-    sendResult.responses.forEach((response, index) => {
-        var _a;
-        if (response.success)
-            return;
-        const code = String(((_a = response.error) === null || _a === void 0 ? void 0 : _a.code) || '');
-        if (!PERMANENT_FCM_TOKEN_ERROR_CODES.has(code))
-            return;
-        const token = uniqueTokens[index];
-        const linkedRefs = tokenToDeviceRefs.get(token) || [];
-        refsToDelete.push(...linkedRefs);
-    });
-    if (refsToDelete.length === 0)
-        return;
-    const batch = db.batch();
-    for (const ref of refsToDelete) {
-        batch.delete(ref);
-    }
-    await batch.commit();
-};
-const getNotificationTopicsForPlatform = (platform) => {
-    if (platform === 'android') {
-        return [NOTIFICATION_TOPIC_ALL, NOTIFICATION_TOPIC_ANDROID];
-    }
-    return [NOTIFICATION_TOPIC_ALL, NOTIFICATION_TOPIC_WEB];
-};
-const subscribeTokenToPushTopics = async (token, platform) => {
-    const topics = getNotificationTopicsForPlatform(platform);
-    await Promise.all(topics.map(async (topic) => {
-        try {
-            await admin.messaging().subscribeToTopic([token], topic);
-        }
-        catch (error) {
-            console.warn(`No se pudo suscribir token a topic ${topic}:`, error);
-        }
-    }));
-};
-const unsubscribeTokenFromPushTopics = async (token, platform) => {
-    const topics = getNotificationTopicsForPlatform(platform);
-    await Promise.all(topics.map(async (topic) => {
-        try {
-            await admin.messaging().unsubscribeFromTopic([token], topic);
-        }
-        catch (error) {
-            console.warn(`No se pudo desuscribir token de topic ${topic}:`, error);
-        }
-    }));
-};
-const writeNotificationEvent = async (input) => {
-    var _a, _b, _c, _d;
-    if (input.recipientUserId === input.actor.userId)
-        return;
-    const [modulesConfigSnap, recipientSnap] = await Promise.all([
-        db.collection('_config').doc('modules').get(),
-        db.collection('users').doc(input.recipientUserId).get()
-    ]);
-    if (!isNotificationsModuleEnabled(modulesConfigSnap.data()))
-        return;
-    if (!recipientSnap.exists)
-        return;
-    const recipientData = recipientSnap.data() || {};
-    const recipientSettings = ensureUserSettings(recipientData.settings);
-    const notificationsEnabled = recipientSettings.notificationsEnabled !== false;
-    if (!notificationsEnabled)
-        return;
-    const typeSettings = ensureNotificationTypeSettings(recipientSettings.notificationTypes);
-    if (!isNotificationTypeEnabled(typeSettings, input.type))
-        return;
-    const notificationsCollection = db.collection('users')
-        .doc(input.recipientUserId)
-        .collection('notifications');
-    const notificationRef = input.notificationId
-        ? notificationsCollection.doc(input.notificationId)
-        : notificationsCollection.doc();
-    if (input.notificationId) {
-        await db.runTransaction(async (tx) => {
-            var _a, _b, _c, _d, _e;
-            const existingSnap = await tx.get(notificationRef);
-            const existingData = existingSnap.data() || {};
-            const currentCountRaw = Number((_a = existingData.eventCount) !== null && _a !== void 0 ? _a : 1);
-            const currentCount = Number.isFinite(currentCountRaw) ? Math.max(1, Math.floor(currentCountRaw)) : 1;
-            tx.set(notificationRef, {
-                type: input.type,
-                recipientUserId: input.recipientUserId,
-                actorUserId: input.actor.userId,
-                actorName: input.actor.actorName,
-                actorUsername: input.actor.actorUsername,
-                actorProfilePictureUrl: input.actor.actorProfilePictureUrl,
-                contentId: ((_b = input.contentTarget) === null || _b === void 0 ? void 0 : _b.contentId) || '',
-                contentModule: ((_c = input.contentTarget) === null || _c === void 0 ? void 0 : _c.contentModule) || '',
-                contentPublicRef: ((_d = input.contentTarget) === null || _d === void 0 ? void 0 : _d.contentPublicRef) || '',
-                contentSlug: ((_e = input.contentTarget) === null || _e === void 0 ? void 0 : _e.contentSlug) || '',
-                commentId: input.commentId || '',
-                replyId: input.replyId || '',
-                targetPath: safeNotificationPath(input.targetPath, '/notificaciones'),
-                isRead: false,
-                readAt: null,
-                eventCount: existingSnap.exists ? currentCount + 1 : 1,
-                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-                lastEventAt: admin.firestore.FieldValue.serverTimestamp(),
-                createdAt: existingSnap.exists
-                    ? (existingData.createdAt || admin.firestore.FieldValue.serverTimestamp())
-                    : admin.firestore.FieldValue.serverTimestamp()
-            }, { merge: true });
-        });
-    }
-    else {
-        await notificationRef.set({
-            type: input.type,
-            recipientUserId: input.recipientUserId,
-            actorUserId: input.actor.userId,
-            actorName: input.actor.actorName,
-            actorUsername: input.actor.actorUsername,
-            actorProfilePictureUrl: input.actor.actorProfilePictureUrl,
-            contentId: ((_a = input.contentTarget) === null || _a === void 0 ? void 0 : _a.contentId) || '',
-            contentModule: ((_b = input.contentTarget) === null || _b === void 0 ? void 0 : _b.contentModule) || '',
-            contentPublicRef: ((_c = input.contentTarget) === null || _c === void 0 ? void 0 : _c.contentPublicRef) || '',
-            contentSlug: ((_d = input.contentTarget) === null || _d === void 0 ? void 0 : _d.contentSlug) || '',
-            commentId: input.commentId || '',
-            replyId: input.replyId || '',
-            targetPath: safeNotificationPath(input.targetPath, '/notificaciones'),
-            isRead: false,
-            readAt: null,
-            eventCount: 1,
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-            lastEventAt: admin.firestore.FieldValue.serverTimestamp()
-        });
-    }
-    await sendPushToNotificationDevices(notificationRef, input.recipientUserId, input.type, input.actor.actorName, safeNotificationPath(input.targetPath, '/notificaciones'));
-};
 const sanitizeOptionalUrl = (value, fieldName) => {
-    const raw = sanitizeBoundedString(value, 240);
+    const raw = (0, userUtils_1.sanitizeBoundedString)(value, 240);
     if (!raw)
         return '';
     const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
@@ -918,124 +53,6 @@ const sanitizeOptionalUrl = (value, fieldName) => {
     catch (_a) {
         throw new functions.https.HttpsError('invalid-argument', `${fieldName} debe ser una URL valida (http/https).`);
     }
-};
-const readStatValue = (stats, key) => {
-    var _a;
-    const raw = Number((_a = stats[key]) !== null && _a !== void 0 ? _a : 0);
-    if (!Number.isFinite(raw))
-        return 0;
-    return Math.max(0, Math.floor(raw));
-};
-const ensureUserStats = (value) => {
-    const stats = (value && typeof value === 'object'
-        ? value
-        : {});
-    return {
-        postsCount: readStatValue(stats, 'postsCount'),
-        followersCount: readStatValue(stats, 'followersCount'),
-        followingCount: readStatValue(stats, 'followingCount'),
-        likesTotalCount: readStatValue(stats, 'likesTotalCount')
-    };
-};
-const ensureUserSettings = (value) => {
-    if (!value || typeof value !== 'object') {
-        return {
-            notificationsEnabled: true,
-            privateAccount: false,
-            defaultFeedTab: 'todo',
-            notificationTypes: Object.assign({}, NOTIFICATION_TYPE_DEFAULTS)
-        };
-    }
-    const settings = value;
-    return Object.assign(Object.assign({}, settings), { notificationsEnabled: settings.notificationsEnabled !== false, privateAccount: settings.privateAccount === true, defaultFeedTab: normalizeUserDefaultFeedTab(settings.defaultFeedTab), notificationTypes: ensureNotificationTypeSettings(settings.notificationTypes) });
-};
-const buildPublicUserProfile = (userId, userData) => {
-    const { username, usernameLower } = normalizeUsernameLoose(userId, userData);
-    const stats = ensureUserStats(userData === null || userData === void 0 ? void 0 : userData.stats);
-    return {
-        userId,
-        username,
-        usernameLower,
-        nombre: sanitizeBoundedString(userData === null || userData === void 0 ? void 0 : userData.nombre, 120) || 'Usuario',
-        bio: sanitizeBoundedString(userData === null || userData === void 0 ? void 0 : userData.bio, 280),
-        location: sanitizeBoundedString(userData === null || userData === void 0 ? void 0 : userData.location, 120),
-        website: sanitizeBoundedString(userData === null || userData === void 0 ? void 0 : userData.website, 240),
-        profilePictureUrl: sanitizeBoundedString(userData === null || userData === void 0 ? void 0 : userData.profilePictureUrl, 1200),
-        isVerified: (userData === null || userData === void 0 ? void 0 : userData.isVerified) === true,
-        rol: typeof (userData === null || userData === void 0 ? void 0 : userData.rol) === 'string' ? userData.rol : 'usuario',
-        stats,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    };
-};
-const propagateUserFields = async (target, userId, updateData) => {
-    let baseQuery;
-    if (target === 'content') {
-        baseQuery = db.collection('content').where('userId', '==', userId);
-    }
-    else {
-        baseQuery = db.collectionGroup(target).where('userId', '==', userId);
-    }
-    let snapshot = await baseQuery.limit(USER_PROPAGATION_QUERY_PAGE_SIZE).get();
-    let batch = db.batch();
-    let batchCount = 0;
-    let totalUpdated = 0;
-    while (!snapshot.empty) {
-        for (const targetDoc of snapshot.docs) {
-            batch.update(targetDoc.ref, updateData);
-            batchCount += 1;
-            totalUpdated += 1;
-            if (batchCount >= USER_PROPAGATION_BATCH_WRITE_LIMIT) {
-                await batch.commit();
-                batch = db.batch();
-                batchCount = 0;
-            }
-        }
-        const lastDoc = snapshot.docs[snapshot.docs.length - 1];
-        snapshot = await baseQuery.startAfter(lastDoc).limit(USER_PROPAGATION_QUERY_PAGE_SIZE).get();
-    }
-    if (batchCount > 0) {
-        await batch.commit();
-    }
-    return totalUpdated;
-};
-const normalizeOptionIds = (value) => {
-    if (!Array.isArray(value))
-        return [];
-    const deduped = new Set();
-    for (const item of value) {
-        if (typeof item !== 'string')
-            continue;
-        const cleaned = item.trim();
-        if (!cleaned)
-            continue;
-        deduped.add(cleaned);
-    }
-    return Array.from(deduped);
-};
-const normalizeSurveyOptions = (value) => {
-    var _a;
-    if (!Array.isArray(value))
-        return [];
-    const normalized = [];
-    for (const rawOption of value) {
-        if (!rawOption || typeof rawOption !== 'object')
-            continue;
-        const optionData = rawOption;
-        const id = typeof optionData.id === 'string' ? optionData.id.trim() : '';
-        const text = typeof optionData.text === 'string' ? optionData.text.trim() : '';
-        const voteCountRaw = Number((_a = optionData.voteCount) !== null && _a !== void 0 ? _a : 0);
-        if (!id || !text)
-            continue;
-        normalized.push({
-            id,
-            text,
-            voteCount: Number.isFinite(voteCountRaw)
-                ? Math.max(0, Math.floor(voteCountRaw))
-                : 0,
-            active: optionData.active !== false
-        });
-    }
-    return normalized;
 };
 const isExpired = (value) => {
     if (!value)
@@ -1272,7 +289,8 @@ const cleanupCommunityPostHostingMedia = async (postData) => {
     for (const relativePath of derivedThumbs) {
         paths.add(relativePath);
     }
-    const ftpClient = new ftp.Client(30000);
+    const { Client } = await loadFtpClient();
+    const ftpClient = new Client(30000);
     ftpClient.ftp.verbose = false;
     try {
         await ftpClient.access({
@@ -1310,12 +328,12 @@ exports.onLikeAdded = functions.firestore
                 updatedAt: admin.firestore.FieldValue.serverTimestamp()
             });
         }
-        const recipientUserId = sanitizeBoundedString(contentData.userId, 128);
+        const recipientUserId = (0, userUtils_1.sanitizeBoundedString)(contentData.userId, 128);
         if (!recipientUserId)
             return;
-        const actor = await loadNotificationActorIdentity(actorUserId);
-        const contentTarget = buildContentTargetFromDoc(contentId, contentData);
-        await writeNotificationEvent({
+        const actor = await (0, notificationRuntimeUtils_1.loadNotificationActorIdentity)(db, actorUserId);
+        const contentTarget = (0, notificationRuntimeUtils_1.buildContentTargetFromDoc)(contentId, contentData);
+        await (0, notificationRuntimeUtils_1.writeNotificationEvent)(db, {
             type: 'like',
             recipientUserId,
             actor,
@@ -1372,8 +390,8 @@ exports.toggleContentLike = functions.https.onCall(async (data, context) => {
         if (contentData.deletedAt != null) {
             throw new functions.https.HttpsError('failed-precondition', 'No puedes dar me gusta a contenido eliminado.');
         }
-        const moduleName = inferContentModule(contentData);
-        const isEnabled = isLikeModuleEnabledForContent(modulesConfigSnap.data(), moduleName);
+        const moduleName = (0, contentUtils_1.inferContentModule)(contentData);
+        const isEnabled = (0, moduleUtils_1.isLikeModuleEnabledForContent)(modulesConfigSnap.data(), moduleName);
         if (!isEnabled) {
             throw new functions.https.HttpsError('failed-precondition', 'Los me gusta estan deshabilitados para este modulo.');
         }
@@ -1414,12 +432,12 @@ exports.toggleContentLike = functions.https.onCall(async (data, context) => {
 });
 // 2. Secrets
 exports.createSecretCallable = functions.https.onCall(async (data, context) => {
-    const textRaw = sanitizeSecretText(data === null || data === void 0 ? void 0 : data.text, SECRET_TEXT_MAX_ABSOLUTE);
-    const sex = normalizeSecretSex(data === null || data === void 0 ? void 0 : data.sex);
-    const age = normalizeSecretAge(data === null || data === void 0 ? void 0 : data.age);
-    const category = normalizeSecretCategory(data === null || data === void 0 ? void 0 : data.category);
-    const zone = normalizeSecretZone(data === null || data === void 0 ? void 0 : data.zone);
-    const fingerprintHash = buildSecretFingerprintHash(data, context);
+    const textRaw = (0, secretUtils_1.sanitizeSecretText)(data === null || data === void 0 ? void 0 : data.text, secretUtils_1.SECRET_TEXT_MAX_ABSOLUTE);
+    const sex = (0, secretUtils_1.normalizeSecretSex)(data === null || data === void 0 ? void 0 : data.sex);
+    const age = (0, secretUtils_1.normalizeSecretAge)(data === null || data === void 0 ? void 0 : data.age);
+    const category = (0, secretUtils_1.normalizeSecretCategory)(data === null || data === void 0 ? void 0 : data.category);
+    const zone = (0, secretUtils_1.normalizeSecretZone)(data === null || data === void 0 ? void 0 : data.zone);
+    const fingerprintHash = (0, secretUtils_1.buildSecretFingerprintHash)(data, context);
     const nowMs = Date.now();
     const nowTs = admin.firestore.Timestamp.fromMillis(nowMs);
     const oneDayMs = 24 * 60 * 60 * 1000;
@@ -1437,19 +455,19 @@ exports.createSecretCallable = functions.https.onCall(async (data, context) => {
             tx.get(rateLimitRef),
             tx.get(fingerprintRef)
         ]);
-        if (!isSecretsModuleEnabled(modulesConfigSnap.data())) {
+        if (!(0, moduleUtils_1.isSecretsModuleEnabled)(modulesConfigSnap.data())) {
             throw new functions.https.HttpsError('failed-precondition', 'El modulo de secretos esta deshabilitado.');
         }
-        const runtimeSettings = resolveSecretRuntimeSettings(secretSettingsSnap.data());
-        const text = sanitizeSecretText(textRaw, runtimeSettings.maxTextLength);
+        const runtimeSettings = (0, secretUtils_1.resolveSecretRuntimeSettings)(secretSettingsSnap.data());
+        const text = (0, secretUtils_1.sanitizeSecretText)(textRaw, runtimeSettings.maxTextLength);
         if (text.length < runtimeSettings.minTextLength) {
             throw new functions.https.HttpsError('invalid-argument', `El secreto debe tener al menos ${runtimeSettings.minTextLength} caracteres.`);
         }
-        if (!hasMeaningfulSecretText(text)) {
+        if (!(0, secretUtils_1.hasMeaningfulSecretText)(text)) {
             throw new functions.https.HttpsError('invalid-argument', 'Escribe un texto real, no solo emojis o simbolos.');
         }
         const rateLimitData = rateLimitSnap.data() || {};
-        let burstWindowStartMs = timestampToMillisOrZero(rateLimitData.burstWindowStart);
+        let burstWindowStartMs = (0, secretUtils_1.timestampToMillisOrZero)(rateLimitData.burstWindowStart);
         let burstCount = Number(rateLimitData.burstCount || 0);
         // Reiniciar ráfaga si ya pasó el tiempo
         if (!burstWindowStartMs || nowMs - burstWindowStartMs >= runtimeSettings.createCooldownMs) {
@@ -1461,7 +479,7 @@ exports.createSecretCallable = functions.https.onCall(async (data, context) => {
             const remainingMin = Math.max(1, Math.ceil((runtimeSettings.createCooldownMs - elapsed) / (60 * 1000)));
             throw new functions.https.HttpsError('failed-precondition', `Has publicado demasiados secretos rapido. Espera ${remainingMin} min para publicar otro.`);
         }
-        let dailyWindowStartMs = timestampToMillisOrZero(rateLimitData.dailyWindowStart);
+        let dailyWindowStartMs = (0, secretUtils_1.timestampToMillisOrZero)(rateLimitData.dailyWindowStart);
         let dailyCount = Number(rateLimitData.dailyCount || 0);
         if (!dailyWindowStartMs || nowMs - dailyWindowStartMs >= oneDayMs) {
             dailyWindowStartMs = nowMs;
@@ -1471,7 +489,7 @@ exports.createSecretCallable = functions.https.onCall(async (data, context) => {
             throw new functions.https.HttpsError('resource-exhausted', 'Alcanzaste el limite diario de secretos anonimos.');
         }
         const counterData = secretCounterSnap.data() || {};
-        const lastIssuedId = Math.max(SECRET_NUMERIC_ID_START - 1, Math.floor(Number(counterData.lastIssuedId || 0)));
+        const lastIssuedId = Math.max(secretUtils_1.SECRET_NUMERIC_ID_START - 1, Math.floor(Number(counterData.lastIssuedId || 0)));
         let nextSecretNumericId = lastIssuedId + 1;
         let secretRef = db.collection('content').doc(String(nextSecretNumericId));
         let secretSnap = await tx.get(secretRef);
@@ -1482,12 +500,12 @@ exports.createSecretCallable = functions.https.onCall(async (data, context) => {
         }
         tx.set(secretCounterRef, {
             lastIssuedId: nextSecretNumericId,
-            startFrom: SECRET_NUMERIC_ID_START,
+            startFrom: secretUtils_1.SECRET_NUMERIC_ID_START,
             updatedAt: admin.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
         const secretId = String(nextSecretNumericId);
-        const alias = createSecretAlias(fingerprintHash, secretId);
-        const initialRank = computeSecretRank(0, 0, 0, nowMs);
+        const alias = (0, secretUtils_1.createSecretAlias)(fingerprintHash, secretId);
+        const initialRank = (0, secretUtils_1.computeSecretRank)(0, 0, 0, nowMs);
         tx.set(secretRef, {
             module: 'secrets',
             type: 'secret',
@@ -1530,7 +548,7 @@ exports.createSecretCallable = functions.https.onCall(async (data, context) => {
             dailyWindowStart: admin.firestore.Timestamp.fromMillis(dailyWindowStartMs),
             burstWindowStart: admin.firestore.Timestamp.fromMillis(burstWindowStartMs),
             burstCount: burstCount + 1,
-            expiresAt: admin.firestore.Timestamp.fromMillis(nowMs + SECRET_FINGERPRINT_TTL_MS),
+            expiresAt: admin.firestore.Timestamp.fromMillis(nowMs + secretUtils_1.SECRET_FINGERPRINT_TTL_MS),
             updatedAt: admin.firestore.FieldValue.serverTimestamp()
         };
         const preservedLastCommentAt = rateLimitData.lastCommentAt;
@@ -1544,7 +562,7 @@ exports.createSecretCallable = functions.https.onCall(async (data, context) => {
         tx.set(fingerprintRef, {
             firstSeenAt: existingFirstSeenAt,
             lastSeenAt: nowTs,
-            expiresAt: admin.firestore.Timestamp.fromMillis(nowMs + SECRET_FINGERPRINT_TTL_MS),
+            expiresAt: admin.firestore.Timestamp.fromMillis(nowMs + secretUtils_1.SECRET_FINGERPRINT_TTL_MS),
             updatedAt: admin.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
         return {
@@ -1564,7 +582,7 @@ exports.voteSecretCallable = functions.https.onCall(async (data, context) => {
     if (voteRaw !== 1 && voteRaw !== -1) {
         throw new functions.https.HttpsError('invalid-argument', 'vote debe ser 1 o -1.');
     }
-    const fingerprintHash = buildSecretFingerprintHash(data, context);
+    const fingerprintHash = (0, secretUtils_1.buildSecretFingerprintHash)(data, context);
     const nowMs = Date.now();
     const nowTs = admin.firestore.Timestamp.fromMillis(nowMs);
     const modulesConfigRef = db.collection('_config').doc('modules');
@@ -1579,7 +597,7 @@ exports.voteSecretCallable = functions.https.onCall(async (data, context) => {
             tx.get(voteRef),
             tx.get(fingerprintRef)
         ]);
-        if (!isSecretsModuleEnabled(modulesConfigSnap.data())) {
+        if (!(0, moduleUtils_1.isSecretsModuleEnabled)(modulesConfigSnap.data())) {
             throw new functions.https.HttpsError('failed-precondition', 'El modulo de secretos esta deshabilitado.');
         }
         if (!secretSnap.exists) {
@@ -1589,7 +607,7 @@ exports.voteSecretCallable = functions.https.onCall(async (data, context) => {
         if (secretData.module !== 'secrets' || secretData.deletedAt != null) {
             throw new functions.https.HttpsError('failed-precondition', 'El secreto no esta disponible.');
         }
-        const moderationStatus = sanitizeBoundedString((_a = secretData === null || secretData === void 0 ? void 0 : secretData.moderation) === null || _a === void 0 ? void 0 : _a.status, 40) || 'active';
+        const moderationStatus = (0, userUtils_1.sanitizeBoundedString)((_a = secretData === null || secretData === void 0 ? void 0 : secretData.moderation) === null || _a === void 0 ? void 0 : _a.status, 40) || 'active';
         if (moderationStatus !== 'active') {
             throw new functions.https.HttpsError('failed-precondition', 'Este secreto no acepta interacciones por moderacion.');
         }
@@ -1615,8 +633,8 @@ exports.voteSecretCallable = functions.https.onCall(async (data, context) => {
             upVotesCount += 1;
         if (vote === -1)
             downVotesCount += 1;
-        const createdAtMs = timestampToMillisOrZero(secretData.createdAt) || nowMs;
-        const rank = computeSecretRank(upVotesCount, downVotesCount, commentsCount, createdAtMs);
+        const createdAtMs = (0, secretUtils_1.timestampToMillisOrZero)(secretData.createdAt) || nowMs;
+        const rank = (0, secretUtils_1.computeSecretRank)(upVotesCount, downVotesCount, commentsCount, createdAtMs);
         const existingVoteCreatedAt = (_f = voteSnap.data()) === null || _f === void 0 ? void 0 : _f.createdAt;
         tx.set(voteRef, {
             vote,
@@ -1641,7 +659,7 @@ exports.voteSecretCallable = functions.https.onCall(async (data, context) => {
         tx.set(fingerprintRef, {
             firstSeenAt: existingFirstSeenAt,
             lastSeenAt: nowTs,
-            expiresAt: admin.firestore.Timestamp.fromMillis(nowMs + SECRET_FINGERPRINT_TTL_MS),
+            expiresAt: admin.firestore.Timestamp.fromMillis(nowMs + secretUtils_1.SECRET_FINGERPRINT_TTL_MS),
             updatedAt: admin.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
         return {
@@ -1660,14 +678,14 @@ exports.createSecretCommentCallable = functions.https.onCall(async (data, contex
     if (!secretId) {
         throw new functions.https.HttpsError('invalid-argument', 'secretId es obligatorio.');
     }
-    const text = sanitizeSecretText(data === null || data === void 0 ? void 0 : data.text, SECRET_COMMENT_MAX_LENGTH);
-    if (text.length < SECRET_COMMENT_MIN_LENGTH) {
-        throw new functions.https.HttpsError('invalid-argument', `El comentario debe tener al menos ${SECRET_COMMENT_MIN_LENGTH} caracteres.`);
+    const text = (0, secretUtils_1.sanitizeSecretText)(data === null || data === void 0 ? void 0 : data.text, secretUtils_1.SECRET_COMMENT_MAX_LENGTH);
+    if (text.length < secretUtils_1.SECRET_COMMENT_MIN_LENGTH) {
+        throw new functions.https.HttpsError('invalid-argument', `El comentario debe tener al menos ${secretUtils_1.SECRET_COMMENT_MIN_LENGTH} caracteres.`);
     }
-    if (!hasMeaningfulSecretText(text)) {
+    if (!(0, secretUtils_1.hasMeaningfulSecretText)(text)) {
         throw new functions.https.HttpsError('invalid-argument', 'Escribe un comentario valido.');
     }
-    const fingerprintHash = buildSecretFingerprintHash(data, context);
+    const fingerprintHash = (0, secretUtils_1.buildSecretFingerprintHash)(data, context);
     const nowMs = Date.now();
     const nowTs = admin.firestore.Timestamp.fromMillis(nowMs);
     const modulesConfigRef = db.collection('_config').doc('modules');
@@ -1684,7 +702,7 @@ exports.createSecretCommentCallable = functions.https.onCall(async (data, contex
             tx.get(rateLimitRef),
             tx.get(fingerprintRef)
         ]);
-        if (!isSecretsModuleEnabled(modulesConfigSnap.data())) {
+        if (!(0, moduleUtils_1.isSecretsModuleEnabled)(modulesConfigSnap.data())) {
             throw new functions.https.HttpsError('failed-precondition', 'El modulo de secretos esta deshabilitado.');
         }
         if (!secretSnap.exists) {
@@ -1694,13 +712,13 @@ exports.createSecretCommentCallable = functions.https.onCall(async (data, contex
         if (secretData.module !== 'secrets' || secretData.deletedAt != null) {
             throw new functions.https.HttpsError('failed-precondition', 'El secreto no esta disponible.');
         }
-        const moderationStatus = sanitizeBoundedString((_a = secretData === null || secretData === void 0 ? void 0 : secretData.moderation) === null || _a === void 0 ? void 0 : _a.status, 40) || 'active';
+        const moderationStatus = (0, userUtils_1.sanitizeBoundedString)((_a = secretData === null || secretData === void 0 ? void 0 : secretData.moderation) === null || _a === void 0 ? void 0 : _a.status, 40) || 'active';
         if (moderationStatus !== 'active') {
             throw new functions.https.HttpsError('failed-precondition', 'Este secreto no permite comentarios.');
         }
-        const runtimeSettings = resolveSecretRuntimeSettings(secretSettingsSnap.data());
+        const runtimeSettings = (0, secretUtils_1.resolveSecretRuntimeSettings)(secretSettingsSnap.data());
         const rateLimitData = rateLimitSnap.data() || {};
-        const lastCommentAtMs = timestampToMillisOrZero(rateLimitData.lastCommentAt);
+        const lastCommentAtMs = (0, secretUtils_1.timestampToMillisOrZero)(rateLimitData.lastCommentAt);
         if (lastCommentAtMs > 0) {
             const elapsed = nowMs - lastCommentAtMs;
             if (elapsed < runtimeSettings.commentCooldownMs) {
@@ -1709,12 +727,12 @@ exports.createSecretCommentCallable = functions.https.onCall(async (data, contex
             }
         }
         const commentRef = secretRef.collection('secret_comments').doc();
-        const alias = createSecretAlias(fingerprintHash, `${secretId}:${commentRef.id}`);
+        const alias = (0, secretUtils_1.createSecretAlias)(fingerprintHash, `${secretId}:${commentRef.id}`);
         const upVotesCount = Math.max(0, Math.floor(Number(((_b = secretData === null || secretData === void 0 ? void 0 : secretData.stats) === null || _b === void 0 ? void 0 : _b.upVotesCount) || 0)));
         const downVotesCount = Math.max(0, Math.floor(Number(((_c = secretData === null || secretData === void 0 ? void 0 : secretData.stats) === null || _c === void 0 ? void 0 : _c.downVotesCount) || 0)));
         const commentsCount = Math.max(0, Math.floor(Number(((_d = secretData === null || secretData === void 0 ? void 0 : secretData.stats) === null || _d === void 0 ? void 0 : _d.commentsCount) || 0))) + 1;
-        const createdAtMs = timestampToMillisOrZero(secretData.createdAt) || nowMs;
-        const rank = computeSecretRank(upVotesCount, downVotesCount, commentsCount, createdAtMs);
+        const createdAtMs = (0, secretUtils_1.timestampToMillisOrZero)(secretData.createdAt) || nowMs;
+        const rank = (0, secretUtils_1.computeSecretRank)(upVotesCount, downVotesCount, commentsCount, createdAtMs);
         tx.set(commentRef, {
             text,
             anonAlias: alias,
@@ -1734,7 +752,7 @@ exports.createSecretCommentCallable = functions.https.onCall(async (data, contex
         });
         const nextRateLimit = {
             lastCommentAt: nowTs,
-            expiresAt: admin.firestore.Timestamp.fromMillis(nowMs + SECRET_FINGERPRINT_TTL_MS),
+            expiresAt: admin.firestore.Timestamp.fromMillis(nowMs + secretUtils_1.SECRET_FINGERPRINT_TTL_MS),
             updatedAt: admin.firestore.FieldValue.serverTimestamp()
         };
         const preservedLastSecretAt = rateLimitData.lastSecretAt;
@@ -1756,7 +774,7 @@ exports.createSecretCommentCallable = functions.https.onCall(async (data, contex
         tx.set(fingerprintRef, {
             firstSeenAt: existingFirstSeenAt,
             lastSeenAt: nowTs,
-            expiresAt: admin.firestore.Timestamp.fromMillis(nowMs + SECRET_FINGERPRINT_TTL_MS),
+            expiresAt: admin.firestore.Timestamp.fromMillis(nowMs + secretUtils_1.SECRET_FINGERPRINT_TTL_MS),
             updatedAt: admin.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
         return {
@@ -1772,8 +790,8 @@ exports.reportSecretCallable = functions.https.onCall(async (data, context) => {
     if (!secretId) {
         throw new functions.https.HttpsError('invalid-argument', 'secretId es obligatorio.');
     }
-    const reason = normalizeSecretReportReason(data === null || data === void 0 ? void 0 : data.reason);
-    const fingerprintHash = buildSecretFingerprintHash(data, context);
+    const reason = (0, secretUtils_1.normalizeSecretReportReason)(data === null || data === void 0 ? void 0 : data.reason);
+    const fingerprintHash = (0, secretUtils_1.buildSecretFingerprintHash)(data, context);
     const nowMs = Date.now();
     const nowTs = admin.firestore.Timestamp.fromMillis(nowMs);
     const modulesConfigRef = db.collection('_config').doc('modules');
@@ -1790,7 +808,7 @@ exports.reportSecretCallable = functions.https.onCall(async (data, context) => {
             tx.get(reportRef),
             tx.get(fingerprintRef)
         ]);
-        if (!isSecretsModuleEnabled(modulesConfigSnap.data())) {
+        if (!(0, moduleUtils_1.isSecretsModuleEnabled)(modulesConfigSnap.data())) {
             throw new functions.https.HttpsError('failed-precondition', 'El modulo de secretos esta deshabilitado.');
         }
         if (!secretSnap.exists) {
@@ -1806,9 +824,9 @@ exports.reportSecretCallable = functions.https.onCall(async (data, context) => {
                 secretId
             };
         }
-        const runtimeSettings = resolveSecretRuntimeSettings(secretSettingsSnap.data());
+        const runtimeSettings = (0, secretUtils_1.resolveSecretRuntimeSettings)(secretSettingsSnap.data());
         const reportsCount = Math.max(0, Math.floor(Number(((_a = secretData === null || secretData === void 0 ? void 0 : secretData.stats) === null || _a === void 0 ? void 0 : _a.reportsCount) || 0))) + 1;
-        const currentStatus = sanitizeBoundedString((_b = secretData === null || secretData === void 0 ? void 0 : secretData.moderation) === null || _b === void 0 ? void 0 : _b.status, 40) || 'active';
+        const currentStatus = (0, userUtils_1.sanitizeBoundedString)((_b = secretData === null || secretData === void 0 ? void 0 : secretData.moderation) === null || _b === void 0 ? void 0 : _b.status, 40) || 'active';
         const currentReason = (_d = (_c = secretData === null || secretData === void 0 ? void 0 : secretData.moderation) === null || _c === void 0 ? void 0 : _c.reason) !== null && _d !== void 0 ? _d : null;
         let nextStatus = currentStatus;
         let nextReason = currentReason;
@@ -1832,7 +850,7 @@ exports.reportSecretCallable = functions.https.onCall(async (data, context) => {
         tx.set(fingerprintRef, {
             firstSeenAt: existingFirstSeenAt,
             lastSeenAt: nowTs,
-            expiresAt: admin.firestore.Timestamp.fromMillis(nowMs + SECRET_FINGERPRINT_TTL_MS),
+            expiresAt: admin.firestore.Timestamp.fromMillis(nowMs + secretUtils_1.SECRET_FINGERPRINT_TTL_MS),
             updatedAt: admin.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
         return {
@@ -1851,22 +869,22 @@ const SECRET_MODERATION_STATUS_VALUES = new Set([
     'blocked'
 ]);
 const normalizeSecretModerationStatusFilter = (value) => {
-    const normalized = sanitizeBoundedString(value, 40).toLowerCase();
+    const normalized = (0, userUtils_1.sanitizeBoundedString)(value, 40).toLowerCase();
     if (SECRET_MODERATION_STATUS_VALUES.has(normalized))
         return normalized;
     return 'all';
 };
 const normalizeSecretModerationAction = (value) => {
-    const normalized = sanitizeBoundedString(value, 40).toLowerCase();
+    const normalized = (0, userUtils_1.sanitizeBoundedString)(value, 40).toLowerCase();
     if (normalized === 'hide' || normalized === 'restore' || normalized === 'block') {
         return normalized;
     }
     throw new functions.https.HttpsError('invalid-argument', 'action debe ser hide, restore o block.');
 };
 exports.getSecretModerationQueueCallable = functions.https.onCall(async (data, context) => {
-    await assertAdminUser(context.auth);
+    await (0, userUtils_1.assertAdminUser)(db, context.auth);
     const statusFilter = normalizeSecretModerationStatusFilter(data === null || data === void 0 ? void 0 : data.status);
-    const limitValue = clampInteger(data === null || data === void 0 ? void 0 : data.limit, 10, 200, 80);
+    const limitValue = (0, lotteryUtils_1.clampInteger)(data === null || data === void 0 ? void 0 : data.limit, 10, 200, 80);
     let moderationQuery = db
         .collection('content')
         .where('module', '==', 'secrets')
@@ -1881,16 +899,16 @@ exports.getSecretModerationQueueCallable = functions.https.onCall(async (data, c
         const data = docSnap.data() || {};
         return {
             secretId: docSnap.id,
-            textPreview: sanitizeSecretText(data.descripcion, 280),
-            category: sanitizeBoundedString(data.category, 40),
-            zone: sanitizeBoundedString(data.zone, 60),
-            createdAtMs: timestampToMillisOrZero(data.createdAt),
-            updatedAtMs: timestampToMillisOrZero(data.updatedAt),
+            textPreview: (0, secretUtils_1.sanitizeSecretText)(data.descripcion, 280),
+            category: (0, userUtils_1.sanitizeBoundedString)(data.category, 40),
+            zone: (0, userUtils_1.sanitizeBoundedString)(data.zone, 60),
+            createdAtMs: (0, secretUtils_1.timestampToMillisOrZero)(data.createdAt),
+            updatedAtMs: (0, secretUtils_1.timestampToMillisOrZero)(data.updatedAt),
             moderation: {
-                status: sanitizeBoundedString((_a = data === null || data === void 0 ? void 0 : data.moderation) === null || _a === void 0 ? void 0 : _a.status, 40) || 'active',
-                reason: sanitizeBoundedString((_b = data === null || data === void 0 ? void 0 : data.moderation) === null || _b === void 0 ? void 0 : _b.reason, 180),
-                reviewedBy: sanitizeBoundedString((_c = data === null || data === void 0 ? void 0 : data.moderation) === null || _c === void 0 ? void 0 : _c.reviewedBy, 128),
-                reviewedAtMs: timestampToMillisOrZero((_d = data === null || data === void 0 ? void 0 : data.moderation) === null || _d === void 0 ? void 0 : _d.reviewedAt)
+                status: (0, userUtils_1.sanitizeBoundedString)((_a = data === null || data === void 0 ? void 0 : data.moderation) === null || _a === void 0 ? void 0 : _a.status, 40) || 'active',
+                reason: (0, userUtils_1.sanitizeBoundedString)((_b = data === null || data === void 0 ? void 0 : data.moderation) === null || _b === void 0 ? void 0 : _b.reason, 180),
+                reviewedBy: (0, userUtils_1.sanitizeBoundedString)((_c = data === null || data === void 0 ? void 0 : data.moderation) === null || _c === void 0 ? void 0 : _c.reviewedBy, 128),
+                reviewedAtMs: (0, secretUtils_1.timestampToMillisOrZero)((_d = data === null || data === void 0 ? void 0 : data.moderation) === null || _d === void 0 ? void 0 : _d.reviewedAt)
             },
             stats: {
                 upVotesCount: Math.max(0, Math.floor(Number(((_e = data === null || data === void 0 ? void 0 : data.stats) === null || _e === void 0 ? void 0 : _e.upVotesCount) || 0))),
@@ -1911,13 +929,13 @@ exports.getSecretModerationQueueCallable = functions.https.onCall(async (data, c
 });
 exports.moderateSecretCallable = functions.https.onCall(async (data, context) => {
     var _a;
-    await assertAdminUser(context.auth);
-    const secretId = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.secretId, 128);
+    await (0, userUtils_1.assertAdminUser)(db, context.auth);
+    const secretId = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.secretId, 128);
     if (!secretId) {
         throw new functions.https.HttpsError('invalid-argument', 'secretId es obligatorio.');
     }
     const action = normalizeSecretModerationAction(data === null || data === void 0 ? void 0 : data.action);
-    const reasonInput = sanitizeSecretText(data === null || data === void 0 ? void 0 : data.reason, 180);
+    const reasonInput = (0, secretUtils_1.sanitizeSecretText)(data === null || data === void 0 ? void 0 : data.reason, 180);
     const reviewerUid = ((_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid) || 'admin';
     const secretRef = db.collection('content').doc(secretId);
     return db.runTransaction(async (tx) => {
@@ -1960,8 +978,8 @@ exports.moderateSecretCallable = functions.https.onCall(async (data, context) =>
 });
 exports.refreshSecretRankingsCallable = functions.https.onCall(async (_data, context) => {
     var _a;
-    await assertStaffUser(context.auth);
-    const rankings = await refreshSecretRankingsInternal();
+    await (0, userUtils_1.assertStaffUser)(db, context.auth);
+    const rankings = await (0, secretUtils_1.refreshSecretRankingsInternal)();
     const lists = (rankings.lists || {});
     return {
         status: 'ok',
@@ -1979,7 +997,7 @@ exports.refreshSecretRankings = functions.pubsub
     .schedule('every 5 minutes')
     .onRun(async () => {
     var _a;
-    const rankings = await refreshSecretRankingsInternal();
+    const rankings = await (0, secretUtils_1.refreshSecretRankingsInternal)();
     const sampleSize = Number(((_a = rankings.source) === null || _a === void 0 ? void 0 : _a.sampleSize) || 0);
     console.log(`Secret rankings refreshed. sampleSize=${sampleSize}`);
     return null;
@@ -2006,13 +1024,13 @@ exports.onCommentCreated = functions.firestore
         const contentData = contentSnap.data() || {};
         if (contentData.deletedAt != null)
             return;
-        const recipientUserId = sanitizeBoundedString(contentData.userId, 128);
-        const actorUserId = sanitizeBoundedString(commentData.userId, 128);
+        const recipientUserId = (0, userUtils_1.sanitizeBoundedString)(contentData.userId, 128);
+        const actorUserId = (0, userUtils_1.sanitizeBoundedString)(commentData.userId, 128);
         if (!recipientUserId || !actorUserId)
             return;
-        const actor = await loadNotificationActorIdentity(actorUserId);
-        const contentTarget = buildContentTargetFromDoc(contentId, contentData);
-        await writeNotificationEvent({
+        const actor = await (0, notificationRuntimeUtils_1.loadNotificationActorIdentity)(db, actorUserId);
+        const contentTarget = (0, notificationRuntimeUtils_1.buildContentTargetFromDoc)(contentId, contentData);
+        await (0, notificationRuntimeUtils_1.writeNotificationEvent)(db, {
             type: 'comment',
             recipientUserId,
             actor,
@@ -2076,24 +1094,24 @@ exports.onReplyCreated = functions.firestore
         const parentCommentData = commentSnap.data() || {};
         if (parentCommentData.deletedAt != null)
             return;
-        const recipientUserId = sanitizeBoundedString(parentCommentData.userId, 128);
-        const actorUserId = sanitizeBoundedString(replyData.userId, 128);
+        const recipientUserId = (0, userUtils_1.sanitizeBoundedString)(parentCommentData.userId, 128);
+        const actorUserId = (0, userUtils_1.sanitizeBoundedString)(replyData.userId, 128);
         if (!recipientUserId || !actorUserId)
             return;
-        const actor = await loadNotificationActorIdentity(actorUserId);
+        const actor = await (0, notificationRuntimeUtils_1.loadNotificationActorIdentity)(db, actorUserId);
         const fallbackModule = replyData.module === 'news'
             ? 'news'
             : 'community';
         const contentTarget = contentSnap.exists
-            ? buildContentTargetFromDoc(contentId, contentSnap.data() || {})
+            ? (0, notificationRuntimeUtils_1.buildContentTargetFromDoc)(contentId, contentSnap.data() || {})
             : {
                 contentId,
                 contentModule: fallbackModule,
                 contentPublicRef: contentId,
-                contentSlug: normalizeContentSlug(contentId),
-                targetPath: `/c/${encodeURIComponent(contentId)}/${encodeURIComponent(normalizeContentSlug(contentId))}`
+                contentSlug: (0, contentUtils_1.normalizeContentSlug)(contentId),
+                targetPath: `/c/${encodeURIComponent(contentId)}/${encodeURIComponent((0, contentUtils_1.normalizeContentSlug)(contentId))}`
             };
-        await writeNotificationEvent({
+        await (0, notificationRuntimeUtils_1.writeNotificationEvent)(db, {
             type: 'reply',
             recipientUserId,
             actor,
@@ -2151,9 +1169,9 @@ exports.onFollowAdded = functions.firestore
             'stats.followingCount': admin.firestore.FieldValue.increment(1)
         });
         await batch.commit();
-        const actor = await loadNotificationActorIdentity(followerId);
-        const targetPath = buildProfileTargetPath(actor.actorUsername, actor.userId);
-        await writeNotificationEvent({
+        const actor = await (0, notificationRuntimeUtils_1.loadNotificationActorIdentity)(db, followerId);
+        const targetPath = (0, notificationUtils_1.buildProfileTargetPath)(actor.actorUsername, actor.userId);
+        await (0, notificationRuntimeUtils_1.writeNotificationEvent)(db, {
             type: 'follow',
             recipientUserId: userId,
             actor,
@@ -2192,15 +1210,15 @@ exports.updateMyProfile = functions.https.onCall(async (data, context) => {
     }
     const authToken = (((_b = context.auth) === null || _b === void 0 ? void 0 : _b.token) || {});
     const emailFromToken = typeof authToken.email === 'string' ? authToken.email : '';
-    const { username, usernameLower } = normalizeUsernameStrict(data === null || data === void 0 ? void 0 : data.username);
-    const nombre = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.nombre, 120);
+    const { username, usernameLower } = (0, userUtils_1.normalizeUsernameStrict)(data === null || data === void 0 ? void 0 : data.username);
+    const nombre = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.nombre, 120);
     if (!nombre) {
         throw new functions.https.HttpsError('invalid-argument', 'nombre es obligatorio.');
     }
-    const bio = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.bio, 280);
-    const location = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.location, 120);
+    const bio = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.bio, 280);
+    const location = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.location, 120);
     const website = sanitizeOptionalUrl(data === null || data === void 0 ? void 0 : data.website, 'website');
-    const profilePictureUrl = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.profilePictureUrl, 1200);
+    const profilePictureUrl = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.profilePictureUrl, 1200);
     const userRef = db.collection('users').doc(userId);
     const userPublicRef = db.collection('users_public').doc(userId);
     const usernameRef = db.collection('usernames').doc(usernameLower);
@@ -2210,7 +1228,7 @@ exports.updateMyProfile = functions.https.onCall(async (data, context) => {
         const currentData = userSnap.exists
             ? (userSnap.data() || {})
             : {};
-        const currentIdentity = normalizeUsernameLoose(userId, currentData);
+        const currentIdentity = (0, userUtils_1.normalizeUsernameLoose)(userId, currentData);
         const previousUsernameLower = currentIdentity.usernameLower;
         const previousUsernameRef = db.collection('usernames').doc(previousUsernameLower);
         const usernameSnap = await tx.get(usernameRef);
@@ -2223,11 +1241,11 @@ exports.updateMyProfile = functions.https.onCall(async (data, context) => {
                 tx.delete(previousUsernameRef);
             }
         }
-        const mergedStats = ensureUserStats(currentData.stats);
-        const mergedSettings = ensureUserSettings(currentData.settings);
+        const mergedStats = (0, userUtils_1.ensureUserStats)(currentData.stats);
+        const mergedSettings = (0, userUtils_1.ensureUserSettings)(currentData.settings);
         const nextProfile = {
             id: userId,
-            email: sanitizeBoundedString(currentData.email, 255) || emailFromToken,
+            email: (0, userUtils_1.sanitizeBoundedString)(currentData.email, 255) || emailFromToken,
             nombre,
             username,
             usernameLower,
@@ -2248,7 +1266,7 @@ exports.updateMyProfile = functions.https.onCall(async (data, context) => {
             username,
             updatedAt: admin.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
-        const publicProfile = buildPublicUserProfile(userId, nextProfile);
+        const publicProfile = (0, userUtils_1.buildPublicUserProfile)(userId, nextProfile);
         tx.set(userPublicRef, publicProfile, { merge: true });
         return {
             profile: {
@@ -2293,8 +1311,8 @@ exports.updateNotificationPreferences = functions.https.onCall(async (data, cont
     if (!userSnap.exists) {
         throw new functions.https.HttpsError('not-found', 'No se encontro el perfil del usuario.');
     }
-    const currentSettings = ensureUserSettings((_b = userSnap.data()) === null || _b === void 0 ? void 0 : _b.settings);
-    const currentTypes = ensureNotificationTypeSettings(currentSettings.notificationTypes);
+    const currentSettings = (0, userUtils_1.ensureUserSettings)((_b = userSnap.data()) === null || _b === void 0 ? void 0 : _b.settings);
+    const currentTypes = (0, userUtils_1.ensureNotificationTypeSettings)(currentSettings.notificationTypes);
     const hasNotificationsEnabled = Object.prototype.hasOwnProperty.call(data || {}, 'notificationsEnabled');
     const hasLikes = Object.prototype.hasOwnProperty.call(data || {}, 'likes');
     const hasComments = Object.prototype.hasOwnProperty.call(data || {}, 'comments');
@@ -2312,6 +1330,7 @@ exports.updateNotificationPreferences = functions.https.onCall(async (data, cont
         settings: nextSettings,
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
     }, { merge: true });
+    (0, notificationRuntimeUtils_1.invalidateNotificationRecipientCache)(userId);
     return {
         ok: true,
         settings: nextSettings
@@ -2323,8 +1342,8 @@ exports.updateHomeFeedPreference = functions.https.onCall(async (data, context) 
     if (!userId) {
         throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para configurar tu feed.');
     }
-    const rawDefaultFeedTab = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.defaultFeedTab, 40).toLowerCase();
-    if (!rawDefaultFeedTab || !USER_DEFAULT_FEED_TAB_VALUES.has(rawDefaultFeedTab)) {
+    const rawDefaultFeedTab = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.defaultFeedTab, 40).toLowerCase();
+    if (!['todo', 'news', 'post', 'surveys', 'lottery'].includes(rawDefaultFeedTab)) {
         throw new functions.https.HttpsError('invalid-argument', 'defaultFeedTab invalido. Valores permitidos: todo, news, post, surveys, lottery.');
     }
     const userRef = db.collection('users').doc(userId);
@@ -2332,7 +1351,7 @@ exports.updateHomeFeedPreference = functions.https.onCall(async (data, context) 
     if (!userSnap.exists) {
         throw new functions.https.HttpsError('not-found', 'No se encontro el perfil del usuario.');
     }
-    const currentSettings = ensureUserSettings((_b = userSnap.data()) === null || _b === void 0 ? void 0 : _b.settings);
+    const currentSettings = (0, userUtils_1.ensureUserSettings)((_b = userSnap.data()) === null || _b === void 0 ? void 0 : _b.settings);
     const nextSettings = Object.assign(Object.assign({}, currentSettings), { defaultFeedTab: rawDefaultFeedTab });
     await userRef.set({
         settings: nextSettings,
@@ -2349,19 +1368,19 @@ exports.registerNotificationDevice = functions.https.onCall(async (data, context
     if (!userId) {
         throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para registrar un dispositivo.');
     }
-    const token = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.token, 4096);
+    const token = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.token, 4096);
     if (!token) {
         throw new functions.https.HttpsError('invalid-argument', 'token es obligatorio.');
     }
-    const platformRaw = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.platform, 20).toLowerCase();
+    const platformRaw = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.platform, 20).toLowerCase();
     if (platformRaw !== 'web' && platformRaw !== 'android') {
         throw new functions.https.HttpsError('invalid-argument', 'platform debe ser "web" o "android".');
     }
     const platform = platformRaw;
-    const deviceId = sanitizeNotificationDeviceId(data === null || data === void 0 ? void 0 : data.deviceId, token, platform);
-    const locale = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.locale, 64);
-    const timezone = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.timezone, 80);
-    const userAgent = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.userAgent, 255);
+    const deviceId = (0, notificationUtils_1.sanitizeNotificationDeviceId)(data === null || data === void 0 ? void 0 : data.deviceId, token, platform);
+    const locale = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.locale, 64);
+    const timezone = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.timezone, 80);
+    const userAgent = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.userAgent, 255);
     const devicesCollection = db.collection('users').doc(userId).collection('notification_devices');
     const deviceRef = devicesCollection.doc(deviceId);
     await db.runTransaction(async (tx) => {
@@ -2392,7 +1411,7 @@ exports.registerNotificationDevice = functions.https.onCall(async (data, context
         }
         await batch.commit();
     }
-    await subscribeTokenToPushTopics(token, platform);
+    await (0, notificationRuntimeUtils_1.subscribeTokenToPushTopics)(token, platform);
     return {
         ok: true,
         deviceId,
@@ -2406,8 +1425,8 @@ exports.unregisterNotificationDevice = functions.https.onCall(async (data, conte
         throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para eliminar un dispositivo.');
     }
     const devicesCollection = db.collection('users').doc(userId).collection('notification_devices');
-    const deviceId = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.deviceId, NOTIFICATION_DEVICE_ID_MAX_LENGTH);
-    const token = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.token, 4096);
+    const deviceId = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.deviceId, NOTIFICATION_DEVICE_ID_MAX_LENGTH);
+    const token = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.token, 4096);
     if (!deviceId && !token) {
         throw new functions.https.HttpsError('invalid-argument', 'Debes enviar deviceId o token.');
     }
@@ -2418,8 +1437,8 @@ exports.unregisterNotificationDevice = functions.https.onCall(async (data, conte
         const targetSnap = await targetRef.get();
         if (targetSnap.exists) {
             const targetData = targetSnap.data() || {};
-            const targetToken = sanitizeBoundedString(targetData.token, 4096);
-            const targetPlatformRaw = sanitizeBoundedString(targetData.platform, 20).toLowerCase();
+            const targetToken = (0, userUtils_1.sanitizeBoundedString)(targetData.token, 4096);
+            const targetPlatformRaw = (0, userUtils_1.sanitizeBoundedString)(targetData.platform, 20).toLowerCase();
             if (targetToken && (targetPlatformRaw === 'web' || targetPlatformRaw === 'android')) {
                 devicesToUnsubscribe.push({
                     token: targetToken,
@@ -2433,8 +1452,8 @@ exports.unregisterNotificationDevice = functions.https.onCall(async (data, conte
         const tokenMatches = await devicesCollection.where('token', '==', token).get();
         for (const docSnap of tokenMatches.docs) {
             const deviceData = docSnap.data() || {};
-            const targetToken = sanitizeBoundedString(deviceData.token, 4096);
-            const targetPlatformRaw = sanitizeBoundedString(deviceData.platform, 20).toLowerCase();
+            const targetToken = (0, userUtils_1.sanitizeBoundedString)(deviceData.token, 4096);
+            const targetPlatformRaw = (0, userUtils_1.sanitizeBoundedString)(deviceData.platform, 20).toLowerCase();
             if (targetToken && (targetPlatformRaw === 'web' || targetPlatformRaw === 'android')) {
                 devicesToUnsubscribe.push({
                     token: targetToken,
@@ -2452,7 +1471,7 @@ exports.unregisterNotificationDevice = functions.https.onCall(async (data, conte
         await batch.commit();
     }
     if (devicesToUnsubscribe.length > 0) {
-        await Promise.all(devicesToUnsubscribe.map((entry) => unsubscribeTokenFromPushTopics(entry.token, entry.platform)));
+        await Promise.all(devicesToUnsubscribe.map((entry) => (0, notificationRuntimeUtils_1.unsubscribeTokenFromPushTopics)(entry.token, entry.platform)));
     }
     return {
         ok: true,
@@ -2460,16 +1479,16 @@ exports.unregisterNotificationDevice = functions.https.onCall(async (data, conte
     };
 });
 exports.sendTestPushToAllUsers = functions.https.onCall(async (data, context) => {
-    await assertAdminUser(context.auth);
-    const title = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.title, 120) || 'Prueba de notificaciones';
-    const body = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.body, 220) || 'Este es un test push para todos los usuarios.';
-    const targetPath = safeNotificationPath(data === null || data === void 0 ? void 0 : data.targetPath, '/notificaciones');
-    const platformRaw = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.platform, 20).toLowerCase();
+    await (0, userUtils_1.assertAdminUser)(db, context.auth);
+    const title = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.title, 120) || 'Prueba de notificaciones';
+    const body = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.body, 220) || 'Este es un test push para todos los usuarios.';
+    const targetPath = (0, notificationUtils_1.safeNotificationPath)(data === null || data === void 0 ? void 0 : data.targetPath, '/notificaciones');
+    const platformRaw = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.platform, 20).toLowerCase();
     const topic = platformRaw === 'android'
-        ? NOTIFICATION_TOPIC_ANDROID
+        ? 'android_users'
         : platformRaw === 'web'
-            ? NOTIFICATION_TOPIC_WEB
-            : NOTIFICATION_TOPIC_ALL;
+            ? 'web_users'
+            : 'all_users';
     if (platformRaw && platformRaw !== 'android' && platformRaw !== 'web' && platformRaw !== 'all') {
         throw new functions.https.HttpsError('invalid-argument', 'platform debe ser "all", "android" o "web".');
     }
@@ -2487,7 +1506,7 @@ exports.sendTestPushToAllUsers = functions.https.onCall(async (data, context) =>
         android: {
             priority: 'high',
             notification: {
-                channelId: ANDROID_PUSH_CHANNEL_ID,
+                channelId: notificationUtils_1.ANDROID_PUSH_CHANNEL_ID,
                 sound: 'default'
             }
         },
@@ -2509,7 +1528,7 @@ exports.markNotificationRead = functions.https.onCall(async (data, context) => {
     if (!userId) {
         throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para actualizar notificaciones.');
     }
-    const notificationId = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.notificationId, 200);
+    const notificationId = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.notificationId, 200);
     if (!notificationId) {
         throw new functions.https.HttpsError('invalid-argument', 'notificationId es obligatorio.');
     }
@@ -2569,13 +1588,13 @@ exports.markAllNotificationsRead = functions.https.onCall(async (_data, context)
 });
 exports.updateUserManagement = functions.https.onCall(async (data, context) => {
     var _a;
-    await assertStaffUser(context.auth);
+    await (0, userUtils_1.assertStaffUser)(db, context.auth);
     const requesterAuth = context.auth;
-    const targetUserId = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.userId, 128);
+    const targetUserId = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.userId, 128);
     if (!targetUserId) {
         throw new functions.https.HttpsError('invalid-argument', 'userId es obligatorio.');
     }
-    const nextRole = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.rol, 40);
+    const nextRole = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.rol, 40);
     const hasRoleUpdate = nextRole.length > 0;
     const allowedRoles = new Set([
         'usuario',
@@ -2592,9 +1611,9 @@ exports.updateUserManagement = functions.https.onCall(async (data, context) => {
     }
     const hasVerifiedUpdate = typeof (data === null || data === void 0 ? void 0 : data.isVerified) === 'boolean';
     const nextIsVerified = hasVerifiedUpdate ? Boolean(data.isVerified) : null;
-    const nextNombreRaw = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.nombre, 120);
-    const nextEmailRaw = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.email, 320).toLowerCase();
-    const usernameCandidate = normalizeUsernameCandidate(data === null || data === void 0 ? void 0 : data.username);
+    const nextNombreRaw = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.nombre, 120);
+    const nextEmailRaw = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.email, 320).toLowerCase();
+    const usernameCandidate = (0, userUtils_1.normalizeUsernameCandidate)(data === null || data === void 0 ? void 0 : data.username);
     const hasCoreFieldInput = (typeof (data === null || data === void 0 ? void 0 : data.nombre) === 'string' ||
         typeof (data === null || data === void 0 ? void 0 : data.username) === 'string' ||
         typeof (data === null || data === void 0 ? void 0 : data.email) === 'string');
@@ -2602,9 +1621,9 @@ exports.updateUserManagement = functions.https.onCall(async (data, context) => {
         throw new functions.https.HttpsError('invalid-argument', 'Username invalido.');
     }
     if (typeof (data === null || data === void 0 ? void 0 : data.username) === 'string' &&
-        (usernameCandidate.length < USERNAME_MIN_LENGTH ||
-            usernameCandidate.length > USERNAME_MAX_LENGTH ||
-            !USERNAME_REGEX.test(usernameCandidate))) {
+        (usernameCandidate.length < userUtils_1.USERNAME_MIN_LENGTH ||
+            usernameCandidate.length > userUtils_1.USERNAME_MAX_LENGTH ||
+            !userUtils_1.USERNAME_REGEX.test(usernameCandidate))) {
         throw new functions.https.HttpsError('invalid-argument', 'Username invalido. Usa entre 3 y 30 caracteres: a-z, 0-9 y _.');
     }
     if (typeof (data === null || data === void 0 ? void 0 : data.nombre) === 'string' && !nextNombreRaw) {
@@ -2622,9 +1641,9 @@ exports.updateUserManagement = functions.https.onCall(async (data, context) => {
         throw new functions.https.HttpsError('not-found', 'Usuario no encontrado.');
     }
     const currentData = userSnap.data() || {};
-    const currentNombre = sanitizeBoundedString(currentData.nombre, 120);
-    const currentEmail = sanitizeBoundedString(currentData.email, 320).toLowerCase();
-    const currentUsernameLower = sanitizeBoundedString(currentData.usernameLower, USERNAME_MAX_LENGTH);
+    const currentNombre = (0, userUtils_1.sanitizeBoundedString)(currentData.nombre, 120);
+    const currentEmail = (0, userUtils_1.sanitizeBoundedString)(currentData.email, 320).toLowerCase();
+    const currentUsernameLower = (0, userUtils_1.sanitizeBoundedString)(currentData.usernameLower, userUtils_1.USERNAME_MAX_LENGTH);
     const nextUsernameLower = typeof (data === null || data === void 0 ? void 0 : data.username) === 'string'
         ? usernameCandidate
         : currentUsernameLower;
@@ -2634,7 +1653,7 @@ exports.updateUserManagement = functions.https.onCall(async (data, context) => {
         nextEmail !== currentEmail ||
         nextUsernameLower !== currentUsernameLower);
     if (willUpdateCoreFields) {
-        assertSystemAdminUser(requesterAuth);
+        (0, userUtils_1.assertSystemAdminUser)(requesterAuth);
     }
     if (nextUsernameLower !== currentUsernameLower) {
         const usernameRef = db.collection('usernames').doc(nextUsernameLower);
@@ -2675,10 +1694,10 @@ exports.updateUserManagement = functions.https.onCall(async (data, context) => {
     };
 });
 exports.getUsersSocialConnections = functions.https.onCall(async (data, context) => {
-    await assertStaffUser(context.auth);
+    await (0, userUtils_1.assertStaffUser)(db, context.auth);
     const rawUserIds = Array.isArray(data === null || data === void 0 ? void 0 : data.userIds) ? data.userIds : [];
     const normalizedUserIds = rawUserIds
-        .map((value) => sanitizeBoundedString(value, 128))
+        .map((value) => (0, userUtils_1.sanitizeBoundedString)(value, 128))
         .filter((value) => value.length > 0);
     const userIds = Array.from(new Set(normalizedUserIds)).slice(0, 50);
     if (userIds.length === 0) {
@@ -2692,7 +1711,7 @@ exports.getUsersSocialConnections = functions.https.onCall(async (data, context)
         try {
             const userRecord = await admin.auth().getUser(uid);
             const providerIds = Array.from(new Set((userRecord.providerData || [])
-                .map((provider) => sanitizeBoundedString(provider.providerId, 64))
+                .map((provider) => (0, userUtils_1.sanitizeBoundedString)(provider.providerId, 64))
                 .filter((providerId) => providerId.length > 0)));
             records[uid] = { providerIds };
         }
@@ -2715,23 +1734,23 @@ exports.getLotteryUserTicketExtras = functions.https.onCall(async (data, context
     if (!requesterUid) {
         throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para consultar tickets extra.');
     }
-    const requestedUserId = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.userId, 128);
+    const requestedUserId = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.userId, 128);
     const targetUserId = requestedUserId || requesterUid;
     if (targetUserId !== requesterUid) {
-        await assertAdminUser(context.auth);
+        await (0, userUtils_1.assertAdminUser)(db, context.auth);
     }
     const snapshot = await db
-        .collection(LOTTERY_USER_EXTRA_TICKETS_COLLECTION)
+        .collection(lotteryUtils_1.LOTTERY_USER_EXTRA_TICKETS_COLLECTION)
         .where('userId', '==', targetUserId)
         .limit(400)
         .get();
     const records = {};
     for (const docSnap of snapshot.docs) {
         const row = docSnap.data() || {};
-        const lotteryId = sanitizeBoundedString(row.lotteryId, 128);
+        const lotteryId = (0, userUtils_1.sanitizeBoundedString)(row.lotteryId, 128);
         if (!lotteryId)
             continue;
-        const extraTickets = normalizeLotteryExtraTickets(row.extraTickets);
+        const extraTickets = (0, lotteryUtils_1.normalizeLotteryExtraTickets)(row.extraTickets);
         if (extraTickets <= 0)
             continue;
         records[lotteryId] = extraTickets;
@@ -2743,7 +1762,7 @@ exports.getLotteryUserTicketExtras = functions.https.onCall(async (data, context
     };
 });
 exports.listLotteriesForAdmin = functions.https.onCall(async (_data, context) => {
-    await assertAdminUser(context.auth);
+    await (0, userUtils_1.assertAdminUser)(db, context.auth);
     const snapshot = await db
         .collection('lotteries')
         .where('deletedAt', '==', null)
@@ -2754,10 +1773,10 @@ exports.listLotteriesForAdmin = functions.https.onCall(async (_data, context) =>
         const row = lotteryDoc.data() || {};
         return {
             id: lotteryDoc.id,
-            title: sanitizeBoundedString(row.title, 150) || '(Sin titulo)',
-            status: sanitizeBoundedString(row.status, 40) || 'draft',
-            maxNumber: normalizeLotteryMaxNumber(row.maxNumber),
-            maxTicketsPerUser: normalizeLotteryMaxTicketsPerUser(row.maxTicketsPerUser)
+            title: (0, userUtils_1.sanitizeBoundedString)(row.title, 150) || '(Sin titulo)',
+            status: (0, userUtils_1.sanitizeBoundedString)(row.status, 40) || 'draft',
+            maxNumber: (0, lotteryUtils_1.normalizeLotteryMaxNumber)(row.maxNumber),
+            maxTicketsPerUser: (0, lotteryUtils_1.normalizeLotteryMaxTicketsPerUser)(row.maxTicketsPerUser)
         };
     });
     return {
@@ -2767,12 +1786,12 @@ exports.listLotteriesForAdmin = functions.https.onCall(async (_data, context) =>
 });
 exports.grantLotteryUserExtraTickets = functions.https.onCall(async (data, context) => {
     var _a, _b;
-    await assertAdminUser(context.auth);
+    await (0, userUtils_1.assertAdminUser)(db, context.auth);
     const adminUid = ((_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid) || 'system';
-    const adminEmail = sanitizeBoundedString((((_b = context.auth) === null || _b === void 0 ? void 0 : _b.token) || {}).email, 320).toLowerCase();
-    const userId = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.userId, 128);
-    const lotteryId = sanitizeBoundedString(data === null || data === void 0 ? void 0 : data.lotteryId, 128);
-    const quantity = clampInteger(data === null || data === void 0 ? void 0 : data.quantity, 1, LOTTERY_MAX_EXTRA_TICKETS_PER_USER, 1);
+    const adminEmail = (0, userUtils_1.sanitizeBoundedString)((((_b = context.auth) === null || _b === void 0 ? void 0 : _b.token) || {}).email, 320).toLowerCase();
+    const userId = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.userId, 128);
+    const lotteryId = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.lotteryId, 128);
+    const quantity = (0, lotteryUtils_1.clampInteger)(data === null || data === void 0 ? void 0 : data.quantity, 1, lotteryUtils_1.LOTTERY_MAX_EXTRA_TICKETS_PER_USER, 1);
     if (!userId) {
         throw new functions.https.HttpsError('invalid-argument', 'userId es obligatorio.');
     }
@@ -2782,8 +1801,8 @@ exports.grantLotteryUserExtraTickets = functions.https.onCall(async (data, conte
     const userRef = db.collection('users').doc(userId);
     const lotteryRef = db.collection('lotteries').doc(lotteryId);
     const extraRef = db
-        .collection(LOTTERY_USER_EXTRA_TICKETS_COLLECTION)
-        .doc(toLotteryUserExtraDocId(lotteryId, userId));
+        .collection(lotteryUtils_1.LOTTERY_USER_EXTRA_TICKETS_COLLECTION)
+        .doc((0, lotteryUtils_1.toLotteryUserExtraDocId)(lotteryId, userId));
     return db.runTransaction(async (tx) => {
         var _a;
         const [userSnap, lotterySnap, extraSnap] = await Promise.all([
@@ -2801,15 +1820,15 @@ exports.grantLotteryUserExtraTickets = functions.https.onCall(async (data, conte
         if (lotteryData.deletedAt != null) {
             throw new functions.https.HttpsError('failed-precondition', 'No se pueden asignar tickets extra en una loteria eliminada.');
         }
-        const currentExtra = normalizeLotteryExtraTickets((_a = extraSnap.data()) === null || _a === void 0 ? void 0 : _a.extraTickets);
-        const nextExtra = normalizeLotteryExtraTickets(currentExtra + quantity);
+        const currentExtra = (0, lotteryUtils_1.normalizeLotteryExtraTickets)((_a = extraSnap.data()) === null || _a === void 0 ? void 0 : _a.extraTickets);
+        const nextExtra = (0, lotteryUtils_1.normalizeLotteryExtraTickets)(currentExtra + quantity);
         if (nextExtra === currentExtra) {
             throw new functions.https.HttpsError('failed-precondition', 'No se puede aumentar mas el cupo de tickets extra para este usuario.');
         }
-        const maxNumber = normalizeLotteryMaxNumber(lotteryData.maxNumber);
-        const baseLimit = normalizeLotteryMaxTicketsPerUser(lotteryData.maxTicketsPerUser);
-        const effectiveLimit = getLotteryEffectiveMaxTickets(baseLimit, nextExtra, maxNumber);
-        const lotteryTitle = sanitizeBoundedString(lotteryData.title, 150) || 'Loteria';
+        const maxNumber = (0, lotteryUtils_1.normalizeLotteryMaxNumber)(lotteryData.maxNumber);
+        const baseLimit = (0, lotteryUtils_1.normalizeLotteryMaxTicketsPerUser)(lotteryData.maxTicketsPerUser);
+        const effectiveLimit = (0, lotteryUtils_1.getLotteryEffectiveMaxTickets)(baseLimit, nextExtra, maxNumber);
+        const lotteryTitle = (0, userUtils_1.sanitizeBoundedString)(lotteryData.title, 150) || 'Loteria';
         const payload = {
             userId,
             lotteryId,
@@ -2862,7 +1881,7 @@ exports.syncPublicUserProfile = functions.firestore
     const { userId } = context.params;
     if (!change.after.exists) {
         const beforeData = change.before.data() || {};
-        const previousIdentity = normalizeUsernameLoose(userId, beforeData);
+        const previousIdentity = (0, userUtils_1.normalizeUsernameLoose)(userId, beforeData);
         const previousUsernameRef = db.collection('usernames').doc(previousIdentity.usernameLower);
         await db.runTransaction(async (tx) => {
             var _a;
@@ -2876,9 +1895,9 @@ exports.syncPublicUserProfile = functions.firestore
     }
     const afterData = change.after.data() || {};
     const beforeData = change.before.exists ? (change.before.data() || {}) : {};
-    const currentIdentity = normalizeUsernameLoose(userId, afterData);
-    const previousIdentity = normalizeUsernameLoose(userId, beforeData);
-    const publicProfile = buildPublicUserProfile(userId, afterData);
+    const currentIdentity = (0, userUtils_1.normalizeUsernameLoose)(userId, afterData);
+    const previousIdentity = (0, userUtils_1.normalizeUsernameLoose)(userId, beforeData);
+    const publicProfile = (0, userUtils_1.buildPublicUserProfile)(userId, afterData);
     const currentUsernameRef = db.collection('usernames').doc(currentIdentity.usernameLower);
     const previousUsernameRef = db.collection('usernames').doc(previousIdentity.usernameLower);
     const usersPublicRef = db.collection('users_public').doc(userId);
@@ -2929,18 +1948,18 @@ exports.onUserUpdated = functions.firestore
             commentsUpdateData.userProfilePicUrl = afterData.profilePictureUrl || '';
         }
         if (usernameChanged) {
-            const normalizedIdentity = normalizeUsernameLoose(userId, afterData);
+            const normalizedIdentity = (0, userUtils_1.normalizeUsernameLoose)(userId, afterData);
             postUpdateData.userUsername = normalizedIdentity.usernameLower;
         }
         const [postsUpdated, commentsUpdated, repliesUpdated] = await Promise.all([
             Object.keys(postUpdateData).length > 0
-                ? propagateUserFields('content', userId, postUpdateData)
+                ? (0, userUtils_1.propagateUserFields)(db, 'content', userId, postUpdateData)
                 : Promise.resolve(0),
             Object.keys(commentsUpdateData).length > 0
-                ? propagateUserFields('comments', userId, commentsUpdateData)
+                ? (0, userUtils_1.propagateUserFields)(db, 'comments', userId, commentsUpdateData)
                 : Promise.resolve(0),
             Object.keys(commentsUpdateData).length > 0
-                ? propagateUserFields('replies', userId, commentsUpdateData)
+                ? (0, userUtils_1.propagateUserFields)(db, 'replies', userId, commentsUpdateData)
                 : Promise.resolve(0)
         ]);
         console.log(`User profile updated for ${userId}: posts=${postsUpdated}, comments=${commentsUpdated}, replies=${repliesUpdated}`);
@@ -2960,13 +1979,13 @@ exports.onContentSlugSync = functions.firestore
     const afterData = change.after.data() || {};
     const beforeSlug = typeof beforeData.slug === 'string' ? beforeData.slug.trim() : '';
     const afterSlug = typeof afterData.slug === 'string' ? afterData.slug.trim() : '';
-    const beforeModule = change.before.exists ? inferContentModule(beforeData) : null;
-    const afterModule = inferContentModule(afterData);
+    const beforeModule = change.before.exists ? (0, contentUtils_1.inferContentModule)(beforeData) : null;
+    const afterModule = (0, contentUtils_1.inferContentModule)(afterData);
     const beforePublicId = beforeModule === 'news'
-        ? extractNewsPublicIdFromPayload(beforeData)
+        ? (0, contentUtils_1.extractNewsPublicIdFromPayload)(beforeData)
         : '';
     const afterPublicId = afterModule === 'news'
-        ? extractNewsPublicIdFromPayload(afterData)
+        ? (0, contentUtils_1.extractNewsPublicIdFromPayload)(afterData)
         : '';
     const shouldSync = !change.before.exists ||
         !afterSlug ||
@@ -2982,21 +2001,21 @@ exports.onContentSlugSync = functions.firestore
             if (!freshSnapshot.exists)
                 return;
             const freshData = freshSnapshot.data() || {};
-            const freshModule = inferContentModule(freshData);
+            const freshModule = (0, contentUtils_1.inferContentModule)(freshData);
             const freshPublicId = freshModule === 'news'
-                ? extractNewsPublicIdFromPayload(freshData)
+                ? (0, contentUtils_1.extractNewsPublicIdFromPayload)(freshData)
                 : '';
             const existingSlugRaw = typeof freshData.slug === 'string' ? freshData.slug.trim() : '';
             if (existingSlugRaw) {
-                const normalizedExistingSlug = normalizeContentSlug(existingSlugRaw);
-                const existingSlugKey = buildContentSlugKey(freshModule, normalizedExistingSlug);
+                const normalizedExistingSlug = (0, contentUtils_1.normalizeContentSlug)(existingSlugRaw);
+                const existingSlugKey = (0, contentUtils_1.buildContentSlugKey)(freshModule, normalizedExistingSlug);
                 transaction.set(db.collection('_content_slugs').doc(existingSlugKey), {
                     contentId: freshSnapshot.id,
                     module: freshModule,
                     slug: normalizedExistingSlug,
                     updatedAt: admin.firestore.FieldValue.serverTimestamp()
                 }, { merge: true });
-                const normalizedBase = buildContentSlugBase(freshData);
+                const normalizedBase = (0, contentUtils_1.buildContentSlugBase)(freshData);
                 const syncUpdate = {};
                 if (freshData.slug !== normalizedExistingSlug)
                     syncUpdate.slug = normalizedExistingSlug;
@@ -3010,7 +2029,7 @@ exports.onContentSlugSync = functions.firestore
                         syncUpdate.publicId = freshPublicId;
                     if (freshData.postId !== numericPublicId)
                         syncUpdate.postId = numericPublicId;
-                    transaction.set(db.collection('_content_public_ids').doc(buildContentPublicIdKey(freshModule, freshPublicId)), {
+                    transaction.set(db.collection('_content_public_ids').doc((0, contentUtils_1.buildContentPublicIdKey)(freshModule, freshPublicId)), {
                         contentId: freshSnapshot.id,
                         module: freshModule,
                         publicId: freshPublicId,
@@ -3022,11 +2041,11 @@ exports.onContentSlugSync = functions.firestore
                 }
                 return;
             }
-            const slugBase = buildContentSlugBase(freshData);
+            const slugBase = (0, contentUtils_1.buildContentSlugBase)(freshData);
             let nextSlug = slugBase;
             let attempt = 2;
             while (true) {
-                const slugKey = buildContentSlugKey(freshModule, nextSlug);
+                const slugKey = (0, contentUtils_1.buildContentSlugKey)(freshModule, nextSlug);
                 const slugRef = db.collection('_content_slugs').doc(slugKey);
                 const slugSnapshot = await transaction.get(slugRef);
                 if (!slugSnapshot.exists) {
@@ -3041,7 +2060,7 @@ exports.onContentSlugSync = functions.firestore
                         updatedAt: admin.firestore.FieldValue.serverTimestamp()
                     }, { merge: true });
                     if (freshModule === 'news' && freshPublicId) {
-                        transaction.set(db.collection('_content_public_ids').doc(buildContentPublicIdKey(freshModule, freshPublicId)), {
+                        transaction.set(db.collection('_content_public_ids').doc((0, contentUtils_1.buildContentPublicIdKey)(freshModule, freshPublicId)), {
                             contentId: freshSnapshot.id,
                             module: freshModule,
                             publicId: freshPublicId,
@@ -3057,7 +2076,7 @@ exports.onContentSlugSync = functions.firestore
                         ? { publicId: freshPublicId, postId: Number(freshPublicId) }
                         : {})), { merge: true });
                     if (freshModule === 'news' && freshPublicId) {
-                        transaction.set(db.collection('_content_public_ids').doc(buildContentPublicIdKey(freshModule, freshPublicId)), {
+                        transaction.set(db.collection('_content_public_ids').doc((0, contentUtils_1.buildContentPublicIdKey)(freshModule, freshPublicId)), {
                             contentId: freshSnapshot.id,
                             module: freshModule,
                             publicId: freshPublicId,
@@ -3232,7 +2251,7 @@ exports.onOfficialNewsReceived = functions.database
                 ? existingCreatedAt
                 : admin.firestore.FieldValue.serverTimestamp());
         const updatedAtTs = parsedUpdatedAt || admin.firestore.FieldValue.serverTimestamp();
-        const normalizedPostId = extractNewsPublicIdFromPayload(afterData);
+        const normalizedPostId = (0, contentUtils_1.extractNewsPublicIdFromPayload)(afterData);
         const postIdNumber = normalizedPostId ? Number(normalizedPostId) : null;
         const normalizeUrlCandidate = (value) => {
             if (typeof value !== 'string')
@@ -3302,7 +2321,7 @@ exports.onOfficialNewsReceived = functions.database
         // Set con merge asegura idempotencia (crea si no existe, actualiza si existe)
         await db.collection('content').doc(newsId).set(firestorePayload, { merge: true });
         if (normalizedPostId) {
-            const publicKey = buildContentPublicIdKey('news', normalizedPostId);
+            const publicKey = (0, contentUtils_1.buildContentPublicIdKey)('news', normalizedPostId);
             await db
                 .collection('_content_public_ids')
                 .doc(publicKey)
@@ -3542,6 +2561,7 @@ exports.onCommunityPostImageFinalized = functions.storage
     const thumbTempFile = path.join(os.tmpdir(), `${Date.now()}-${baseName}.webp`);
     try {
         await bucket.file(filePath).download({ destination: sourceTempFile });
+        const sharp = await loadSharp();
         await sharp(sourceTempFile)
             .rotate()
             .resize(COMMUNITY_THUMB_MAX_SIDE, COMMUNITY_THUMB_MAX_SIDE, {
@@ -3610,7 +2630,8 @@ exports.uploadCommunityImageToHosting = functions.https.onCall(async (data, cont
     const remoteFilePath = `${ftpConfig.basePath}/${targetRelativePath}`.replace(/\/+/g, '/');
     const remoteDir = path.posix.dirname(remoteFilePath);
     const publicUrl = `${ftpConfig.publicBaseUrl}/${targetRelativePath}`;
-    const ftpClient = new ftp.Client(30000);
+    const { Client } = await loadFtpClient();
+    const ftpClient = new Client(30000);
     ftpClient.ftp.verbose = false;
     try {
         await ftpClient.access({
@@ -3637,232 +2658,6 @@ exports.uploadCommunityImageToHosting = functions.https.onCall(async (data, cont
         contentType
     };
 });
-const listAllLotteryEntries = async (lotteryRef) => {
-    const docs = [];
-    let lastDocId = null;
-    while (true) {
-        let pageQuery = lotteryRef
-            .collection('entries')
-            .orderBy(admin.firestore.FieldPath.documentId())
-            .limit(LOTTERY_MIGRATION_PAGE_SIZE);
-        if (lastDocId) {
-            pageQuery = pageQuery.startAfter(lastDocId);
-        }
-        const pageSnap = await pageQuery.get();
-        if (pageSnap.empty)
-            break;
-        docs.push(...pageSnap.docs);
-        if (pageSnap.size < LOTTERY_MIGRATION_PAGE_SIZE)
-            break;
-        lastDocId = pageSnap.docs[pageSnap.docs.length - 1].id;
-    }
-    return docs;
-};
-const ensureLotteryEntriesSchemaV2 = async (lotteryId) => {
-    const lotteryRef = db.collection('lotteries').doc(lotteryId);
-    let maxNumber = LOTTERY_DEFAULT_MAX_NUMBER;
-    let maxTicketsPerUser = LOTTERY_DEFAULT_MAX_TICKETS_PER_USER;
-    let mustRunMigration = false;
-    let needsDefaultsPatch = false;
-    await db.runTransaction(async (tx) => {
-        const lotterySnap = await tx.get(lotteryRef);
-        if (!lotterySnap.exists) {
-            throw new functions.https.HttpsError('not-found', 'La loteria no existe.');
-        }
-        const lotteryData = lotterySnap.data() || {};
-        maxNumber = normalizeLotteryMaxNumber(lotteryData.maxNumber);
-        maxTicketsPerUser = normalizeLotteryMaxTicketsPerUser(lotteryData.maxTicketsPerUser);
-        const schemaRaw = Number(lotteryData.entrySchemaVersion || 0);
-        const schemaVersion = Number.isFinite(schemaRaw) ? Math.floor(schemaRaw) : 0;
-        const migrationStatusRaw = typeof lotteryData.migrationStatus === 'string'
-            ? lotteryData.migrationStatus
-            : '';
-        const migrationStatus = migrationStatusRaw;
-        const isAlreadyV2 = schemaVersion >= LOTTERY_ENTRY_SCHEMA_VERSION;
-        if (isAlreadyV2 && migrationStatus !== 'failed') {
-            const hasValidDefaults = lotteryData.maxNumber === maxNumber &&
-                lotteryData.maxTicketsPerUser === maxTicketsPerUser &&
-                migrationStatus === 'done';
-            needsDefaultsPatch = !hasValidDefaults;
-            return;
-        }
-        if (migrationStatus === 'running') {
-            throw new functions.https.HttpsError('failed-precondition', 'migration-in-progress: La loteria esta migrando entradas, intenta nuevamente en unos segundos.');
-        }
-        mustRunMigration = true;
-        tx.set(lotteryRef, {
-            migrationStatus: 'running',
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        }, { merge: true });
-    });
-    if (!mustRunMigration) {
-        if (needsDefaultsPatch) {
-            await lotteryRef.set({
-                maxNumber,
-                maxTicketsPerUser,
-                migrationStatus: 'done',
-                entrySchemaVersion: LOTTERY_ENTRY_SCHEMA_VERSION,
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            }, { merge: true });
-        }
-        return;
-    }
-    try {
-        const allEntries = await listAllLotteryEntries(lotteryRef);
-        const usedNumbers = new Set();
-        const nextAvailableNumber = (() => {
-            let cursor = 1;
-            return () => {
-                while (cursor <= maxNumber) {
-                    const candidate = cursor;
-                    cursor += 1;
-                    if (!usedNumbers.has(candidate)) {
-                        usedNumbers.add(candidate);
-                        return candidate;
-                    }
-                }
-                return null;
-            };
-        })();
-        const plannedEntries = [];
-        const deferredEntries = [];
-        for (const entryDoc of allEntries) {
-            const parsedSelected = extractSelectedNumberFromEntryDoc(entryDoc);
-            const isSelectable = parsedSelected != null && parsedSelected >= 1 && parsedSelected <= maxNumber;
-            if (!isSelectable || usedNumbers.has(parsedSelected)) {
-                deferredEntries.push(entryDoc);
-                continue;
-            }
-            usedNumbers.add(parsedSelected);
-            plannedEntries.push({
-                source: entryDoc,
-                selectedNumber: parsedSelected,
-                targetId: toLotteryEntryDocId(parsedSelected)
-            });
-        }
-        for (const entryDoc of deferredEntries) {
-            const assigned = nextAvailableNumber();
-            if (assigned == null) {
-                throw new functions.https.HttpsError('failed-precondition', 'No hay suficientes numeros disponibles para migrar las entradas legacy. Aumenta maxNumber.');
-            }
-            plannedEntries.push({
-                source: entryDoc,
-                selectedNumber: assigned,
-                targetId: toLotteryEntryDocId(assigned)
-            });
-        }
-        let batch = db.batch();
-        let writes = 0;
-        const flush = async () => {
-            if (writes === 0)
-                return;
-            await batch.commit();
-            batch = db.batch();
-            writes = 0;
-        };
-        for (const planned of plannedEntries) {
-            const sourceData = planned.source.data() || {};
-            const userIdRaw = typeof sourceData.userId === 'string' ? sourceData.userId.trim() : '';
-            const fallbackUserId = planned.source.id;
-            const userId = userIdRaw || fallbackUserId;
-            const userUsernameRaw = typeof sourceData.userUsername === 'string' ? sourceData.userUsername.trim() : '';
-            const userNameRaw = typeof sourceData.userName === 'string' ? sourceData.userName.trim() : '';
-            const userName = userNameRaw || 'Usuario';
-            const userUsername = userUsernameRaw.slice(0, 30);
-            const profilePicRaw = typeof sourceData.userProfilePicUrl === 'string'
-                ? sourceData.userProfilePicUrl.trim()
-                : '';
-            const payload = {
-                userId,
-                userName: userName.slice(0, 120),
-                userUsername,
-                userProfilePicUrl: profilePicRaw,
-                lotteryId,
-                selectedNumber: planned.selectedNumber,
-                createdAt: sourceData.createdAt instanceof admin.firestore.Timestamp
-                    ? sourceData.createdAt
-                    : admin.firestore.FieldValue.serverTimestamp(),
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            };
-            const targetRef = lotteryRef.collection('entries').doc(planned.targetId);
-            batch.set(targetRef, payload, { merge: true });
-            writes += 1;
-            if (planned.source.ref.path !== targetRef.path) {
-                batch.delete(planned.source.ref);
-                writes += 1;
-            }
-            if (writes >= LOTTERY_MIGRATION_BATCH_SIZE) {
-                await flush();
-            }
-        }
-        batch.set(lotteryRef, {
-            maxNumber,
-            maxTicketsPerUser,
-            participantsCount: plannedEntries.length,
-            entrySchemaVersion: LOTTERY_ENTRY_SCHEMA_VERSION,
-            migrationStatus: 'done',
-            migrationError: admin.firestore.FieldValue.delete(),
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        }, { merge: true });
-        writes += 1;
-        await flush();
-    }
-    catch (error) {
-        await lotteryRef.set({
-            migrationStatus: 'failed',
-            migrationError: typeof (error === null || error === void 0 ? void 0 : error.message) === 'string'
-                ? error.message.slice(0, 300)
-                : 'migration-failed',
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        }, { merge: true });
-        throw error;
-    }
-};
-function publishLotteryBallToOBS(number, name, profilePicUrl = '') {
-    const wsUrl = process.env.WS_LOTTERY_URL || 'ws://localhost:688';
-    const wsToken = process.env.WS_LOTTERY_TOKEN || '';
-    if (!wsUrl)
-        return;
-    try {
-        const ws = new WebSocket(wsUrl);
-        let settled = false;
-        const done = () => {
-            if (settled)
-                return;
-            settled = true;
-            try {
-                ws.close();
-            }
-            catch (_a) { }
-        };
-        const timeout = setTimeout(() => {
-            console.warn('[lottery] OBS WS publish timed out');
-            done();
-        }, 3000);
-        ws.on('open', () => {
-            clearTimeout(timeout);
-            const payload = {
-                type: 'TRIGGER_BALL',
-                number,
-                name,
-                profilePicUrl,
-                eventId: `entry_${number}_${Date.now()}`
-            };
-            if (wsToken)
-                payload.token = wsToken;
-            ws.send(JSON.stringify(payload));
-            done();
-        });
-        ws.on('error', (err) => {
-            clearTimeout(timeout);
-            console.warn('[lottery] OBS WS publish error:', err.message);
-            done();
-        });
-    }
-    catch (err) {
-        console.warn('[lottery] OBS WS publish not available:', err.message);
-    }
-}
 // 8. Lottery entry callable (number-based entries, supports multiple tickets per user)
 exports.enterLottery = functions.https.onCall(async (data, context) => {
     var _a, _b;
@@ -3871,7 +2666,7 @@ exports.enterLottery = functions.https.onCall(async (data, context) => {
         throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para participar en la loteria.');
     }
     const lotteryId = typeof (data === null || data === void 0 ? void 0 : data.lotteryId) === 'string' ? data.lotteryId.trim() : '';
-    const selectedNumber = parseSelectedLotteryNumber(data === null || data === void 0 ? void 0 : data.selectedNumber);
+    const selectedNumber = (0, lotteryUtils_1.parseSelectedLotteryNumber)(data === null || data === void 0 ? void 0 : data.selectedNumber);
     const idempotencyKeyRaw = typeof (data === null || data === void 0 ? void 0 : data.idempotencyKey) === 'string'
         ? data.idempotencyKey.trim()
         : '';
@@ -3881,7 +2676,7 @@ exports.enterLottery = functions.https.onCall(async (data, context) => {
     if (selectedNumber == null) {
         throw new functions.https.HttpsError('invalid-argument', 'selectedNumber es obligatorio.');
     }
-    await ensureLotteryEntriesSchemaV2(lotteryId);
+    await (0, lotteryUtils_1.ensureLotteryEntriesSchemaV2)(lotteryId);
     const userDocSnap = await db.collection('users').doc(userId).get();
     const userData = userDocSnap.data() || {};
     const userRecord = await admin.auth().getUser(userId);
@@ -3901,14 +2696,14 @@ exports.enterLottery = functions.https.onCall(async (data, context) => {
     const userProfilePicUrl = userProfilePicRaw.trim();
     const modulesConfigRef = db.collection('_config').doc('modules');
     const lotteryRef = db.collection('lotteries').doc(lotteryId);
-    const entryRef = lotteryRef.collection('entries').doc(toLotteryEntryDocId(selectedNumber));
+    const entryRef = lotteryRef.collection('entries').doc((0, lotteryUtils_1.toLotteryEntryDocId)(selectedNumber));
     const extraTicketsRef = db
-        .collection(LOTTERY_USER_EXTRA_TICKETS_COLLECTION)
-        .doc(toLotteryUserExtraDocId(lotteryId, userId));
+        .collection(lotteryUtils_1.LOTTERY_USER_EXTRA_TICKETS_COLLECTION)
+        .doc((0, lotteryUtils_1.toLotteryUserExtraDocId)(lotteryId, userId));
     const userEntriesQuery = lotteryRef
         .collection('entries')
         .where('userId', '==', userId)
-        .limit(LOTTERY_MAX_MAX_NUMBER + 2);
+        .limit(lotteryUtils_1.LOTTERY_MAX_MAX_NUMBER + 2);
     const entryResult = await db.runTransaction(async (tx) => {
         var _a;
         const [modulesConfigSnap, lotterySnap, entrySnap, userEntriesSnap, extraTicketsSnap] = await Promise.all([
@@ -3918,7 +2713,7 @@ exports.enterLottery = functions.https.onCall(async (data, context) => {
             tx.get(userEntriesQuery),
             tx.get(extraTicketsRef)
         ]);
-        if (!isLotteryModuleEnabled(modulesConfigSnap.data())) {
+        if (!(0, moduleUtils_1.isLotteryModuleEnabled)(modulesConfigSnap.data())) {
             throw new functions.https.HttpsError('failed-precondition', 'module-disabled: El modulo de loteria esta deshabilitado.');
         }
         if (!lotterySnap.exists) {
@@ -3956,10 +2751,10 @@ exports.enterLottery = functions.https.onCall(async (data, context) => {
         const currentParticipants = Number.isFinite(currentParticipantsRaw)
             ? Math.max(0, Math.floor(currentParticipantsRaw))
             : 0;
-        const maxNumber = normalizeLotteryMaxNumber(lotteryData.maxNumber);
-        const maxTicketsPerUser = normalizeLotteryMaxTicketsPerUser(lotteryData.maxTicketsPerUser);
-        const extraTickets = normalizeLotteryExtraTickets((_a = extraTicketsSnap.data()) === null || _a === void 0 ? void 0 : _a.extraTickets);
-        const effectiveMaxTicketsPerUser = getLotteryEffectiveMaxTickets(maxTicketsPerUser, extraTickets, maxNumber);
+        const maxNumber = (0, lotteryUtils_1.normalizeLotteryMaxNumber)(lotteryData.maxNumber);
+        const maxTicketsPerUser = (0, lotteryUtils_1.normalizeLotteryMaxTicketsPerUser)(lotteryData.maxTicketsPerUser);
+        const extraTickets = (0, lotteryUtils_1.normalizeLotteryExtraTickets)((_a = extraTicketsSnap.data()) === null || _a === void 0 ? void 0 : _a.extraTickets);
+        const effectiveMaxTicketsPerUser = (0, lotteryUtils_1.getLotteryEffectiveMaxTickets)(maxTicketsPerUser, extraTickets, maxNumber);
         if (selectedNumber < 1 || selectedNumber > maxNumber) {
             throw new functions.https.HttpsError('failed-precondition', `out-of-range: Debes seleccionar un numero entre 1 y ${maxNumber}.`);
         }
@@ -4000,7 +2795,7 @@ exports.enterLottery = functions.https.onCall(async (data, context) => {
             participantsCount: admin.firestore.FieldValue.increment(1),
             maxNumber,
             maxTicketsPerUser,
-            entrySchemaVersion: LOTTERY_ENTRY_SCHEMA_VERSION,
+            entrySchemaVersion: lotteryUtils_1.LOTTERY_ENTRY_SCHEMA_VERSION,
             migrationStatus: 'done',
             updatedAt: admin.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
@@ -4014,19 +2809,19 @@ exports.enterLottery = functions.https.onCall(async (data, context) => {
         };
     });
     if (entryResult.status === 'ok') {
-        publishLotteryBallToOBS(entryResult.selectedNumber, userName, userProfilePicUrl);
+        (0, lotteryUtils_1.publishLotteryBallToOBS)(entryResult.selectedNumber, userName, userProfilePicUrl);
     }
     return entryResult;
 });
 // 9. Lottery draw callable (staff-only)
 exports.drawLotteryWinner = functions.https.onCall(async (data, context) => {
     var _a;
-    await assertStaffUser(context.auth);
+    await (0, userUtils_1.assertStaffUser)(db, context.auth);
     const lotteryId = typeof (data === null || data === void 0 ? void 0 : data.lotteryId) === 'string' ? data.lotteryId.trim() : '';
     if (!lotteryId) {
         throw new functions.https.HttpsError('invalid-argument', 'lotteryId es obligatorio.');
     }
-    await ensureLotteryEntriesSchemaV2(lotteryId);
+    await (0, lotteryUtils_1.ensureLotteryEntriesSchemaV2)(lotteryId);
     const requesterUid = ((_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid) || 'system';
     const modulesConfigRef = db.collection('_config').doc('modules');
     const lotteryRef = db.collection('lotteries').doc(lotteryId);
@@ -4035,7 +2830,7 @@ exports.drawLotteryWinner = functions.https.onCall(async (data, context) => {
             tx.get(modulesConfigRef),
             tx.get(lotteryRef)
         ]);
-        if (!isLotteryModuleEnabled(modulesConfigSnap.data())) {
+        if (!(0, moduleUtils_1.isLotteryModuleEnabled)(modulesConfigSnap.data())) {
             throw new functions.https.HttpsError('failed-precondition', 'El modulo de loteria esta deshabilitado.');
         }
         if (!lotterySnap.exists) {
@@ -4055,7 +2850,7 @@ exports.drawLotteryWinner = functions.https.onCall(async (data, context) => {
         const entriesQuery = lotteryRef
             .collection('entries')
             .orderBy('selectedNumber', 'asc')
-            .limit(MAX_LOTTERY_DRAW_ENTRIES);
+            .limit(lotteryUtils_1.MAX_LOTTERY_DRAW_ENTRIES);
         const entriesSnap = await tx.get(entriesQuery);
         if (entriesSnap.empty) {
             throw new functions.https.HttpsError('failed-precondition', 'No hay participantes para sortear.');
@@ -4070,7 +2865,7 @@ exports.drawLotteryWinner = functions.https.onCall(async (data, context) => {
         const winnerProfilePic = typeof winnerData.userProfilePicUrl === 'string'
             ? winnerData.userProfilePicUrl
             : '';
-        const winnerSelectedNumber = parseSelectedLotteryNumber(winnerData.selectedNumber) || null;
+        const winnerSelectedNumber = (0, lotteryUtils_1.parseSelectedLotteryNumber)(winnerData.selectedNumber) || null;
         const participantsRaw = Number(lotteryData.participantsCount || 0);
         const participantsCount = Number.isFinite(participantsRaw)
             ? Math.max(0, Math.floor(participantsRaw))
@@ -4152,7 +2947,7 @@ exports.drawLotteryWinner = functions.https.onCall(async (data, context) => {
             lastEventAt: admin.firestore.FieldValue.serverTimestamp()
         });
         // Enviar alerta push
-        await sendPushToNotificationDevices(notificationRef, winnerUserId, 'system', 'Sorteos Bot', '/perfil').catch((err) => console.warn('Error sending winner push notification:', err));
+        await (0, notificationRuntimeUtils_1.sendPushToNotificationDevices)(db, notificationRef, winnerUserId, 'system', 'Sorteos Bot', '/perfil').catch((err) => console.warn('Error sending winner push notification:', err));
     }
     catch (error) {
         console.error('Error recording winner notification:', error);
@@ -4172,7 +2967,7 @@ exports.submitSurveyVote = functions.https.onCall(async (data, context) => {
         throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para votar.');
     }
     const surveyId = typeof (data === null || data === void 0 ? void 0 : data.surveyId) === 'string' ? data.surveyId.trim() : '';
-    const optionIds = normalizeOptionIds(data === null || data === void 0 ? void 0 : data.optionIds);
+    const optionIds = (0, userUtils_1.normalizeOptionIds)(data === null || data === void 0 ? void 0 : data.optionIds);
     const idempotencyKeyRaw = typeof (data === null || data === void 0 ? void 0 : data.idempotencyKey) === 'string'
         ? data.idempotencyKey.trim()
         : '';
@@ -4222,7 +3017,7 @@ exports.submitSurveyVote = functions.https.onCall(async (data, context) => {
         if (optionIds.length > maxVotesPerUser) {
             throw new functions.https.HttpsError('invalid-argument', 'Superaste el maximo de opciones permitidas.');
         }
-        const surveyOptions = normalizeSurveyOptions(surveyData.options);
+        const surveyOptions = (0, userUtils_1.normalizeSurveyOptions)(surveyData.options);
         if (surveyOptions.length < 2) {
             throw new functions.https.HttpsError('failed-precondition', 'La encuesta no tiene opciones validas para votar.');
         }
@@ -4242,7 +3037,7 @@ exports.submitSurveyVote = functions.https.onCall(async (data, context) => {
             return {
                 status: 'already_voted',
                 surveyId,
-                optionIds: normalizeOptionIds(existingVote.optionIds)
+                optionIds: (0, userUtils_1.normalizeOptionIds)(existingVote.optionIds)
             };
         }
         const optionSelectionCounts = new Map();

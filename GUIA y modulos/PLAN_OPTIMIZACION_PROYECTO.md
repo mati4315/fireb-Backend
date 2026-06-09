@@ -32,6 +32,63 @@ El Home puede seguir siendo el lugar donde se ve todo, pero la logica pesada deb
 en stores, composables y subcomponentes especializados. Asi el Home se vuelve mas liviano,
 mas facil de mantener y mas rapido de renderizar.
 
+## Avance inicial
+
+- Backend: se redujo el costo de arranque de `functions/src/index.ts` cargando `basic-ftp`, `sharp` y `ws` solo cuando una funcion realmente los necesita.
+- Este cambio no altera el comportamiento visible, pero ayuda a bajar el peso de inicio y mejora el tiempo de carga de las funciones que no usan esas dependencias.
+
+## Avance inicial 2
+
+- Backend: `loadNotificationActorIdentity` ahora prioriza `users_public` y solo cae a `users` si hace falta.
+- Se agrego una caché corta en memoria para identidad de actores de notificaciones, lo que baja lecturas repetidas en picos de likes, comentarios y follows.
+
+## Avance inicial 3
+
+- Backend: se agrego caché corta en memoria para `_config/modules` en la ruta de notificaciones.
+- Backend: se agrego caché corta en memoria para el receptor de notificaciones y se invalida cuando cambian sus preferencias.
+- Esto reduce lecturas repetidas en interacciones frecuentes sin tocar las validaciones fuertes dentro de transacciones.
+
+## Avance inicial 4
+
+- Backend: se movieron utilidades puras de contenido y notificaciones a archivos dedicados en `functions/src`.
+- Esto no cambia la salida, pero reduce el tamaño mental de `index.ts` y deja el backend mas fácil de seguir y de seguir optimizando por partes.
+
+## Avance inicial 5
+
+- Backend: se movio el bloque de secretos y rankings a `functions/src/secretUtils.ts`.
+- `index.ts` quedo mas enfocado en orquestacion y delega calculos puros a un modulo dedicado.
+- Esto reduce el archivo principal y hace mas simple seguir separando el resto de helpers grandes por etapas.
+
+## Avance inicial 6
+
+- Backend: se movio la logica de loteria a `functions/src/lotteryUtils.ts`.
+- `index.ts` ahora depende de helpers compartidos para validaciones, migracion de esquema y publicacion OBS.
+- Se redujo otro bloque grande del archivo principal sin cambiar el flujo funcional de la loteria.
+
+## Avance inicial 7
+
+- Backend: se movieron helpers de usuario, perfiles, roles, settings y surveys a `functions/src/userUtils.ts`.
+- `index.ts` dejo de cargar varias reglas de normalizacion y propagacion de usuario de forma local.
+- Esto termina de separar una parte importante de la logica general del backend sin alterar el comportamiento visible.
+
+## Avance inicial 8
+
+- Backend: se movieron helpers puros de notificaciones a `functions/src/notificationUtils.ts`.
+- `index.ts` ya no mantiene localmente `buildStableHash` ni `sanitizeNotificationDeviceId`.
+- Se sigue reduciendo la cantidad de utilidades sueltas dentro del archivo principal.
+
+## Avance inicial 9
+
+- Backend: se movieron los checks de activacion de modulos a `functions/src/moduleUtils.ts`.
+- `index.ts` ya no mantiene localmente la logica de habilitacion para likes, notificaciones, loteria y secretos.
+- El archivo principal queda cada vez mas centrado en orquestacion y menos en helpers repetidos.
+
+## Avance inicial 10
+
+- Backend: se movio el runtime de notificaciones a `functions/src/notificationRuntimeUtils.ts`.
+- `index.ts` ya delega la carga de identidad del actor, la escritura de notificaciones, el envio push y la suscripcion a topics.
+- Esto recorta otro bloque grande del archivo principal y deja la logica de notificaciones separada por responsabilidad.
+
 ---
 
 ## Etapa 1: Medir antes de tocar
