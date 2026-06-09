@@ -6,6 +6,7 @@
     "setup:likes-module": "node scripts/setup-likes-module.js",
     "setup:surveys-module": "node scripts/setup-surveys-module.js",
     "setup:lottery-module": "node scripts/setup-lottery-module.js",
+    "setup:radio-module": "node scripts/setup-radio-module.js",
     "export-mysql": "node scripts/export-mysql.js",
     "transform:data": "node scripts/transform-data.js",
     "import:firebase": "node scripts/import-firebase.js",

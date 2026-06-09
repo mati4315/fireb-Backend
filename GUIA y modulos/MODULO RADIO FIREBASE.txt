@@ -1,0 +1,104 @@
+MODULO RADIO FIREBASE - GUIA OPERATIVA
+Fecha: 2026-06-09
+Proyecto: cdeluar-ddefc
+
+==================================================
+1) OBJETIVO DEL MODULO
+==================================================
+Mostrar un reproductor de radio fijo, minimalista y liviano, solo cuando la radio
+este activa en Firestore.
+
+Objetivos:
+- Cargar casi nada cuando la radio esta apagada.
+- Reproducir automaticamente cuando `radio.active = true`.
+- Ofrecer un enlace configurable para ir al vivo o a una URL elegida.
+- Administrar todo desde `/radio`.
+
+
+==================================================
+2) ARQUITECTURA
+==================================================
+Backend:
+- Configuracion central en `_config/modules`.
+- Sin coleccion extra para mantener el modulo liviano.
+
+Frontend:
+- Barra fija en `Frontend/src/components/radio/RadioDock.vue`.
+- Dashboard en `Frontend/src/views/RadioManagerView.vue`.
+- Acceso rapido desde `user-dropdown`.
+- Configuracion de estado global en `Frontend/src/stores/moduleStore.ts`.
+
+Feature flag:
+- `radio.enabled`: habilita o deshabilita el modulo.
+- `radio.active`: muestra el reproductor y activa el intento de autoplay.
+
+
+==================================================
+3) MODELO DE DATOS
+==================================================
+Documento:
+_config/modules
+
+Campos de radio:
+- enabled: boolean
+- active: boolean
+- title: string
+- description: string
+- audioUrl: string
+- liveUrl: string
+- ctaLabel: string
+
+Notas:
+- `audioUrl` apunta al stream o MP3.
+- `liveUrl` apunta al destino que abre el boton "Ir al link".
+- Si el navegador bloquea autoplay, se muestra un fallback manual.
+
+
+==================================================
+4) ARCHIVOS TOCADOS
+==================================================
+Frontend:
+- src/stores/moduleStore.ts
+- src/components/radio/RadioDock.vue
+- src/views/RadioManagerView.vue
+- src/router/index.ts
+- src/App.vue
+
+Backend:
+- scripts/setup-radio-module.js
+- package.json
+
+
+==================================================
+5) COMANDOS IMPORTANTES
+==================================================
+Bootstrap del modulo:
+npm run setup:radio-module
+
+Build frontend:
+cd D:\FIREBASE\Frontend
+npm run build
+
+
+==================================================
+6) RECOMENDACIONES DE OPERACION
+==================================================
+1) Mantener `radio.active = false` cuando no haya transmision en vivo.
+2) Usar un `audioUrl` directo, ligero y estable.
+3) Evitar reproductores externos pesados si se quiere conservar velocidad.
+4) Si cambia la configuracion desde `/radio`, refrescar el modulo en frontend.
+
+
+==================================================
+7) CHECKLIST RAPIDO
+==================================================
+[ ] `radio.enabled` activo en `_config/modules`
+[ ] `radio.audioUrl` configurado
+[ ] `radio.liveUrl` configurado
+[ ] `radio.active = true` cuando haya vivo
+[ ] La barra fija aparece solo en vivo
+[ ] El boton "Ir al link" abre la URL elegida
+
+==================================================
+FIN GUIA RADIO
+==================================================
