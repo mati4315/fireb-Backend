@@ -205,6 +205,15 @@ export const onOfficialNewsReceivedInternal = async (
     return null;
   }
 };
+export const getContentFingerprint = (text: string): string => {
+  if (!text) return '';
+  return text
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // remove accents / diacritics
+    .replace(/[^a-z0-9]/g, '')       // keep only alphanumeric
+    .substring(0, 60);               // first 60 characters
+};
 
 export const onCommunityPostsReceivedInternal = async (
   db: FirebaseFirestore.Firestore,
@@ -218,18 +227,48 @@ export const onCommunityPostsReceivedInternal = async (
   if (postId.startsWith('__') && postId.endsWith('__')) return null;
 
   // Deduplication check:
-  // If there's an existing post with the same description and userName, discard this one as a duplicate.
+  // If there's an existing post with similar normalized content and same userName, discard this one as a duplicate.
   const checkContent = (afterData.content || '').trim();
   const checkUserName = (afterData.author_name || '').trim();
   if (checkContent.length > 10 && checkUserName) {
     try {
-      const existingQuery = await db.collection('content')
+      const fingerprint = getContentFingerprint(checkContent);
+      
+      // 1. Query by normalized fingerprint
+      let existingQuery = await db.collection('content')
         .where('module', '==', 'community')
         .where('userName', '==', checkUserName)
-        .where('descripcion', '==', checkContent)
+        .where('contentFingerprint', '==', fingerprint)
         .get();
 
-      const duplicateDocs = existingQuery.docs.filter(doc => doc.id !== postId);
+      // Fallback: query by exact content if fingerprint query yielded nothing
+      // (ensures compatibility with historical posts that don't have the fingerprint field yet)
+      if (existingQuery.empty) {
+        existingQuery = await db.collection('content')
+          .where('module', '==', 'community')
+          .where('userName', '==', checkUserName)
+          .where('descripcion', '==', checkContent)
+          .get();
+      }
+
+      const parsedCreatedAt = parseDateCandidate(afterData.createdAt);
+      const incomingMs = parsedCreatedAt ? parsedCreatedAt.toMillis() : Date.now();
+
+      const duplicateDocs = existingQuery.docs.filter(doc => {
+        if (doc.id === postId) return false;
+        
+        // Time window check: only count as duplicate if created within 7 days of each other
+        const docData = doc.data();
+        const parsedDocCreatedAt = parseDateCandidate(docData.createdAt);
+        if (parsedDocCreatedAt) {
+          const docMs = parsedDocCreatedAt.toMillis();
+          if (Math.abs(docMs - incomingMs) > 7 * 24 * 60 * 60 * 1000) {
+            return false; // outside 7-day window
+          }
+        }
+        return true;
+      });
+
       if (duplicateDocs.length > 0) {
         console.log(`[Deduplication] Detected duplicate community post for postId: ${postId} (existing ID: ${duplicateDocs[0].id}). Cleaning up RTDB and ignoring.`);
         
@@ -340,6 +379,7 @@ export const onCommunityPostsReceivedInternal = async (
       id_unico: afterData.id_unico || postId,
       titulo: afterData.author_name || 'Comunidad',
       descripcion: afterData.content || '',
+      contentFingerprint: getContentFingerprint(afterData.content || ''),
       images: normalizedImages,
       imagesV2,
       imgMiniatura,

@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.onCommunityPostsReceivedInternal = exports.onOfficialNewsReceivedInternal = void 0;
+exports.onCommunityPostsReceivedInternal = exports.getContentFingerprint = exports.onOfficialNewsReceivedInternal = void 0;
 const admin = require("firebase-admin");
 const contentUtils_1 = require("./contentUtils");
 const parseDateCandidate = (value) => {
@@ -171,6 +171,17 @@ const onOfficialNewsReceivedInternal = async (db, change, context) => {
     }
 };
 exports.onOfficialNewsReceivedInternal = onOfficialNewsReceivedInternal;
+const getContentFingerprint = (text) => {
+    if (!text)
+        return '';
+    return text
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '') // remove accents / diacritics
+        .replace(/[^a-z0-9]/g, '') // keep only alphanumeric
+        .substring(0, 60); // first 60 characters
+};
+exports.getContentFingerprint = getContentFingerprint;
 const onCommunityPostsReceivedInternal = async (db, change, context) => {
     var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o;
     const { postId } = context.params;
@@ -180,17 +191,43 @@ const onCommunityPostsReceivedInternal = async (db, change, context) => {
     if (postId.startsWith('__') && postId.endsWith('__'))
         return null;
     // Deduplication check:
-    // If there's an existing post with the same description and userName, discard this one as a duplicate.
+    // If there's an existing post with similar normalized content and same userName, discard this one as a duplicate.
     const checkContent = (afterData.content || '').trim();
     const checkUserName = (afterData.author_name || '').trim();
     if (checkContent.length > 10 && checkUserName) {
         try {
-            const existingQuery = await db.collection('content')
+            const fingerprint = (0, exports.getContentFingerprint)(checkContent);
+            // 1. Query by normalized fingerprint
+            let existingQuery = await db.collection('content')
                 .where('module', '==', 'community')
                 .where('userName', '==', checkUserName)
-                .where('descripcion', '==', checkContent)
+                .where('contentFingerprint', '==', fingerprint)
                 .get();
-            const duplicateDocs = existingQuery.docs.filter(doc => doc.id !== postId);
+            // Fallback: query by exact content if fingerprint query yielded nothing
+            // (ensures compatibility with historical posts that don't have the fingerprint field yet)
+            if (existingQuery.empty) {
+                existingQuery = await db.collection('content')
+                    .where('module', '==', 'community')
+                    .where('userName', '==', checkUserName)
+                    .where('descripcion', '==', checkContent)
+                    .get();
+            }
+            const parsedCreatedAt = parseDateCandidate(afterData.createdAt);
+            const incomingMs = parsedCreatedAt ? parsedCreatedAt.toMillis() : Date.now();
+            const duplicateDocs = existingQuery.docs.filter(doc => {
+                if (doc.id === postId)
+                    return false;
+                // Time window check: only count as duplicate if created within 7 days of each other
+                const docData = doc.data();
+                const parsedDocCreatedAt = parseDateCandidate(docData.createdAt);
+                if (parsedDocCreatedAt) {
+                    const docMs = parsedDocCreatedAt.toMillis();
+                    if (Math.abs(docMs - incomingMs) > 7 * 24 * 60 * 60 * 1000) {
+                        return false; // outside 7-day window
+                    }
+                }
+                return true;
+            });
             if (duplicateDocs.length > 0) {
                 console.log(`[Deduplication] Detected duplicate community post for postId: ${postId} (existing ID: ${duplicateDocs[0].id}). Cleaning up RTDB and ignoring.`);
                 // Remove duplicate from RTDB
@@ -282,6 +319,7 @@ const onCommunityPostsReceivedInternal = async (db, change, context) => {
             id_unico: afterData.id_unico || postId,
             titulo: afterData.author_name || 'Comunidad',
             descripcion: afterData.content || '',
+            contentFingerprint: (0, exports.getContentFingerprint)(afterData.content || ''),
             images: normalizedImages,
             imagesV2,
             imgMiniatura,
