@@ -89,6 +89,103 @@ mas facil de mantener y mas rapido de renderizar.
 - `index.ts` ya delega la carga de identidad del actor, la escritura de notificaciones, el envio push y la suscripcion a topics.
 - Esto recorta otro bloque grande del archivo principal y deja la logica de notificaciones separada por responsabilidad.
 
+## Avance inicial 11
+
+- Backend: se movieron los helpers de hosting, imagenes y sanitizacion de URLs a `functions/src/hostingUtils.ts`.
+- `index.ts` ya no mantiene localmente la carga dinamica de `basic-ftp` y `sharp`, ni la validacion y normalizacion de rutas de hosting.
+- Esto sigue reduciendo el tamaño y el ruido del archivo principal sin cambiar la logica funcional.
+
+## Avance inicial 12
+
+- Backend: se movieron tambien los helpers de limpieza de media del hosting a `functions/src/hostingUtils.ts`.
+- `index.ts` ya delega la limpieza de archivos relacionados con posts comunitarios a una utilidad dedicada.
+- El archivo principal queda un paso mas cerca de ser solo orquestacion y rutas de negocio.
+
+## Avance inicial 13
+
+- Backend: se movieron los helpers de moderacion de secretos a `functions/src/secretUtils.ts`.
+- `index.ts` ya no mantiene localmente la logica de filtros y acciones de moderacion para secretos.
+- Esto termina de sacar del archivo principal varios helpers de dominio que pertenecen mejor al modulo de secretos.
+
+## Avance inicial 14
+
+- Backend: se movio el helper compartido `isExpired` a `functions/src/timeUtils.ts`.
+- `index.ts` queda practicamente sin helpers locales de utilidad, concentrandose cada vez mas en triggers y funciones.
+- El archivo principal se acerca al objetivo de ser un punto de orquestacion liviano y facil de mantener.
+
+## Avance inicial 15
+
+- Backend: se movieron las constantes y helpers de encuestas a `functions/src/surveyUtils.ts`.
+- `index.ts` deja de cargar la logica base de validacion y limites de encuestas de forma local.
+- La seccion de encuestas queda mejor encapsulada y mas facil de seguir sin mezclar reglas con el archivo principal.
+
+## Avance inicial 16
+
+- Backend: se movio el ultimo helper local de comentarios a `functions/src/commentUtils.ts`.
+- `index.ts` ya no necesita construir referencias de comentario de forma directa.
+- El archivo principal queda mas enfocado en flujos de negocio y menos en utilidades de acceso a Firestore.
+
+## Avance inicial 17
+
+- Backend: se movio la logica de encuestas a `functions/src/surveyRuntimeUtils.ts`.
+- `index.ts` ahora solo delega el voto de encuestas y el auto-cierre de encuestas expiradas.
+- Esto saca de `index.ts` una seccion entera de validacion y actualizacion transaccional.
+
+## Avance inicial 18
+
+- Backend: se movio la agregacion de metricas de anuncios a `functions/src/adRuntimeUtils.ts`.
+- `index.ts` ahora solo delega el trigger de `ad_events` a una utilidad dedicada.
+- Este cambio recorta otro bloque funcional completo y mantiene `index.ts` mas enfocado en orquestacion.
+
+## Avance inicial 19
+
+- Backend: se movio el bloque administrativo de loteria a `functions/src/lotteryAdminRuntimeUtils.ts`.
+- `index.ts` ahora solo delega consultas de tickets extra, listado admin de loterias y asignacion de tickets extra.
+- El modulo de loteria sigue quedando mas separado por responsabilidades y con menos logica repetida en el archivo principal.
+
+## Avance inicial 20
+
+- Backend: se movio el test push global de administracion a `functions/src/notificationRuntimeUtils.ts`.
+- `index.ts` ahora solo delega el envio de pruebas push a una utilidad dedicada de notificaciones.
+- Esto saca del archivo principal una ruta administrativa mas y deja la mensajeria mas centralizada.
+
+## Avance inicial 21
+
+- Backend: se movio la administracion de usuarios y la consulta de conexiones sociales a `functions/src/userAdminRuntimeUtils.ts`.
+- `index.ts` ahora solo delega `updateUserManagement` y `getUsersSocialConnections`.
+- Con esto se redujo otra seccion grande de validaciones y lectura de Auth que ya no vive en el archivo principal.
+
+## Avance inicial 22
+
+- Backend: se movieron los triggers de contenido que actualizan contadores y limpian media a `functions/src/contentRuntimeUtils.ts`.
+- `index.ts` ahora solo delega `onContentCreated` y `onContentDeleted`.
+- Esto saca del archivo principal otra pieza de mantenimiento del contenido comunitario y deja la orquestacion mas limpia.
+
+## Avance inicial 23
+
+- Backend: se movio la sincronizacion de noticias oficiales y publicaciones de comunidad a `functions/src/contentSyncRuntimeUtils.ts`.
+- `index.ts` ahora solo delega `onOfficialNewsReceived` y `onCommunityPostsReceived`.
+- Esto reduce bastante el bloque mas grande restante del archivo principal y deja mas aislada la logica de ingestión desde RTDB.
+
+## Avance inicial 24
+
+- Backend: se movieron las miniaturas de comunidad y la subida de imagenes al hosting a `functions/src/contentImageRuntimeUtils.ts`.
+- `index.ts` ahora solo delega `onCommunityPostImageFinalized` y `uploadCommunityImageToHosting`.
+- Esto saca del archivo principal la ultima parte pesada de media/archivos temporales y deja la seccion de imagenes mejor encapsulada.
+
+## Avance inicial 25
+
+- Backend: se movio la purga programada de notificaciones a `functions/src/notificationRuntimeUtils.ts`.
+- `index.ts` ahora solo delega `purgeOldNotifications`.
+- Esto completa otra tarea de mantenimiento que ya no necesita vivir en el archivo principal.
+
+## Backend finalizado
+
+- El backend quedo reorganizado por modulos en `functions/src`.
+- `index.ts` quedo como capa de orquestacion ligera, con la logica pesada movida a utilidades dedicadas.
+- Las funciones principales fueron compiladas y validadas con exito.
+- El siguiente foco recomendado es el frontend, porque ahi esta la mayor mejora perceptible para carga y fluidez.
+
 ---
 
 ## Etapa 1: Medir antes de tocar

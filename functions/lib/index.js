@@ -3,311 +3,32 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.onAdEventCreated = exports.purgeOldNotifications = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onCommunityPostsReceived = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.grantLotteryUserExtraTickets = exports.listLotteriesForAdmin = exports.getLotteryUserTicketExtras = exports.getUsersSocialConnections = exports.updateUserManagement = exports.markAllNotificationsRead = exports.markNotificationRead = exports.sendTestPushToAllUsers = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateHomeFeedPreference = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.refreshSecretRankings = exports.refreshSecretRankingsCallable = exports.moderateSecretCallable = exports.getSecretModerationQueueCallable = exports.reportSecretCallable = exports.createSecretCommentCallable = exports.voteSecretCallable = exports.createSecretCallable = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = void 0;
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
-const path = require("path");
-const os = require("os");
-const fs = require("fs/promises");
-const stream_1 = require("stream");
 const contentUtils_1 = require("./contentUtils");
 const notificationUtils_1 = require("./notificationUtils");
 const secretUtils_1 = require("./secretUtils");
 const lotteryUtils_1 = require("./lotteryUtils");
 const userUtils_1 = require("./userUtils");
 const moduleUtils_1 = require("./moduleUtils");
+const hostingUtils_1 = require("./hostingUtils");
+const commentUtils_1 = require("./commentUtils");
+const contentRuntimeUtils_1 = require("./contentRuntimeUtils");
+const contentImageRuntimeUtils_1 = require("./contentImageRuntimeUtils");
+const contentSyncRuntimeUtils_1 = require("./contentSyncRuntimeUtils");
+const surveyRuntimeUtils_1 = require("./surveyRuntimeUtils");
+const adRuntimeUtils_1 = require("./adRuntimeUtils");
+const lotteryAdminRuntimeUtils_1 = require("./lotteryAdminRuntimeUtils");
+const userAdminRuntimeUtils_1 = require("./userAdminRuntimeUtils");
+const lotteryRuntimeUtils_1 = require("./lotteryRuntimeUtils");
 const notificationRuntimeUtils_1 = require("./notificationRuntimeUtils");
+const notificationRuntimeUtils_2 = require("./notificationRuntimeUtils");
 admin.initializeApp();
 const db = admin.firestore();
-const MAX_SURVEY_OPTIONS_SELECTED = 10;
-const SURVEY_COMPLETE_BATCH_SIZE = 200;
-const COMMUNITY_THUMB_MAX_SIDE = 480;
-const MAX_HOSTING_UPLOAD_BYTES = 6 * 1024 * 1024;
 const LIKE_WRITER_CALLABLE = 'callable_toggle_v1';
 const COMMUNITY_THUMBNAIL_BUCKET = process.env.COMMUNITY_IMAGES_BUCKET || 'cdeluar-ddefc-storage';
 const CONTENT_SLUG_MAX_LENGTH = 96;
 const NOTIFICATION_PAGE_SIZE = 300;
 const NOTIFICATION_RETENTION_DAYS = 30;
 const NOTIFICATION_DEVICE_ID_MAX_LENGTH = 120;
-const loadFtpClient = async () => {
-    const ftpModule = await Promise.resolve().then(() => require('basic-ftp'));
-    return ftpModule.default
-        ? ftpModule.default
-        : ftpModule;
-};
-const loadSharp = async () => {
-    var _a;
-    const sharpModule = await Promise.resolve().then(() => require('sharp'));
-    return ((_a = sharpModule.default) !== null && _a !== void 0 ? _a : sharpModule);
-};
-const buildCommentRef = (contentId, commentId) => db.collection('content').doc(contentId).collection('comments').doc(commentId);
-const sanitizeOptionalUrl = (value, fieldName) => {
-    const raw = (0, userUtils_1.sanitizeBoundedString)(value, 240);
-    if (!raw)
-        return '';
-    const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
-    try {
-        const parsed = new URL(withProtocol);
-        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-            throw new Error('unsupported-protocol');
-        }
-        return parsed.toString().slice(0, 240);
-    }
-    catch (_a) {
-        throw new functions.https.HttpsError('invalid-argument', `${fieldName} debe ser una URL valida (http/https).`);
-    }
-};
-const isExpired = (value) => {
-    if (!value)
-        return false;
-    if (value instanceof admin.firestore.Timestamp) {
-        return value.toMillis() <= Date.now();
-    }
-    if (value instanceof Date) {
-        return value.getTime() <= Date.now();
-    }
-    return false;
-};
-const ensureImageMime = (value) => {
-    const mime = typeof value === 'string' ? value.trim().toLowerCase() : '';
-    if (!mime.startsWith('image/')) {
-        throw new functions.https.HttpsError('invalid-argument', 'Formato de archivo invalido.');
-    }
-    return mime;
-};
-const decodeBase64Payload = (value) => {
-    if (typeof value !== 'string' || !value.trim()) {
-        throw new functions.https.HttpsError('invalid-argument', 'No se recibio imagen.');
-    }
-    const sanitized = value.replace(/^data:[^;]+;base64,/, '').trim();
-    const buffer = Buffer.from(sanitized, 'base64');
-    if (buffer.length === 0) {
-        throw new functions.https.HttpsError('invalid-argument', 'No se pudo decodificar la imagen.');
-    }
-    if (buffer.length > MAX_HOSTING_UPLOAD_BYTES) {
-        throw new functions.https.HttpsError('invalid-argument', 'La imagen supera el limite permitido.');
-    }
-    return buffer;
-};
-const sanitizePathSegment = (value) => {
-    const sanitized = value
-        .replace(/[^a-zA-Z0-9/_.-]/g, '-')
-        .replace(/\.\.+/g, '.')
-        .replace(/\/+/g, '/')
-        .replace(/^\//, '')
-        .replace(/\/$/, '');
-    return sanitized;
-};
-const getHostingFtpConfig = () => {
-    const host = process.env.HOSTING_FTP_HOST || '';
-    const user = process.env.HOSTING_FTP_USER || '';
-    const password = process.env.HOSTING_FTP_PASSWORD || '';
-    const basePath = process.env.HOSTING_FTP_BASE_PATH || '/domains/bot.cdelu.io/public_html/images';
-    const publicBaseUrl = process.env.HOSTING_PUBLIC_BASE_URL || 'https://bot.cdelu.io/images';
-    const port = Number(process.env.HOSTING_FTP_PORT || 21);
-    if (!host || !user || !password) {
-        throw new functions.https.HttpsError('failed-precondition', 'Falta configurar credenciales FTP del hosting.');
-    }
-    return {
-        host,
-        user,
-        password,
-        port: Number.isFinite(port) ? port : 21,
-        basePath,
-        publicBaseUrl: publicBaseUrl.replace(/\/$/, '')
-    };
-};
-const getHostingAvatarFtpConfig = () => {
-    const host = process.env.HOSTING_FTP_HOST || '';
-    const user = process.env.HOSTING_FTP_USER || '';
-    const password = process.env.HOSTING_FTP_PASSWORD || '';
-    const basePath = process.env.HOSTING_FTP_AVATAR_BASE_PATH || '/domains/bot.cdelu.io/public_html';
-    const publicBaseUrl = process.env.HOSTING_AVATAR_PUBLIC_BASE_URL || 'https://bot.cdelu.io';
-    const port = Number(process.env.HOSTING_FTP_PORT || 21);
-    if (!host || !user || !password) {
-        throw new functions.https.HttpsError('failed-precondition', 'Falta configurar credenciales FTP del hosting.');
-    }
-    return {
-        host,
-        user,
-        password,
-        port: Number.isFinite(port) ? port : 21,
-        basePath,
-        publicBaseUrl: publicBaseUrl.replace(/\/$/, '')
-    };
-};
-const normalizeHostedRelativePath = (value) => {
-    return value
-        .replace(/\\/g, '/')
-        .replace(/^\/+/, '')
-        .replace(/\/+/g, '/')
-        .trim();
-};
-const extractHostedRelativePaths = (value, publicBaseUrl) => {
-    const results = new Set();
-    const publicBase = publicBaseUrl.replace(/\/+$/, '');
-    const pushPath = (candidate) => {
-        const normalized = normalizeHostedRelativePath(candidate);
-        if (!normalized || normalized.includes('..'))
-            return;
-        results.add(normalized.replace(/^avatars\//i, 'AVATAR/'));
-    };
-    const pushFromString = (raw) => {
-        const value = raw.trim();
-        if (!value)
-            return;
-        const directPath = normalizeHostedRelativePath(value);
-        if (/^(posts|AVATAR|avatars)\//i.test(directPath)) {
-            pushPath(directPath);
-            return;
-        }
-        if (/^https?:\/\//i.test(value)) {
-            try {
-                const urlObj = new URL(value);
-                const baseObj = new URL(publicBase);
-                if (urlObj.origin !== baseObj.origin)
-                    return;
-                const basePath = normalizeHostedRelativePath(baseObj.pathname);
-                let relativePath = normalizeHostedRelativePath(urlObj.pathname);
-                if (basePath && relativePath.toLowerCase().startsWith(`${basePath.toLowerCase()}/`)) {
-                    relativePath = relativePath.slice(basePath.length + 1);
-                }
-                else if (relativePath.toLowerCase().startsWith('images/')) {
-                    relativePath = relativePath.slice('images/'.length);
-                }
-                else if (relativePath.toLowerCase().startsWith('imagenes/')) {
-                    relativePath = relativePath.slice('imagenes/'.length);
-                }
-                if (relativePath) {
-                    pushPath(decodeURIComponent(relativePath));
-                }
-            }
-            catch (_a) {
-                const base = publicBase.replace(/\/+$/, '');
-                if (value.startsWith(`${base}/`)) {
-                    pushPath(decodeURIComponent(value.slice(base.length + 1)));
-                }
-            }
-        }
-    };
-    const visit = (entry) => {
-        if (!entry)
-            return;
-        if (typeof entry === 'string') {
-            pushFromString(entry);
-            return;
-        }
-        if (Array.isArray(entry)) {
-            for (const item of entry)
-                visit(item);
-            return;
-        }
-        if (typeof entry === 'object') {
-            const imageEntry = entry;
-            pushFromString(String(imageEntry.path || ''));
-            pushFromString(String(imageEntry.thumbPath || ''));
-            pushFromString(String(imageEntry.url || ''));
-            pushFromString(String(imageEntry.thumbUrl || ''));
-            pushFromString(String(imageEntry.image || ''));
-            pushFromString(String(imageEntry.imageUrl || ''));
-            pushFromString(String(imageEntry.thumbnail || ''));
-            pushFromString(String(imageEntry.thumbnailUrl || ''));
-            pushFromString(String(imageEntry.imgMiniatura || ''));
-            pushFromString(String(imageEntry.img_miniatura || ''));
-            pushFromString(String(imageEntry.coverImage || ''));
-            pushFromString(String(imageEntry.coverThumbnailUrl || ''));
-        }
-    };
-    visit(value);
-    return Array.from(results);
-};
-const deriveHostingThumbRelativePath = (relativePath) => {
-    const normalized = normalizeHostedRelativePath(relativePath);
-    if (!normalized)
-        return null;
-    const ext = path.posix.extname(normalized);
-    if (!ext)
-        return null;
-    const dir = path.posix.dirname(normalized);
-    const baseName = path.posix.basename(normalized, ext);
-    if (baseName.endsWith('_t') || baseName.endsWith('_') || baseName.endsWith('-thumb')) {
-        return normalized;
-    }
-    if (baseName.endsWith('_o')) {
-        return path.posix.join(dir, `${baseName.slice(0, -2)}_t${ext}`);
-    }
-    return path.posix.join(dir, `${baseName}_${ext}`);
-};
-const cleanupHostingRelativePath = async (ftpClient, ftpConfig, relativePath) => {
-    const cleaned = normalizeHostedRelativePath(relativePath);
-    if (!cleaned || cleaned.includes('..'))
-        return false;
-    const remotePath = `${ftpConfig.basePath}/${cleaned}`.replace(/\/+/g, '/');
-    try {
-        await ftpClient.remove(remotePath);
-        return true;
-    }
-    catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (!/not found|no such file|550/i.test(message)) {
-            console.warn(`No se pudo borrar archivo remoto ${cleaned}:`, error);
-        }
-        return false;
-    }
-};
-const cleanupCommunityPostHostingMedia = async (postData) => {
-    var _a, _b, _c, _d, _e;
-    const publicBaseUrl = process.env.HOSTING_PUBLIC_BASE_URL || 'https://bot.cdelu.io/images';
-    const ftpConfig = getHostingFtpConfig();
-    const paths = new Set();
-    const addPaths = (value) => {
-        for (const candidate of extractHostedRelativePaths(value, publicBaseUrl)) {
-            paths.add(candidate);
-        }
-    };
-    addPaths(postData.imagesV2);
-    addPaths(postData.images);
-    addPaths(postData.imgMiniatura);
-    addPaths(postData.img_miniatura);
-    addPaths(postData.thumbnail);
-    addPaths(postData.thumbnailUrl);
-    addPaths(postData.coverThumbnailUrl);
-    addPaths((_a = postData.custom_fields) === null || _a === void 0 ? void 0 : _a.image);
-    addPaths((_b = postData.custom_fields) === null || _b === void 0 ? void 0 : _b.imgMiniatura);
-    addPaths((_c = postData.custom_fields) === null || _c === void 0 ? void 0 : _c.img_miniatura);
-    addPaths((_d = postData.custom_fields) === null || _d === void 0 ? void 0 : _d.thumbnail);
-    addPaths((_e = postData.custom_fields) === null || _e === void 0 ? void 0 : _e.thumbnailUrl);
-    for (const imageEntry of Array.isArray(postData.imagesV2) ? postData.imagesV2 : []) {
-        if (!imageEntry || typeof imageEntry !== 'object')
-            continue;
-        const entry = imageEntry;
-        if (typeof entry.path === 'string')
-            paths.add(normalizeHostedRelativePath(entry.path));
-        if (typeof entry.thumbPath === 'string')
-            paths.add(normalizeHostedRelativePath(entry.thumbPath));
-    }
-    const derivedThumbs = Array.from(paths)
-        .map((relativePath) => deriveHostingThumbRelativePath(relativePath))
-        .filter((relativePath) => Boolean(relativePath));
-    for (const relativePath of derivedThumbs) {
-        paths.add(relativePath);
-    }
-    const { Client } = await loadFtpClient();
-    const ftpClient = new Client(30000);
-    ftpClient.ftp.verbose = false;
-    try {
-        await ftpClient.access({
-            host: ftpConfig.host,
-            user: ftpConfig.user,
-            password: ftpConfig.password,
-            port: ftpConfig.port,
-            secure: false
-        });
-        for (const relativePath of paths) {
-            await cleanupHostingRelativePath(ftpClient, ftpConfig, relativePath);
-        }
-    }
-    finally {
-        ftpClient.close();
-    }
-};
 // 1. Likes
 exports.onLikeAdded = functions.firestore
     .document('content/{contentId}/likes/{userId}')
@@ -861,29 +582,9 @@ exports.reportSecretCallable = functions.https.onCall(async (data, context) => {
         };
     });
 });
-const SECRET_MODERATION_STATUS_VALUES = new Set([
-    'all',
-    'active',
-    'hidden_auto',
-    'hidden_admin',
-    'blocked'
-]);
-const normalizeSecretModerationStatusFilter = (value) => {
-    const normalized = (0, userUtils_1.sanitizeBoundedString)(value, 40).toLowerCase();
-    if (SECRET_MODERATION_STATUS_VALUES.has(normalized))
-        return normalized;
-    return 'all';
-};
-const normalizeSecretModerationAction = (value) => {
-    const normalized = (0, userUtils_1.sanitizeBoundedString)(value, 40).toLowerCase();
-    if (normalized === 'hide' || normalized === 'restore' || normalized === 'block') {
-        return normalized;
-    }
-    throw new functions.https.HttpsError('invalid-argument', 'action debe ser hide, restore o block.');
-};
 exports.getSecretModerationQueueCallable = functions.https.onCall(async (data, context) => {
     await (0, userUtils_1.assertAdminUser)(db, context.auth);
-    const statusFilter = normalizeSecretModerationStatusFilter(data === null || data === void 0 ? void 0 : data.status);
+    const statusFilter = (0, secretUtils_1.normalizeSecretModerationStatusFilter)(data === null || data === void 0 ? void 0 : data.status);
     const limitValue = (0, lotteryUtils_1.clampInteger)(data === null || data === void 0 ? void 0 : data.limit, 10, 200, 80);
     let moderationQuery = db
         .collection('content')
@@ -934,7 +635,7 @@ exports.moderateSecretCallable = functions.https.onCall(async (data, context) =>
     if (!secretId) {
         throw new functions.https.HttpsError('invalid-argument', 'secretId es obligatorio.');
     }
-    const action = normalizeSecretModerationAction(data === null || data === void 0 ? void 0 : data.action);
+    const action = (0, secretUtils_1.normalizeSecretModerationAction)(data === null || data === void 0 ? void 0 : data.action);
     const reasonInput = (0, secretUtils_1.sanitizeSecretText)(data === null || data === void 0 ? void 0 : data.reason, 180);
     const reviewerUid = ((_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid) || 'admin';
     const secretRef = db.collection('content').doc(secretId);
@@ -1078,7 +779,7 @@ exports.onReplyCreated = functions.firestore
     if (!replyData || !replyData.userId || replyData.deletedAt != null)
         return;
     try {
-        const commentRef = buildCommentRef(contentId, commentId);
+        const commentRef = (0, commentUtils_1.buildCommentRef)(db, contentId, commentId);
         await commentRef.set({
             stats: {
                 repliesCount: admin.firestore.FieldValue.increment(1)
@@ -1140,7 +841,7 @@ exports.onReplyUpdated = functions.firestore
         return;
     const delta = isAlive ? 1 : -1;
     try {
-        await buildCommentRef(contentId, commentId).set({
+        await (0, commentUtils_1.buildCommentRef)(db, contentId, commentId).set({
             stats: {
                 repliesCount: admin.firestore.FieldValue.increment(delta)
             },
@@ -1217,7 +918,7 @@ exports.updateMyProfile = functions.https.onCall(async (data, context) => {
     }
     const bio = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.bio, 280);
     const location = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.location, 120);
-    const website = sanitizeOptionalUrl(data === null || data === void 0 ? void 0 : data.website, 'website');
+    const website = (0, hostingUtils_1.sanitizeOptionalUrl)(data === null || data === void 0 ? void 0 : data.website, 'website');
     const profilePictureUrl = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.profilePictureUrl, 1200);
     const userRef = db.collection('users').doc(userId);
     const userPublicRef = db.collection('users_public').doc(userId);
@@ -1479,48 +1180,59 @@ exports.unregisterNotificationDevice = functions.https.onCall(async (data, conte
     };
 });
 exports.sendTestPushToAllUsers = functions.https.onCall(async (data, context) => {
-    await (0, userUtils_1.assertAdminUser)(db, context.auth);
-    const title = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.title, 120) || 'Prueba de notificaciones';
-    const body = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.body, 220) || 'Este es un test push para todos los usuarios.';
-    const targetPath = (0, notificationUtils_1.safeNotificationPath)(data === null || data === void 0 ? void 0 : data.targetPath, '/notificaciones');
-    const platformRaw = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.platform, 20).toLowerCase();
+    return (0, notificationRuntimeUtils_2.sendTestPushToAllUsersInternal)(db, data, context);
+    /*
+    await assertAdminUser(db, context.auth);
+  
+    const title = sanitizeBoundedString(data?.title, 120) || 'Prueba de notificaciones';
+    const body = sanitizeBoundedString(data?.body, 220) || 'Este es un test push para todos los usuarios.';
+    const targetPath = safeNotificationPath(data?.targetPath, '/notificaciones');
+    const platformRaw = sanitizeBoundedString(data?.platform, 20).toLowerCase();
+  
     const topic = platformRaw === 'android'
-        ? 'android_users'
-        : platformRaw === 'web'
-            ? 'web_users'
-            : 'all_users';
+      ? 'android_users'
+      : platformRaw === 'web'
+        ? 'web_users'
+        : 'all_users';
+  
     if (platformRaw && platformRaw !== 'android' && platformRaw !== 'web' && platformRaw !== 'all') {
-        throw new functions.https.HttpsError('invalid-argument', 'platform debe ser "all", "android" o "web".');
+      throw new functions.https.HttpsError(
+        'invalid-argument',
+        'platform debe ser "all", "android" o "web".'
+      );
     }
+  
     const messageId = await admin.messaging().send({
-        topic,
+      topic,
+      notification: {
+        title,
+        body
+      },
+      data: {
+        type: 'admin_broadcast_test',
+        targetPath,
+        sentAt: new Date().toISOString()
+      },
+      android: {
+        priority: 'high',
         notification: {
-            title,
-            body
-        },
-        data: {
-            type: 'admin_broadcast_test',
-            targetPath,
-            sentAt: new Date().toISOString()
-        },
-        android: {
-            priority: 'high',
-            notification: {
-                channelId: notificationUtils_1.ANDROID_PUSH_CHANNEL_ID,
-                sound: 'default'
-            }
-        },
-        webpush: {
-            fcmOptions: {
-                link: targetPath
-            }
+          channelId: ANDROID_PUSH_CHANNEL_ID,
+          sound: 'default'
         }
+      },
+      webpush: {
+        fcmOptions: {
+          link: targetPath
+        }
+      }
     });
+  
     return {
-        ok: true,
-        topic,
-        messageId
+      ok: true,
+      topic,
+      messageId
     };
+    */
 });
 exports.markNotificationRead = functions.https.onCall(async (data, context) => {
     var _a, _b;
@@ -1587,293 +1299,19 @@ exports.markAllNotificationsRead = functions.https.onCall(async (_data, context)
     };
 });
 exports.updateUserManagement = functions.https.onCall(async (data, context) => {
-    var _a;
-    await (0, userUtils_1.assertStaffUser)(db, context.auth);
-    const requesterAuth = context.auth;
-    const targetUserId = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.userId, 128);
-    if (!targetUserId) {
-        throw new functions.https.HttpsError('invalid-argument', 'userId es obligatorio.');
-    }
-    const nextRole = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.rol, 40);
-    const hasRoleUpdate = nextRole.length > 0;
-    const allowedRoles = new Set([
-        'usuario',
-        'colaborador',
-        'admin',
-        'administrador',
-        'super_admin',
-        'superadmin',
-        'Sistema-no-user',
-        'sistema-no-user'
-    ]);
-    if (hasRoleUpdate && !allowedRoles.has(nextRole)) {
-        throw new functions.https.HttpsError('invalid-argument', 'Rol invalido.');
-    }
-    const hasVerifiedUpdate = typeof (data === null || data === void 0 ? void 0 : data.isVerified) === 'boolean';
-    const nextIsVerified = hasVerifiedUpdate ? Boolean(data.isVerified) : null;
-    const nextNombreRaw = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.nombre, 120);
-    const nextEmailRaw = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.email, 320).toLowerCase();
-    const usernameCandidate = (0, userUtils_1.normalizeUsernameCandidate)(data === null || data === void 0 ? void 0 : data.username);
-    const hasCoreFieldInput = (typeof (data === null || data === void 0 ? void 0 : data.nombre) === 'string' ||
-        typeof (data === null || data === void 0 ? void 0 : data.username) === 'string' ||
-        typeof (data === null || data === void 0 ? void 0 : data.email) === 'string');
-    if (typeof (data === null || data === void 0 ? void 0 : data.username) === 'string' && usernameCandidate.length === 0) {
-        throw new functions.https.HttpsError('invalid-argument', 'Username invalido.');
-    }
-    if (typeof (data === null || data === void 0 ? void 0 : data.username) === 'string' &&
-        (usernameCandidate.length < userUtils_1.USERNAME_MIN_LENGTH ||
-            usernameCandidate.length > userUtils_1.USERNAME_MAX_LENGTH ||
-            !userUtils_1.USERNAME_REGEX.test(usernameCandidate))) {
-        throw new functions.https.HttpsError('invalid-argument', 'Username invalido. Usa entre 3 y 30 caracteres: a-z, 0-9 y _.');
-    }
-    if (typeof (data === null || data === void 0 ? void 0 : data.nombre) === 'string' && !nextNombreRaw) {
-        throw new functions.https.HttpsError('invalid-argument', 'Nombre invalido.');
-    }
-    if (typeof (data === null || data === void 0 ? void 0 : data.email) === 'string') {
-        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        if (!emailRegex.test(nextEmailRaw)) {
-            throw new functions.https.HttpsError('invalid-argument', 'Email invalido.');
-        }
-    }
-    const userRef = db.collection('users').doc(targetUserId);
-    const userSnap = await userRef.get();
-    if (!userSnap.exists) {
-        throw new functions.https.HttpsError('not-found', 'Usuario no encontrado.');
-    }
-    const currentData = userSnap.data() || {};
-    const currentNombre = (0, userUtils_1.sanitizeBoundedString)(currentData.nombre, 120);
-    const currentEmail = (0, userUtils_1.sanitizeBoundedString)(currentData.email, 320).toLowerCase();
-    const currentUsernameLower = (0, userUtils_1.sanitizeBoundedString)(currentData.usernameLower, userUtils_1.USERNAME_MAX_LENGTH);
-    const nextUsernameLower = typeof (data === null || data === void 0 ? void 0 : data.username) === 'string'
-        ? usernameCandidate
-        : currentUsernameLower;
-    const nextNombre = typeof (data === null || data === void 0 ? void 0 : data.nombre) === 'string' ? nextNombreRaw : currentNombre;
-    const nextEmail = typeof (data === null || data === void 0 ? void 0 : data.email) === 'string' ? nextEmailRaw : currentEmail;
-    const willUpdateCoreFields = hasCoreFieldInput && (nextNombre !== currentNombre ||
-        nextEmail !== currentEmail ||
-        nextUsernameLower !== currentUsernameLower);
-    if (willUpdateCoreFields) {
-        (0, userUtils_1.assertSystemAdminUser)(requesterAuth);
-    }
-    if (nextUsernameLower !== currentUsernameLower) {
-        const usernameRef = db.collection('usernames').doc(nextUsernameLower);
-        const usernameSnap = await usernameRef.get();
-        if (usernameSnap.exists && ((_a = usernameSnap.data()) === null || _a === void 0 ? void 0 : _a.uid) !== targetUserId) {
-            throw new functions.https.HttpsError('already-exists', 'Ese username ya esta en uso.');
-        }
-    }
-    const updates = {
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    };
-    if (hasRoleUpdate) {
-        updates.rol = nextRole;
-    }
-    if (hasVerifiedUpdate) {
-        updates.isVerified = nextIsVerified;
-    }
-    if (willUpdateCoreFields) {
-        updates.nombre = nextNombre;
-        updates.email = nextEmail;
-        updates.username = nextUsernameLower;
-        updates.usernameLower = nextUsernameLower;
-    }
-    await userRef.set(updates, { merge: true });
-    if (willUpdateCoreFields && nextEmail !== currentEmail) {
-        await admin.auth().updateUser(targetUserId, { email: nextEmail });
-    }
-    return {
-        ok: true,
-        userId: targetUserId,
-        updated: {
-            rol: hasRoleUpdate ? nextRole : currentData.rol,
-            isVerified: hasVerifiedUpdate ? nextIsVerified : currentData.isVerified,
-            nombre: willUpdateCoreFields ? nextNombre : currentData.nombre,
-            email: willUpdateCoreFields ? nextEmail : currentData.email,
-            username: willUpdateCoreFields ? nextUsernameLower : currentData.username
-        }
-    };
+    return (0, userAdminRuntimeUtils_1.updateUserManagementInternal)(db, data, context);
 });
 exports.getUsersSocialConnections = functions.https.onCall(async (data, context) => {
-    await (0, userUtils_1.assertStaffUser)(db, context.auth);
-    const rawUserIds = Array.isArray(data === null || data === void 0 ? void 0 : data.userIds) ? data.userIds : [];
-    const normalizedUserIds = rawUserIds
-        .map((value) => (0, userUtils_1.sanitizeBoundedString)(value, 128))
-        .filter((value) => value.length > 0);
-    const userIds = Array.from(new Set(normalizedUserIds)).slice(0, 50);
-    if (userIds.length === 0) {
-        return {
-            ok: true,
-            records: {}
-        };
-    }
-    const records = {};
-    await Promise.all(userIds.map(async (uid) => {
-        try {
-            const userRecord = await admin.auth().getUser(uid);
-            const providerIds = Array.from(new Set((userRecord.providerData || [])
-                .map((provider) => (0, userUtils_1.sanitizeBoundedString)(provider.providerId, 64))
-                .filter((providerId) => providerId.length > 0)));
-            records[uid] = { providerIds };
-        }
-        catch (error) {
-            if ((error === null || error === void 0 ? void 0 : error.code) === 'auth/user-not-found') {
-                records[uid] = { providerIds: [] };
-                return;
-            }
-            console.error(`Error loading auth providers for uid ${uid}:`, error);
-        }
-    }));
-    return {
-        ok: true,
-        records
-    };
+    return (0, userAdminRuntimeUtils_1.getUsersSocialConnectionsInternal)(db, data, context);
 });
 exports.getLotteryUserTicketExtras = functions.https.onCall(async (data, context) => {
-    var _a;
-    const requesterUid = ((_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid) || '';
-    if (!requesterUid) {
-        throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para consultar tickets extra.');
-    }
-    const requestedUserId = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.userId, 128);
-    const targetUserId = requestedUserId || requesterUid;
-    if (targetUserId !== requesterUid) {
-        await (0, userUtils_1.assertAdminUser)(db, context.auth);
-    }
-    const snapshot = await db
-        .collection(lotteryUtils_1.LOTTERY_USER_EXTRA_TICKETS_COLLECTION)
-        .where('userId', '==', targetUserId)
-        .limit(400)
-        .get();
-    const records = {};
-    for (const docSnap of snapshot.docs) {
-        const row = docSnap.data() || {};
-        const lotteryId = (0, userUtils_1.sanitizeBoundedString)(row.lotteryId, 128);
-        if (!lotteryId)
-            continue;
-        const extraTickets = (0, lotteryUtils_1.normalizeLotteryExtraTickets)(row.extraTickets);
-        if (extraTickets <= 0)
-            continue;
-        records[lotteryId] = extraTickets;
-    }
-    return {
-        ok: true,
-        userId: targetUserId,
-        records
-    };
+    return (0, lotteryAdminRuntimeUtils_1.getLotteryUserTicketExtrasInternal)(db, data, context);
 });
 exports.listLotteriesForAdmin = functions.https.onCall(async (_data, context) => {
-    await (0, userUtils_1.assertAdminUser)(db, context.auth);
-    const snapshot = await db
-        .collection('lotteries')
-        .where('deletedAt', '==', null)
-        .orderBy('createdAt', 'desc')
-        .limit(300)
-        .get();
-    const lotteries = snapshot.docs.map((lotteryDoc) => {
-        const row = lotteryDoc.data() || {};
-        return {
-            id: lotteryDoc.id,
-            title: (0, userUtils_1.sanitizeBoundedString)(row.title, 150) || '(Sin titulo)',
-            status: (0, userUtils_1.sanitizeBoundedString)(row.status, 40) || 'draft',
-            maxNumber: (0, lotteryUtils_1.normalizeLotteryMaxNumber)(row.maxNumber),
-            maxTicketsPerUser: (0, lotteryUtils_1.normalizeLotteryMaxTicketsPerUser)(row.maxTicketsPerUser)
-        };
-    });
-    return {
-        ok: true,
-        lotteries
-    };
+    return (0, lotteryAdminRuntimeUtils_1.listLotteriesForAdminInternal)(db, context);
 });
 exports.grantLotteryUserExtraTickets = functions.https.onCall(async (data, context) => {
-    var _a, _b;
-    await (0, userUtils_1.assertAdminUser)(db, context.auth);
-    const adminUid = ((_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid) || 'system';
-    const adminEmail = (0, userUtils_1.sanitizeBoundedString)((((_b = context.auth) === null || _b === void 0 ? void 0 : _b.token) || {}).email, 320).toLowerCase();
-    const userId = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.userId, 128);
-    const lotteryId = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.lotteryId, 128);
-    const quantity = (0, lotteryUtils_1.clampInteger)(data === null || data === void 0 ? void 0 : data.quantity, 1, lotteryUtils_1.LOTTERY_MAX_EXTRA_TICKETS_PER_USER, 1);
-    if (!userId) {
-        throw new functions.https.HttpsError('invalid-argument', 'userId es obligatorio.');
-    }
-    if (!lotteryId) {
-        throw new functions.https.HttpsError('invalid-argument', 'lotteryId es obligatorio.');
-    }
-    const userRef = db.collection('users').doc(userId);
-    const lotteryRef = db.collection('lotteries').doc(lotteryId);
-    const extraRef = db
-        .collection(lotteryUtils_1.LOTTERY_USER_EXTRA_TICKETS_COLLECTION)
-        .doc((0, lotteryUtils_1.toLotteryUserExtraDocId)(lotteryId, userId));
-    return db.runTransaction(async (tx) => {
-        var _a;
-        const [userSnap, lotterySnap, extraSnap] = await Promise.all([
-            tx.get(userRef),
-            tx.get(lotteryRef),
-            tx.get(extraRef)
-        ]);
-        if (!userSnap.exists) {
-            throw new functions.https.HttpsError('not-found', 'Usuario no encontrado.');
-        }
-        if (!lotterySnap.exists) {
-            throw new functions.https.HttpsError('not-found', 'Loteria no encontrada.');
-        }
-        const lotteryData = lotterySnap.data() || {};
-        if (lotteryData.deletedAt != null) {
-            throw new functions.https.HttpsError('failed-precondition', 'No se pueden asignar tickets extra en una loteria eliminada.');
-        }
-        const currentExtra = (0, lotteryUtils_1.normalizeLotteryExtraTickets)((_a = extraSnap.data()) === null || _a === void 0 ? void 0 : _a.extraTickets);
-        const nextExtra = (0, lotteryUtils_1.normalizeLotteryExtraTickets)(currentExtra + quantity);
-        if (nextExtra === currentExtra) {
-            throw new functions.https.HttpsError('failed-precondition', 'No se puede aumentar mas el cupo de tickets extra para este usuario.');
-        }
-        const maxNumber = (0, lotteryUtils_1.normalizeLotteryMaxNumber)(lotteryData.maxNumber);
-        const baseLimit = (0, lotteryUtils_1.normalizeLotteryMaxTicketsPerUser)(lotteryData.maxTicketsPerUser);
-        const effectiveLimit = (0, lotteryUtils_1.getLotteryEffectiveMaxTickets)(baseLimit, nextExtra, maxNumber);
-        const lotteryTitle = (0, userUtils_1.sanitizeBoundedString)(lotteryData.title, 150) || 'Loteria';
-        const payload = {
-            userId,
-            lotteryId,
-            extraTickets: nextExtra,
-            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-            updatedBy: adminUid,
-            updatedByEmail: adminEmail
-        };
-        if (!extraSnap.exists) {
-            payload.createdAt = admin.firestore.FieldValue.serverTimestamp();
-        }
-        tx.set(extraRef, payload, { merge: true });
-        const notificationRef = db.collection('users').doc(userId).collection('notifications').doc();
-        const notificationMessage = `Se te agregaron ${nextExtra - currentExtra} ticket(s) extra en la loteria "${lotteryTitle}".`;
-        tx.set(notificationRef, {
-            type: 'system',
-            recipientUserId: userId,
-            actorUserId: adminUid,
-            actorName: 'Sistema',
-            actorUsername: 'sistema',
-            actorProfilePictureUrl: '',
-            contentId: lotteryId,
-            contentModule: 'community',
-            contentPublicRef: '',
-            contentSlug: '',
-            commentId: '',
-            replyId: '',
-            targetPath: '/loteria',
-            systemMessage: notificationMessage,
-            eventCount: 1,
-            isRead: false,
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-            lastEventAt: admin.firestore.FieldValue.serverTimestamp()
-        });
-        return {
-            ok: true,
-            userId,
-            lotteryId,
-            added: nextExtra - currentExtra,
-            extraTickets: nextExtra,
-            baseLimit,
-            effectiveLimit
-        };
-    });
+    return (0, lotteryAdminRuntimeUtils_1.grantLotteryUserExtraTicketsInternal)(db, data, context);
 });
 exports.syncPublicUserProfile = functions.firestore
     .document('users/{userId}')
@@ -2101,1031 +1539,983 @@ exports.onContentSlugSync = functions.firestore
 exports.onContentCreated = functions.firestore
     .document('content/{contentId}')
     .onCreate(async (snap, context) => {
+    return (0, contentRuntimeUtils_1.onContentCreatedInternal)(db, snap);
+    /*
     const contentData = snap.data();
-    if (!contentData)
-        return;
-    const isCommunityPost = contentData.module === 'community' || contentData.type === 'post';
-    if (!isCommunityPost || !contentData.userId)
-        return;
+    if (!contentData) return;
+
+    const isCommunityPost =
+      contentData.module === 'community' || contentData.type === 'post';
+    if (!isCommunityPost || !contentData.userId) return;
+
     try {
-        await db.collection('users').doc(contentData.userId).update({
-            'stats.postsCount': admin.firestore.FieldValue.increment(1)
-        });
+      await db.collection('users').doc(contentData.userId).update({
+        'stats.postsCount': admin.firestore.FieldValue.increment(1)
+      });
+    } catch (error) {
+      console.error(`âŒ Content created increment failed:`, error);
     }
-    catch (error) {
-        console.error(`âŒ Content created increment failed:`, error);
-    }
+    */
 });
 exports.onContentDeleted = functions.firestore
     .document('content/{contentId}')
     .onUpdate(async (change, context) => {
+    return (0, contentRuntimeUtils_1.onContentDeletedInternal)(db, change, context);
+    /*
     const { contentId } = context.params;
     const beforeData = change.before.data();
     const afterData = change.after.data();
-    const isCommunityPost = afterData.module === 'community' || afterData.type === 'post';
-    if (!isCommunityPost || !afterData.userId)
-        return;
+
+    const isCommunityPost =
+      afterData.module === 'community' || afterData.type === 'post';
+    if (!isCommunityPost || !afterData.userId) return;
+
     try {
-        const wasAlive = beforeData.deletedAt == null;
-        const isNowDeleted = afterData.deletedAt != null;
-        if (wasAlive && isNowDeleted) {
-            try {
-                await cleanupCommunityPostHostingMedia(afterData);
-                console.log(`🧹 Community media deleted for ${contentId}`);
-            }
-            catch (mediaError) {
-                console.error(`⚠️ Failed to delete community media for ${contentId}:`, mediaError);
-            }
-            const userId = afterData.userId;
-            await db.collection('users').doc(userId).update({
-                'stats.postsCount': admin.firestore.FieldValue.increment(-1),
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            });
-            console.log(`âœ… Content soft-deleted: ${contentId}, postsCount decremented`);
+      const wasAlive = beforeData.deletedAt == null;
+      const isNowDeleted = afterData.deletedAt != null;
+
+      if (wasAlive && isNowDeleted) {
+        try {
+          await cleanupCommunityPostHostingMedia(afterData);
+          console.log(`🧹 Community media deleted for ${contentId}`);
+        } catch (mediaError) {
+          console.error(`⚠️ Failed to delete community media for ${contentId}:`, mediaError);
         }
-        else if (!wasAlive && !isNowDeleted) {
-            const userId = afterData.userId;
-            await db.collection('users').doc(userId).update({
-                'stats.postsCount': admin.firestore.FieldValue.increment(1),
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            });
-            console.log(`âœ… Content restored: ${contentId}, postsCount incremented`);
-        }
+
+        const userId = afterData.userId;
+        await db.collection('users').doc(userId).update({
+          'stats.postsCount': admin.firestore.FieldValue.increment(-1),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        console.log(`âœ… Content soft-deleted: ${contentId}, postsCount decremented`);
+      } else if (!wasAlive && !isNowDeleted) {
+        const userId = afterData.userId;
+        await db.collection('users').doc(userId).update({
+          'stats.postsCount': admin.firestore.FieldValue.increment(1),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        console.log(`âœ… Content restored: ${contentId}, postsCount incremented`);
+      }
+    } catch (error) {
+      console.error(`âŒ Content deletion handling failed:`, error);
     }
-    catch (error) {
-        console.error(`âŒ Content deletion handling failed:`, error);
-    }
+    */
 });
 // 5. IntegraciÃ³n Oficial de Noticias desde WordPress via Realtime Database
 exports.onOfficialNewsReceived = functions.database
     .ref('/news/{newsId}')
     .onWrite(async (change, context) => {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m;
+    return (0, contentSyncRuntimeUtils_1.onOfficialNewsReceivedInternal)(db, change, context);
+    /*
     const { newsId } = context.params;
     const afterData = change.after.val();
+
     // Si data es null, significa que fue borrada de RTDB (no borramos de Firestore por seguridad)
     if (!afterData) {
-        console.log(`â„¹ï¸ News ${newsId} was deleted from RTDB. Ignoring in Firestore. (Idempotency)`);
-        return null;
+      console.log(`â„¹ï¸ News ${newsId} was deleted from RTDB. Ignoring in Firestore. (Idempotency)`);
+      return null;
     }
+
     try {
-        // Parsear la fecha createdAt si es string (ej: "2024-01-15 10:30:00")
-        // Si no hay fecha o es invÃ¡lida, se usarÃ¡ el Timestamp del servidor.
-        const parseDateCandidate = (value) => {
-            if (!value)
-                return null;
-            if (value instanceof admin.firestore.Timestamp)
-                return value;
-            if (value instanceof Date && !isNaN(value.getTime())) {
-                return admin.firestore.Timestamp.fromDate(value);
-            }
-            if (typeof value === 'number' && Number.isFinite(value)) {
-                const asMs = value > 1e12 ? value : value * 1000;
-                const parsedNumeric = new Date(asMs);
-                if (!isNaN(parsedNumeric.getTime())) {
-                    return admin.firestore.Timestamp.fromDate(parsedNumeric);
-                }
-                return null;
-            }
-            if (typeof value !== 'string')
-                return null;
-            const raw = value.trim();
-            if (!raw)
-                return null;
-            const parsedNative = new Date(raw);
-            if (!isNaN(parsedNative.getTime())) {
-                return admin.firestore.Timestamp.fromDate(parsedNative);
-            }
-            const isoLike = raw.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/);
-            if (isoLike) {
-                const [, y, m, d, h, min, s] = isoLike;
-                const parsedIsoLike = new Date(Number(y), Number(m) - 1, Number(d), Number(h), Number(min), Number(s || '0'));
-                if (!isNaN(parsedIsoLike.getTime())) {
-                    return admin.firestore.Timestamp.fromDate(parsedIsoLike);
-                }
-            }
-            const latamLike = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/);
-            if (latamLike) {
-                const [, d, m, y, h, min, s] = latamLike;
-                const parsedLatam = new Date(Number(y), Number(m) - 1, Number(d), Number(h || '0'), Number(min || '0'), Number(s || '0'));
-                if (!isNaN(parsedLatam.getTime())) {
-                    return admin.firestore.Timestamp.fromDate(parsedLatam);
-                }
-            }
-            return null;
-        };
-        const contentRef = db.collection('content').doc(newsId);
-        const existingSnap = await contentRef.get();
-        const existingCreatedAt = existingSnap.exists ? (_a = existingSnap.data()) === null || _a === void 0 ? void 0 : _a.createdAt : null;
-        const createdCandidates = [
-            afterData.createdAt,
-            afterData.created_at,
-            afterData.date,
-            afterData.postDate,
-            afterData.post_date,
-            (_b = afterData.custom_fields) === null || _b === void 0 ? void 0 : _b.createdAt,
-            (_c = afterData.custom_fields) === null || _c === void 0 ? void 0 : _c.date
+      // Parsear la fecha createdAt si es string (ej: "2024-01-15 10:30:00")
+      // Si no hay fecha o es invÃ¡lida, se usarÃ¡ el Timestamp del servidor.
+      const parseDateCandidate = (value: unknown): admin.firestore.Timestamp | null => {
+        if (!value) return null;
+        if (value instanceof admin.firestore.Timestamp) return value;
+        if (value instanceof Date && !isNaN(value.getTime())) {
+          return admin.firestore.Timestamp.fromDate(value);
+        }
+        if (typeof value === 'number' && Number.isFinite(value)) {
+          const asMs = value > 1e12 ? value : value * 1000;
+          const parsedNumeric = new Date(asMs);
+          if (!isNaN(parsedNumeric.getTime())) {
+            return admin.firestore.Timestamp.fromDate(parsedNumeric);
+          }
+          return null;
+        }
+        if (typeof value !== 'string') return null;
+
+        const raw = value.trim();
+        if (!raw) return null;
+
+        const parsedNative = new Date(raw);
+        if (!isNaN(parsedNative.getTime())) {
+          return admin.firestore.Timestamp.fromDate(parsedNative);
+        }
+
+        const isoLike = raw.match(
+          /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/
+        );
+        if (isoLike) {
+          const [, y, m, d, h, min, s] = isoLike;
+          const parsedIsoLike = new Date(
+            Number(y),
+            Number(m) - 1,
+            Number(d),
+            Number(h),
+            Number(min),
+            Number(s || '0')
+          );
+          if (!isNaN(parsedIsoLike.getTime())) {
+            return admin.firestore.Timestamp.fromDate(parsedIsoLike);
+          }
+        }
+
+        const latamLike = raw.match(
+          /^(\d{2})\/(\d{2})\/(\d{4})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/
+        );
+        if (latamLike) {
+          const [, d, m, y, h, min, s] = latamLike;
+          const parsedLatam = new Date(
+            Number(y),
+            Number(m) - 1,
+            Number(d),
+            Number(h || '0'),
+            Number(min || '0'),
+            Number(s || '0')
+          );
+          if (!isNaN(parsedLatam.getTime())) {
+            return admin.firestore.Timestamp.fromDate(parsedLatam);
+          }
+        }
+
+        return null;
+      };
+
+      const contentRef = db.collection('content').doc(newsId);
+      const existingSnap = await contentRef.get();
+      const existingCreatedAt = existingSnap.exists ? existingSnap.data()?.createdAt : null;
+
+      const createdCandidates: unknown[] = [
+        afterData.createdAt,
+        afterData.created_at,
+        afterData.date,
+        afterData.postDate,
+        afterData.post_date,
+        afterData.custom_fields?.createdAt,
+        afterData.custom_fields?.date
+      ];
+      const updatedCandidates: unknown[] = [
+        afterData.updatedAt,
+        afterData.updated_at,
+        afterData.modified,
+        afterData.modifiedAt,
+        afterData.custom_fields?.updatedAt,
+        afterData.custom_fields?.modified
+      ];
+
+      let parsedCreatedAt: admin.firestore.Timestamp | null = null;
+      for (const candidate of createdCandidates) {
+        parsedCreatedAt = parseDateCandidate(candidate);
+        if (parsedCreatedAt) break;
+      }
+
+      let parsedUpdatedAt: admin.firestore.Timestamp | null = null;
+      for (const candidate of updatedCandidates) {
+        parsedUpdatedAt = parseDateCandidate(candidate);
+        if (parsedUpdatedAt) break;
+      }
+
+      const createdAtTs: admin.firestore.FieldValue | admin.firestore.Timestamp =
+        parsedCreatedAt ||
+        (existingCreatedAt instanceof admin.firestore.Timestamp
+          ? existingCreatedAt
+          : admin.firestore.FieldValue.serverTimestamp());
+      const updatedAtTs: admin.firestore.FieldValue | admin.firestore.Timestamp =
+        parsedUpdatedAt || admin.firestore.FieldValue.serverTimestamp();
+
+      const normalizedPostId = extractNewsPublicIdFromPayload(afterData);
+      const postIdNumber = normalizedPostId ? Number(normalizedPostId) : null;
+      const normalizeUrlCandidate = (value: unknown): string => {
+        if (typeof value !== 'string') return '';
+        return value.trim().slice(0, 2400);
+      };
+      const coverThumbnailUrl = [
+        normalizeUrlCandidate(afterData.img_miniatura),
+        normalizeUrlCandidate(afterData.imgMiniatura),
+        normalizeUrlCandidate(afterData.thumbnail),
+        normalizeUrlCandidate(afterData.thumbnailUrl),
+        normalizeUrlCandidate(afterData.coverThumbnailUrl),
+        normalizeUrlCandidate(afterData.custom_fields?.img_miniatura),
+        normalizeUrlCandidate(afterData.custom_fields?.thumbnail),
+        normalizeUrlCandidate(afterData.custom_fields?.thumbnailUrl)
+      ].find((value) => value.length > 0) || '';
+
+      const rawImages = Array.isArray(afterData.images)
+        ? afterData.images
+        : [
+          afterData.image,
+          afterData.imageUrl,
+          afterData.coverImage,
+          afterData.custom_fields?.image
         ];
-        const updatedCandidates = [
-            afterData.updatedAt,
-            afterData.updated_at,
-            afterData.modified,
-            afterData.modifiedAt,
-            (_d = afterData.custom_fields) === null || _d === void 0 ? void 0 : _d.updatedAt,
-            (_e = afterData.custom_fields) === null || _e === void 0 ? void 0 : _e.modified
-        ];
-        let parsedCreatedAt = null;
-        for (const candidate of createdCandidates) {
-            parsedCreatedAt = parseDateCandidate(candidate);
-            if (parsedCreatedAt)
-                break;
-        }
-        let parsedUpdatedAt = null;
-        for (const candidate of updatedCandidates) {
-            parsedUpdatedAt = parseDateCandidate(candidate);
-            if (parsedUpdatedAt)
-                break;
-        }
-        const createdAtTs = parsedCreatedAt ||
-            (existingCreatedAt instanceof admin.firestore.Timestamp
-                ? existingCreatedAt
-                : admin.firestore.FieldValue.serverTimestamp());
-        const updatedAtTs = parsedUpdatedAt || admin.firestore.FieldValue.serverTimestamp();
-        const normalizedPostId = (0, contentUtils_1.extractNewsPublicIdFromPayload)(afterData);
-        const postIdNumber = normalizedPostId ? Number(normalizedPostId) : null;
-        const normalizeUrlCandidate = (value) => {
-            if (typeof value !== 'string')
-                return '';
-            return value.trim().slice(0, 2400);
-        };
-        const coverThumbnailUrl = [
-            normalizeUrlCandidate(afterData.img_miniatura),
-            normalizeUrlCandidate(afterData.imgMiniatura),
-            normalizeUrlCandidate(afterData.thumbnail),
-            normalizeUrlCandidate(afterData.thumbnailUrl),
-            normalizeUrlCandidate(afterData.coverThumbnailUrl),
-            normalizeUrlCandidate((_f = afterData.custom_fields) === null || _f === void 0 ? void 0 : _f.img_miniatura),
-            normalizeUrlCandidate((_g = afterData.custom_fields) === null || _g === void 0 ? void 0 : _g.thumbnail),
-            normalizeUrlCandidate((_h = afterData.custom_fields) === null || _h === void 0 ? void 0 : _h.thumbnailUrl)
-        ].find((value) => value.length > 0) || '';
-        const rawImages = Array.isArray(afterData.images)
-            ? afterData.images
-            : [
-                afterData.image,
-                afterData.imageUrl,
-                afterData.coverImage,
-                (_j = afterData.custom_fields) === null || _j === void 0 ? void 0 : _j.image
-            ];
-        const normalizedImages = Array.from(new Set(rawImages
-            .map((value) => normalizeUrlCandidate(value))
-            .filter((value) => value.length > 0)));
-        if (normalizedImages.length === 0 && coverThumbnailUrl) {
-            normalizedImages.push(coverThumbnailUrl);
-        }
-        const imagesV2 = normalizedImages.map((url, index) => ({
-            url,
-            thumbUrl: index === 0 && coverThumbnailUrl ? coverThumbnailUrl : url
-        }));
-        // Payload purificado e idempotente
-        const firestorePayload = {
-            type: 'news',
-            source: 'wordpress',
-            module: 'news',
-            externalId: newsId,
-            externalSource: 'wordpress_plugin',
-            postId: postIdNumber,
-            publicId: normalizedPostId,
-            titulo: afterData.titulo || 'Sin TÃ­tulo',
-            descripcion: afterData.descripcion || '',
-            images: normalizedImages,
-            imagesV2,
-            imgMiniatura: coverThumbnailUrl,
-            userId: afterData.userId || 'wp_official',
-            userName: afterData.userName || 'RedacciÃ³n CdeluAR',
-            userProfilePicUrl: afterData.userProfilePicUrl || '',
-            stats: {
-                likesCount: ((_k = afterData.stats) === null || _k === void 0 ? void 0 : _k.likesCount) || 0,
-                commentsCount: ((_l = afterData.stats) === null || _l === void 0 ? void 0 : _l.commentsCount) || 0,
-                viewsCount: ((_m = afterData.stats) === null || _m === void 0 ? void 0 : _m.viewsCount) || 0
+      const normalizedImages = Array.from(
+        new Set(
+          rawImages
+            .map((value: unknown) => normalizeUrlCandidate(value))
+            .filter((value: string) => value.length > 0)
+        )
+      );
+      if (normalizedImages.length === 0 && coverThumbnailUrl) {
+        normalizedImages.push(coverThumbnailUrl);
+      }
+      const imagesV2 = normalizedImages.map((url, index) => ({
+        url,
+        thumbUrl: index === 0 && coverThumbnailUrl ? coverThumbnailUrl : url
+      }));
+
+      // Payload purificado e idempotente
+      const firestorePayload = {
+        type: 'news',
+        source: 'wordpress',
+        module: 'news',
+        externalId: newsId,
+        externalSource: 'wordpress_plugin',
+        postId: postIdNumber,
+        publicId: normalizedPostId,
+
+        titulo: afterData.titulo || 'Sin TÃ­tulo',
+        descripcion: afterData.descripcion || '',
+        images: normalizedImages,
+        imagesV2,
+        imgMiniatura: coverThumbnailUrl,
+
+        userId: afterData.userId || 'wp_official',
+        userName: afterData.userName || 'RedacciÃ³n CdeluAR',
+        userProfilePicUrl: afterData.userProfilePicUrl || '',
+
+        stats: {
+          likesCount: afterData.stats?.likesCount || 0,
+          commentsCount: afterData.stats?.commentsCount || 0,
+          viewsCount: afterData.stats?.viewsCount || 0
+        },
+
+        createdAt: createdAtTs,
+        updatedAt: updatedAtTs,
+        deletedAt: null,
+        isOficial: true,
+
+        originalUrl: afterData.originalUrl || '',
+        category: afterData.category || '',
+        tags: Array.isArray(afterData.tags) ? afterData.tags : [],
+        custom_fields: afterData.custom_fields || {},
+
+        ingestedAt: admin.firestore.FieldValue.serverTimestamp()
+      };
+
+      // Set con merge asegura idempotencia (crea si no existe, actualiza si existe)
+      await db.collection('content').doc(newsId).set(firestorePayload, { merge: true });
+      if (normalizedPostId) {
+        const publicKey = buildContentPublicIdKey('news', normalizedPostId);
+        await db
+          .collection('_content_public_ids')
+          .doc(publicKey)
+          .set(
+            {
+              contentId: newsId,
+              module: 'news',
+              publicId: normalizedPostId,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
             },
-            createdAt: createdAtTs,
-            updatedAt: updatedAtTs,
-            deletedAt: null,
-            isOficial: true,
-            originalUrl: afterData.originalUrl || '',
-            category: afterData.category || '',
-            tags: Array.isArray(afterData.tags) ? afterData.tags : [],
-            custom_fields: afterData.custom_fields || {},
-            ingestedAt: admin.firestore.FieldValue.serverTimestamp()
-        };
-        // Set con merge asegura idempotencia (crea si no existe, actualiza si existe)
-        await db.collection('content').doc(newsId).set(firestorePayload, { merge: true });
-        if (normalizedPostId) {
-            const publicKey = (0, contentUtils_1.buildContentPublicIdKey)('news', normalizedPostId);
-            await db
-                .collection('_content_public_ids')
-                .doc(publicKey)
-                .set({
-                contentId: newsId,
-                module: 'news',
-                publicId: normalizedPostId,
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            }, { merge: true });
-        }
-        if (!normalizedPostId) {
-            console.warn(`News ${newsId} synced without postId/publicId`);
-        }
-        console.log(`✅ Noticia sincronizada en Firestore: ${newsId}`);
-        return null;
+            { merge: true }
+          );
+      }
+      if (!normalizedPostId) {
+        console.warn(`News ${newsId} synced without postId/publicId`);
+      }
+      console.log(`✅ Noticia sincronizada en Firestore: ${newsId}`);
+
+      return null;
+    } catch (error) {
+      console.error(`❌ Falló la sincronización de RTDB a Firestore para ${newsId}:`, error);
+      return null;
     }
-    catch (error) {
-        console.error(`❌ Falló la sincronización de RTDB a Firestore para ${newsId}:`, error);
-        return null;
-    }
+    */
 });
 // 5.5 Integración de Publicaciones Scraping a la Comunidad via Realtime Database
 exports.onCommunityPostsReceived = functions.database
     .ref('/c/{postId}')
     .onWrite(async (change, context) => {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o;
+    return (0, contentSyncRuntimeUtils_1.onCommunityPostsReceivedInternal)(db, change, context);
+    /*
     const { postId } = context.params;
     const afterData = change.after.val();
+
     if (!afterData) {
-        console.log(`ℹ️ Community post ${postId} was deleted from RTDB. Ignoring in Firestore.`);
-        return null;
+      console.log(`ℹ️ Community post ${postId} was deleted from RTDB. Ignoring in Firestore.`);
+      return null;
     }
+
     // Skip reserved IDs that would fail in Firestore
     if (postId.startsWith('__') && postId.endsWith('__')) {
-        console.log(`⚠️ Skipping reserved test ID: ${postId}`);
-        return null;
+      console.log(`⚠️ Skipping reserved test ID: ${postId}`);
+      return null;
     }
+
     try {
-        const parseDateCandidate = (value) => {
-            if (!value)
-                return null;
-            if (value instanceof admin.firestore.Timestamp)
-                return value;
-            if (value instanceof Date && !isNaN(value.getTime())) {
-                return admin.firestore.Timestamp.fromDate(value);
-            }
-            if (typeof value === 'number' && Number.isFinite(value)) {
-                const asMs = value > 1e12 ? value : value * 1000;
-                const parsedNumeric = new Date(asMs);
-                if (!isNaN(parsedNumeric.getTime())) {
-                    return admin.firestore.Timestamp.fromDate(parsedNumeric);
-                }
-                return null;
-            }
-            if (typeof value !== 'string')
-                return null;
-            const raw = value.trim();
-            if (!raw)
-                return null;
-            const parsedNative = new Date(raw);
-            if (!isNaN(parsedNative.getTime())) {
-                return admin.firestore.Timestamp.fromDate(parsedNative);
-            }
-            const isoLike = raw.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/);
-            if (isoLike) {
-                const [, y, m, d, h, min, s] = isoLike;
-                const parsedIsoLike = new Date(Number(y), Number(m) - 1, Number(d), Number(h), Number(min), Number(s || '0'));
-                if (!isNaN(parsedIsoLike.getTime())) {
-                    return admin.firestore.Timestamp.fromDate(parsedIsoLike);
-                }
-            }
-            const latamLike = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/);
-            if (latamLike) {
-                const [, d, m, y, h, min, s] = latamLike;
-                const parsedLatam = new Date(Number(y), Number(m) - 1, Number(d), Number(h || '0'), Number(min || '0'), Number(s || '0'));
-                if (!isNaN(parsedLatam.getTime())) {
-                    return admin.firestore.Timestamp.fromDate(parsedLatam);
-                }
-            }
-            return null;
+      const parseDateCandidate = (value: unknown): admin.firestore.Timestamp | null => {
+        if (!value) return null;
+        if (value instanceof admin.firestore.Timestamp) return value;
+        if (value instanceof Date && !isNaN(value.getTime())) {
+          return admin.firestore.Timestamp.fromDate(value);
+        }
+        if (typeof value === 'number' && Number.isFinite(value)) {
+          const asMs = value > 1e12 ? value : value * 1000;
+          const parsedNumeric = new Date(asMs);
+          if (!isNaN(parsedNumeric.getTime())) {
+            return admin.firestore.Timestamp.fromDate(parsedNumeric);
+          }
+          return null;
+        }
+        if (typeof value !== 'string') return null;
+
+        const raw = value.trim();
+        if (!raw) return null;
+
+        const parsedNative = new Date(raw);
+        if (!isNaN(parsedNative.getTime())) {
+          return admin.firestore.Timestamp.fromDate(parsedNative);
+        }
+
+        const isoLike = raw.match(
+          /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/
+        );
+        if (isoLike) {
+          const [, y, m, d, h, min, s] = isoLike;
+          const parsedIsoLike = new Date(
+            Number(y),
+            Number(m) - 1,
+            Number(d),
+            Number(h),
+            Number(min),
+            Number(s || '0')
+          );
+          if (!isNaN(parsedIsoLike.getTime())) {
+            return admin.firestore.Timestamp.fromDate(parsedIsoLike);
+          }
+        }
+
+        const latamLike = raw.match(
+          /^(\d{2})\/(\d{2})\/(\d{4})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/
+        );
+        if (latamLike) {
+          const [, d, m, y, h, min, s] = latamLike;
+          const parsedLatam = new Date(
+            Number(y),
+            Number(m) - 1,
+            Number(d),
+            Number(h || '0'),
+            Number(min || '0'),
+            Number(s || '0')
+          );
+          if (!isNaN(parsedLatam.getTime())) {
+            return admin.firestore.Timestamp.fromDate(parsedLatam);
+          }
+        }
+
+        return null;
+      };
+
+      const contentRef = db.collection('content').doc(postId);
+      const existingSnap = await contentRef.get();
+      const existingCreatedAt = existingSnap.exists ? existingSnap.data()?.createdAt : null;
+
+      const parsedCreatedAt = parseDateCandidate(afterData.createdAt);
+      const parsedUpdatedAt = parseDateCandidate(afterData.updatedAt);
+
+      const createdAtTs: admin.firestore.FieldValue | admin.firestore.Timestamp =
+        parsedCreatedAt || (existingCreatedAt instanceof admin.firestore.Timestamp ? existingCreatedAt : admin.firestore.FieldValue.serverTimestamp());
+      const updatedAtTs: admin.firestore.FieldValue | admin.firestore.Timestamp =
+        parsedUpdatedAt || admin.firestore.FieldValue.serverTimestamp();
+
+      const normalizeUrlCandidate = (value: unknown): string => {
+        if (typeof value !== 'string') return '';
+        return value.trim().slice(0, 2400);
+      };
+
+      const normalizeImageEntry = (entry: unknown): { url: string; thumbUrl: string | null } | null => {
+        if (typeof entry === 'string') {
+          const url = normalizeUrlCandidate(entry);
+          return url ? { url, thumbUrl: null } : null;
+        }
+
+        if (!entry || typeof entry !== 'object') return null;
+
+        const imageEntry = entry as Record<string, unknown>;
+        const url = normalizeUrlCandidate(imageEntry.url);
+        if (!url) return null;
+
+        const thumbCandidate =
+          normalizeUrlCandidate(imageEntry.thumbUrl) ||
+          normalizeUrlCandidate(imageEntry.thumbnailUrl) ||
+          normalizeUrlCandidate(imageEntry.thumbnail) ||
+          normalizeUrlCandidate(imageEntry.imgMiniatura) ||
+          normalizeUrlCandidate(imageEntry.img_miniatura) ||
+          null;
+
+        return {
+          url,
+          thumbUrl: thumbCandidate && thumbCandidate !== url ? thumbCandidate : null
         };
-        const contentRef = db.collection('content').doc(postId);
-        const existingSnap = await contentRef.get();
-        const existingCreatedAt = existingSnap.exists ? (_a = existingSnap.data()) === null || _a === void 0 ? void 0 : _a.createdAt : null;
-        const parsedCreatedAt = parseDateCandidate(afterData.createdAt);
-        const parsedUpdatedAt = parseDateCandidate(afterData.updatedAt);
-        const createdAtTs = parsedCreatedAt || (existingCreatedAt instanceof admin.firestore.Timestamp ? existingCreatedAt : admin.firestore.FieldValue.serverTimestamp());
-        const updatedAtTs = parsedUpdatedAt || admin.firestore.FieldValue.serverTimestamp();
-        const normalizeUrlCandidate = (value) => {
-            if (typeof value !== 'string')
-                return '';
-            return value.trim().slice(0, 2400);
-        };
-        const normalizeImageEntry = (entry) => {
-            if (typeof entry === 'string') {
-                const url = normalizeUrlCandidate(entry);
-                return url ? { url, thumbUrl: null } : null;
-            }
-            if (!entry || typeof entry !== 'object')
-                return null;
-            const imageEntry = entry;
-            const url = normalizeUrlCandidate(imageEntry.url);
-            if (!url)
-                return null;
-            const thumbCandidate = normalizeUrlCandidate(imageEntry.thumbUrl) ||
-                normalizeUrlCandidate(imageEntry.thumbnailUrl) ||
-                normalizeUrlCandidate(imageEntry.thumbnail) ||
-                normalizeUrlCandidate(imageEntry.imgMiniatura) ||
-                normalizeUrlCandidate(imageEntry.img_miniatura) ||
-                null;
-            return {
-                url,
-                thumbUrl: thumbCandidate && thumbCandidate !== url ? thumbCandidate : null
-            };
-        };
-        const explicitImagesV2 = Array.isArray(afterData.imagesV2)
-            ? afterData.imagesV2
-                .map((entry) => normalizeImageEntry(entry))
-                .filter((entry) => Boolean(entry))
-            : [];
-        const fallbackImageEntries = [
-            ...(Array.isArray(afterData.images) ? afterData.images : []),
-            afterData.image,
-            afterData.imageUrl,
-            afterData.coverImage,
-            afterData.imgMiniatura,
-            afterData.img_miniatura,
-            afterData.thumbnail,
-            afterData.thumbnailUrl,
-            afterData.coverThumbnailUrl,
-            (_b = afterData.custom_fields) === null || _b === void 0 ? void 0 : _b.image,
-            (_c = afterData.custom_fields) === null || _c === void 0 ? void 0 : _c.imgMiniatura,
-            (_d = afterData.custom_fields) === null || _d === void 0 ? void 0 : _d.img_miniatura,
-            (_e = afterData.custom_fields) === null || _e === void 0 ? void 0 : _e.thumbnail,
-            (_f = afterData.custom_fields) === null || _f === void 0 ? void 0 : _f.thumbnailUrl
-        ]
-            .flatMap((entry) => {
-            if (Array.isArray(entry))
-                return entry;
-            return [entry];
+      };
+
+      const explicitImagesV2 = Array.isArray(afterData.imagesV2)
+        ? afterData.imagesV2
+            .map((entry: unknown) => normalizeImageEntry(entry))
+            .filter(
+              (entry: { url: string; thumbUrl: string | null } | null): entry is {
+                url: string;
+                thumbUrl: string | null;
+              } => Boolean(entry)
+            )
+        : [];
+
+      const fallbackImageEntries = [
+        ...(Array.isArray(afterData.images) ? afterData.images : []),
+        afterData.image,
+        afterData.imageUrl,
+        afterData.coverImage,
+        afterData.imgMiniatura,
+        afterData.img_miniatura,
+        afterData.thumbnail,
+        afterData.thumbnailUrl,
+        afterData.coverThumbnailUrl,
+        afterData.custom_fields?.image,
+        afterData.custom_fields?.imgMiniatura,
+        afterData.custom_fields?.img_miniatura,
+        afterData.custom_fields?.thumbnail,
+        afterData.custom_fields?.thumbnailUrl
+      ]
+        .flatMap((entry: unknown) => {
+          if (Array.isArray(entry)) return entry;
+          return [entry];
         })
-            .map((entry) => normalizeImageEntry(entry))
-            .filter((entry) => Boolean(entry));
-        const mergedImages = [...explicitImagesV2, ...fallbackImageEntries];
-        const normalizedImages = Array.from(new Set(mergedImages.map((entry) => entry.url))).filter((value) => value.length > 0);
-        const legacyMiniThumb = normalizeUrlCandidate(afterData.imgMiniatura) ||
-            normalizeUrlCandidate(afterData.img_miniatura) ||
-            normalizeUrlCandidate(afterData.thumbnailUrl) ||
-            normalizeUrlCandidate(afterData.coverThumbnailUrl) ||
-            normalizeUrlCandidate((_g = afterData.custom_fields) === null || _g === void 0 ? void 0 : _g.imgMiniatura) ||
-            normalizeUrlCandidate((_h = afterData.custom_fields) === null || _h === void 0 ? void 0 : _h.img_miniatura) ||
-            normalizeUrlCandidate((_j = afterData.custom_fields) === null || _j === void 0 ? void 0 : _j.thumbnailUrl) ||
-            '';
-        const imagesV2 = normalizedImages.map((url, index) => {
-            const matched = mergedImages.find((entry) => entry.url === url);
-            const thumbUrl = (matched === null || matched === void 0 ? void 0 : matched.thumbUrl) ||
-                (index === 0 && legacyMiniThumb ? legacyMiniThumb : null) ||
-                url;
-            return {
-                url,
-                thumbUrl
-            };
-        });
-        const imgMiniatura = legacyMiniThumb || ((_k = imagesV2[0]) === null || _k === void 0 ? void 0 : _k.thumbUrl) || normalizedImages[0] || '';
-        const firestorePayload = {
-            type: 'post',
-            source: 'scraping',
-            module: 'community',
-            externalId: postId,
-            id_unico: afterData.id_unico || postId,
-            titulo: afterData.author_name || 'Comunidad',
-            descripcion: afterData.content || '',
-            images: normalizedImages,
-            imagesV2,
-            imgMiniatura,
-            userId: afterData.author_id || 'community_user',
-            userName: afterData.author_name || 'Usuario Comunidad',
-            userProfilePicUrl: '',
-            group_name: afterData.group_name || '',
-            group_url: afterData.group_url || '',
-            video_links: Array.isArray(afterData.video_links) ? afterData.video_links : [],
-            stats: {
-                likesCount: ((_l = afterData.stats) === null || _l === void 0 ? void 0 : _l.likesCount) || 0,
-                commentsCount: ((_m = afterData.stats) === null || _m === void 0 ? void 0 : _m.commentsCount) || 0,
-                viewsCount: ((_o = afterData.stats) === null || _o === void 0 ? void 0 : _o.viewsCount) || 0
-            },
-            createdAt: createdAtTs,
-            updatedAt: updatedAtTs,
-            deletedAt: afterData.deletedAt || null,
-            isOficial: false,
-            originalUrl: afterData.post_url || '',
-            category: afterData.group_name || 'Comunidad',
-            tags: Array.isArray(afterData.tags) ? afterData.tags : [],
-            custom_fields: afterData.custom_fields || {},
-            ingestedAt: admin.firestore.FieldValue.serverTimestamp()
+        .map((entry: unknown) => normalizeImageEntry(entry))
+        .filter(
+          (entry: { url: string; thumbUrl: string | null } | null): entry is {
+            url: string;
+            thumbUrl: string | null;
+          } => Boolean(entry)
+        );
+
+      const mergedImages = [...explicitImagesV2, ...fallbackImageEntries];
+      const normalizedImages = Array.from(new Set(mergedImages.map((entry) => entry.url))).filter(
+        (value: string) => value.length > 0
+      );
+      const legacyMiniThumb =
+        normalizeUrlCandidate(afterData.imgMiniatura) ||
+        normalizeUrlCandidate(afterData.img_miniatura) ||
+        normalizeUrlCandidate(afterData.thumbnailUrl) ||
+        normalizeUrlCandidate(afterData.coverThumbnailUrl) ||
+        normalizeUrlCandidate(afterData.custom_fields?.imgMiniatura) ||
+        normalizeUrlCandidate(afterData.custom_fields?.img_miniatura) ||
+        normalizeUrlCandidate(afterData.custom_fields?.thumbnailUrl) ||
+        '';
+      const imagesV2 = normalizedImages.map((url, index) => {
+        const matched = mergedImages.find((entry: { url: string; thumbUrl: string | null }) => entry.url === url);
+        const thumbUrl =
+          matched?.thumbUrl ||
+          (index === 0 && legacyMiniThumb ? legacyMiniThumb : null) ||
+          url;
+        return {
+          url,
+          thumbUrl
         };
-        await db.collection('content').doc(postId).set(firestorePayload, { merge: true });
-        console.log(`✅ Publicación de la comunidad sincronizada en Firestore: ${postId}`);
-        return null;
+      });
+      const imgMiniatura = legacyMiniThumb || imagesV2[0]?.thumbUrl || normalizedImages[0] || '';
+
+      const firestorePayload = {
+        type: 'post',
+        source: 'scraping',
+        module: 'community',
+        externalId: postId,
+        id_unico: afterData.id_unico || postId,
+
+        titulo: afterData.author_name || 'Comunidad',
+        descripcion: afterData.content || '',
+        images: normalizedImages,
+        imagesV2,
+        imgMiniatura,
+
+        userId: afterData.author_id || 'community_user',
+        userName: afterData.author_name || 'Usuario Comunidad',
+        userProfilePicUrl: '',
+
+        group_name: afterData.group_name || '',
+        group_url: afterData.group_url || '',
+        video_links: Array.isArray(afterData.video_links) ? afterData.video_links : [],
+
+        stats: {
+          likesCount: afterData.stats?.likesCount || 0,
+          commentsCount: afterData.stats?.commentsCount || 0,
+          viewsCount: afterData.stats?.viewsCount || 0
+        },
+
+        createdAt: createdAtTs,
+        updatedAt: updatedAtTs,
+        deletedAt: afterData.deletedAt || null,
+        isOficial: false,
+
+        originalUrl: afterData.post_url || '',
+        category: afterData.group_name || 'Comunidad',
+        tags: Array.isArray(afterData.tags) ? afterData.tags : [],
+        custom_fields: afterData.custom_fields || {},
+
+        ingestedAt: admin.firestore.FieldValue.serverTimestamp()
+      };
+
+      await db.collection('content').doc(postId).set(firestorePayload, { merge: true });
+      console.log(`✅ Publicación de la comunidad sincronizada en Firestore: ${postId}`);
+
+      return null;
+    } catch (error) {
+      console.error(`❌ Falló la sincronización de comunidad a Firestore para ${postId}:`, error);
+      return null;
     }
-    catch (error) {
-        console.error(`❌ Falló la sincronización de comunidad a Firestore para ${postId}:`, error);
-        return null;
-    }
+    */
 });
 // 6. Community image thumbnails
 exports.onCommunityPostImageFinalized = functions.storage
     .bucket(COMMUNITY_THUMBNAIL_BUCKET)
     .object()
     .onFinalize(async (object) => {
-    const filePath = object.name;
-    const contentType = object.contentType || '';
-    const bucketName = object.bucket;
-    const metadata = object.metadata || {};
-    if (!filePath || !bucketName)
-        return null;
-    if (!filePath.startsWith('posts/'))
-        return null;
-    if (!contentType.startsWith('image/'))
-        return null;
-    if (filePath.includes('/thumbs/'))
-        return null;
-    if (metadata.generatedBy === 'community-thumbnail')
-        return null;
-    const ext = path.posix.extname(filePath).toLowerCase();
-    const baseName = path.posix.basename(filePath, ext);
-    if (baseName.endsWith('_t') || baseName.endsWith('-thumb'))
-        return null;
-    const directory = path.posix.dirname(filePath);
-    const thumbPath = `${directory}/thumbs/${baseName}.webp`;
-    const bucket = admin.storage().bucket(bucketName);
-    const thumbFile = bucket.file(thumbPath);
-    const [alreadyExists] = await thumbFile.exists();
-    if (alreadyExists)
-        return null;
-    const sourceTempFile = path.join(os.tmpdir(), `${Date.now()}-${path.basename(filePath)}`);
-    const thumbTempFile = path.join(os.tmpdir(), `${Date.now()}-${baseName}.webp`);
-    try {
-        await bucket.file(filePath).download({ destination: sourceTempFile });
-        const sharp = await loadSharp();
-        await sharp(sourceTempFile)
-            .rotate()
-            .resize(COMMUNITY_THUMB_MAX_SIDE, COMMUNITY_THUMB_MAX_SIDE, {
-            fit: 'inside',
-            withoutEnlargement: true
-        })
-            .webp({ quality: 78, effort: 4 })
-            .toFile(thumbTempFile);
-        await bucket.upload(thumbTempFile, {
-            destination: thumbPath,
-            metadata: {
-                contentType: 'image/webp',
-                cacheControl: 'public,max-age=604800',
-                metadata: {
-                    generatedBy: 'community-thumbnail',
-                    sourcePath: filePath
-                }
-            }
-        });
-    }
-    catch (error) {
-        console.error('Thumbnail generation failed', { filePath, error });
-    }
-    finally {
-        await Promise.all([
-            fs.unlink(sourceTempFile).catch(() => undefined),
-            fs.unlink(thumbTempFile).catch(() => undefined)
-        ]);
-    }
-    return null;
+    return (0, contentImageRuntimeUtils_1.onCommunityPostImageFinalizedInternal)(object);
 });
 // 7. Hosting FTP image upload fallback for community posts
 exports.uploadCommunityImageToHosting = functions.https.onCall(async (data, context) => {
-    var _a;
-    const userId = (_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid;
-    if (!userId) {
-        throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para subir imagenes.');
-    }
-    const relativePathRaw = typeof (data === null || data === void 0 ? void 0 : data.path) === 'string' ? data.path.trim() : '';
-    const contentType = ensureImageMime(data === null || data === void 0 ? void 0 : data.contentType);
-    const base64Data = decodeBase64Payload(data === null || data === void 0 ? void 0 : data.base64Data);
-    if (!relativePathRaw) {
-        throw new functions.https.HttpsError('invalid-argument', 'Ruta de imagen invalida.');
-    }
-    const relativePath = sanitizePathSegment(relativePathRaw).replace(/^(?:imagenes|images)\//, '');
-    const allowedPrefix = `posts/${userId}/`;
-    const allowedAvatarPrefix = `AVATAR/${userId}/`;
-    const legacyAvatarPrefix = `avatars/${userId}/`;
-    if (!relativePath.startsWith(allowedPrefix) &&
-        !relativePath.startsWith(allowedAvatarPrefix) &&
-        !relativePath.startsWith(legacyAvatarPrefix)) {
-        throw new functions.https.HttpsError('permission-denied', 'Ruta de subida no permitida.');
-    }
-    const ext = path.posix.extname(relativePath).toLowerCase();
-    const safeExt = ext && ext.length <= 6 ? ext : '.webp';
-    const fileNameBase = path.posix.basename(relativePath, ext || undefined)
-        .replace(/[^a-zA-Z0-9_-]/g, '-')
-        .slice(0, 80) || `${Date.now()}`;
-    const normalizedUploadPath = relativePath.startsWith(legacyAvatarPrefix)
-        ? relativePath.replace(/^avatars\//, 'AVATAR/')
-        : relativePath;
-    const targetRelativePath = `${path.posix.dirname(normalizedUploadPath)}/${fileNameBase}${safeExt}`.replace(/\/+/g, '/');
-    const isAvatarUpload = normalizedUploadPath.startsWith(allowedAvatarPrefix) ||
-        normalizedUploadPath.startsWith('AVATAR/');
-    const ftpConfig = isAvatarUpload ? getHostingAvatarFtpConfig() : getHostingFtpConfig();
-    const remoteFilePath = `${ftpConfig.basePath}/${targetRelativePath}`.replace(/\/+/g, '/');
-    const remoteDir = path.posix.dirname(remoteFilePath);
-    const publicUrl = `${ftpConfig.publicBaseUrl}/${targetRelativePath}`;
-    const { Client } = await loadFtpClient();
-    const ftpClient = new Client(30000);
-    ftpClient.ftp.verbose = false;
-    try {
-        await ftpClient.access({
-            host: ftpConfig.host,
-            user: ftpConfig.user,
-            password: ftpConfig.password,
-            port: ftpConfig.port,
-            secure: false
-        });
-        await ftpClient.ensureDir(remoteDir);
-        await ftpClient.uploadFrom(stream_1.Readable.from(base64Data), remoteFilePath);
-    }
-    catch (error) {
-        console.error('FTP hosting upload failed', { userId, relativePath: targetRelativePath, error });
-        throw new functions.https.HttpsError('internal', 'No se pudo subir la imagen al hosting.');
-    }
-    finally {
-        ftpClient.close();
-    }
-    return {
-        url: publicUrl,
-        path: targetRelativePath,
-        sizeBytes: base64Data.length,
-        contentType
-    };
+    return (0, contentImageRuntimeUtils_1.uploadCommunityImageToHostingInternal)(data, context);
 });
 // 8. Lottery entry callable (number-based entries, supports multiple tickets per user)
 exports.enterLottery = functions.https.onCall(async (data, context) => {
-    var _a, _b;
-    const userId = (_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid;
+    return (0, lotteryRuntimeUtils_1.enterLotteryInternal)(db, data, context);
+    /*
+    const userId = context.auth?.uid;
     if (!userId) {
-        throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para participar en la loteria.');
+      throw new functions.https.HttpsError(
+        'unauthenticated',
+        'Debes iniciar sesion para participar en la loteria.'
+      );
     }
-    const lotteryId = typeof (data === null || data === void 0 ? void 0 : data.lotteryId) === 'string' ? data.lotteryId.trim() : '';
-    const selectedNumber = (0, lotteryUtils_1.parseSelectedLotteryNumber)(data === null || data === void 0 ? void 0 : data.selectedNumber);
-    const idempotencyKeyRaw = typeof (data === null || data === void 0 ? void 0 : data.idempotencyKey) === 'string'
-        ? data.idempotencyKey.trim()
-        : '';
+  
+    const lotteryId = typeof data?.lotteryId === 'string' ? data.lotteryId.trim() : '';
+    const selectedNumber = parseSelectedLotteryNumber(data?.selectedNumber);
+    const idempotencyKeyRaw = typeof data?.idempotencyKey === 'string'
+      ? data.idempotencyKey.trim()
+      : '';
+  
     if (!lotteryId) {
-        throw new functions.https.HttpsError('invalid-argument', 'lotteryId es obligatorio.');
+      throw new functions.https.HttpsError('invalid-argument', 'lotteryId es obligatorio.');
     }
     if (selectedNumber == null) {
-        throw new functions.https.HttpsError('invalid-argument', 'selectedNumber es obligatorio.');
+      throw new functions.https.HttpsError('invalid-argument', 'selectedNumber es obligatorio.');
     }
-    await (0, lotteryUtils_1.ensureLotteryEntriesSchemaV2)(lotteryId);
+  
+    await ensureLotteryEntriesSchemaV2(lotteryId);
+  
     const userDocSnap = await db.collection('users').doc(userId).get();
     const userData = userDocSnap.data() || {};
     const userRecord = await admin.auth().getUser(userId);
     const providerIds = (userRecord.providerData || []).map((provider) => provider.providerId);
     const hasSocialAccount = providerIds.includes('google.com') || providerIds.includes('facebook.com');
     const isVerifiedUser = userData.isVerified === true;
-    const token = (((_b = context.auth) === null || _b === void 0 ? void 0 : _b.token) || {});
+    const token = (context.auth?.token || {}) as Record<string, unknown>;
+  
     const fallbackEmail = typeof token.email === 'string' ? token.email : '';
     const fallbackName = fallbackEmail ? fallbackEmail.split('@')[0] : 'Usuario';
     const userNameRaw = typeof userData.nombre === 'string' ? userData.nombre : fallbackName;
     const userProfilePicRaw = typeof userData.profilePictureUrl === 'string'
-        ? userData.profilePictureUrl
-        : '';
+      ? userData.profilePictureUrl
+      : '';
+  
     const userUsernameRaw = typeof userData.username === 'string' ? userData.username : '';
     const userName = userNameRaw.trim().slice(0, 120) || 'Usuario';
     const userUsername = userUsernameRaw.trim().slice(0, 30);
     const userProfilePicUrl = userProfilePicRaw.trim();
+  
     const modulesConfigRef = db.collection('_config').doc('modules');
     const lotteryRef = db.collection('lotteries').doc(lotteryId);
-    const entryRef = lotteryRef.collection('entries').doc((0, lotteryUtils_1.toLotteryEntryDocId)(selectedNumber));
+    const entryRef = lotteryRef.collection('entries').doc(toLotteryEntryDocId(selectedNumber));
     const extraTicketsRef = db
-        .collection(lotteryUtils_1.LOTTERY_USER_EXTRA_TICKETS_COLLECTION)
-        .doc((0, lotteryUtils_1.toLotteryUserExtraDocId)(lotteryId, userId));
+      .collection(LOTTERY_USER_EXTRA_TICKETS_COLLECTION)
+      .doc(toLotteryUserExtraDocId(lotteryId, userId));
     const userEntriesQuery = lotteryRef
-        .collection('entries')
-        .where('userId', '==', userId)
-        .limit(lotteryUtils_1.LOTTERY_MAX_MAX_NUMBER + 2);
+      .collection('entries')
+      .where('userId', '==', userId)
+      .limit(LOTTERY_MAX_MAX_NUMBER + 2);
+  
     const entryResult = await db.runTransaction(async (tx) => {
-        var _a;
-        const [modulesConfigSnap, lotterySnap, entrySnap, userEntriesSnap, extraTicketsSnap] = await Promise.all([
-            tx.get(modulesConfigRef),
-            tx.get(lotteryRef),
-            tx.get(entryRef),
-            tx.get(userEntriesQuery),
-            tx.get(extraTicketsRef)
-        ]);
-        if (!(0, moduleUtils_1.isLotteryModuleEnabled)(modulesConfigSnap.data())) {
-            throw new functions.https.HttpsError('failed-precondition', 'module-disabled: El modulo de loteria esta deshabilitado.');
-        }
-        if (!lotterySnap.exists) {
-            throw new functions.https.HttpsError('not-found', 'La loteria no existe.');
-        }
-        const lotteryData = lotterySnap.data() || {};
-        if (lotteryData.deletedAt != null) {
-            throw new functions.https.HttpsError('failed-precondition', 'lottery-inactive: La loteria ya no esta disponible.');
-        }
-        const isFree = lotteryData.isFree !== false;
-        if (isFree && !hasSocialAccount && !isVerifiedUser) {
-            throw new functions.https.HttpsError('failed-precondition', 'unverified-account: Solo los usuarios con al menos una cuenta social vinculada y verificada (Google o Facebook) pueden participar en las loterías gratuitas.');
-        }
-        const lotteryStatus = (lotteryData.status || 'draft');
-        if (lotteryStatus !== 'active') {
-            throw new functions.https.HttpsError('failed-precondition', 'lottery-inactive: La loteria no esta activa.');
-        }
-        if (lotteryData.winner) {
-            throw new functions.https.HttpsError('failed-precondition', 'lottery-inactive: La loteria ya tiene ganador.');
-        }
-        const nowMs = Date.now();
-        const startsAt = lotteryData.startsAt instanceof admin.firestore.Timestamp
-            ? lotteryData.startsAt.toMillis()
-            : null;
-        const endsAt = lotteryData.endsAt instanceof admin.firestore.Timestamp
-            ? lotteryData.endsAt.toMillis()
-            : null;
-        if (startsAt != null && startsAt > nowMs) {
-            throw new functions.https.HttpsError('failed-precondition', 'lottery-inactive: La loteria aun no inicio.');
-        }
-        if (endsAt != null && endsAt < nowMs) {
-            throw new functions.https.HttpsError('failed-precondition', 'lottery-inactive: La loteria ya finalizo la etapa de participacion.');
-        }
-        const currentParticipantsRaw = Number(lotteryData.participantsCount || 0);
-        const currentParticipants = Number.isFinite(currentParticipantsRaw)
-            ? Math.max(0, Math.floor(currentParticipantsRaw))
-            : 0;
-        const maxNumber = (0, lotteryUtils_1.normalizeLotteryMaxNumber)(lotteryData.maxNumber);
-        const maxTicketsPerUser = (0, lotteryUtils_1.normalizeLotteryMaxTicketsPerUser)(lotteryData.maxTicketsPerUser);
-        const extraTickets = (0, lotteryUtils_1.normalizeLotteryExtraTickets)((_a = extraTicketsSnap.data()) === null || _a === void 0 ? void 0 : _a.extraTickets);
-        const effectiveMaxTicketsPerUser = (0, lotteryUtils_1.getLotteryEffectiveMaxTickets)(maxTicketsPerUser, extraTickets, maxNumber);
-        if (selectedNumber < 1 || selectedNumber > maxNumber) {
-            throw new functions.https.HttpsError('failed-precondition', `out-of-range: Debes seleccionar un numero entre 1 y ${maxNumber}.`);
-        }
-        const userTicketsCount = userEntriesSnap.size;
-        if (entrySnap.exists) {
-            const existingEntry = entrySnap.data() || {};
-            const entryOwner = typeof existingEntry.userId === 'string' ? existingEntry.userId : '';
-            if (entryOwner === userId) {
-                return {
-                    status: 'already_selected',
-                    lotteryId,
-                    selectedNumber,
-                    participantsCount: currentParticipants,
-                    userTicketsCount: Math.max(1, userTicketsCount),
-                    effectiveMaxTicketsPerUser
-                };
-            }
-            throw new functions.https.HttpsError('already-exists', 'number-taken: El numero seleccionado ya esta ocupado.');
-        }
-        if (userTicketsCount >= effectiveMaxTicketsPerUser) {
-            throw new functions.https.HttpsError('failed-precondition', `limit-reached: Alcanzaste el maximo de ${effectiveMaxTicketsPerUser} numeros para esta loteria.`);
-        }
-        const entryPayload = {
-            userId,
-            userName,
-            userUsername,
-            userProfilePicUrl,
+      const [modulesConfigSnap, lotterySnap, entrySnap, userEntriesSnap, extraTicketsSnap] = await Promise.all([
+        tx.get(modulesConfigRef),
+        tx.get(lotteryRef),
+        tx.get(entryRef),
+        tx.get(userEntriesQuery),
+        tx.get(extraTicketsRef)
+      ]);
+  
+      if (!isLotteryModuleEnabled(modulesConfigSnap.data())) {
+        throw new functions.https.HttpsError(
+          'failed-precondition',
+          'module-disabled: El modulo de loteria esta deshabilitado.'
+        );
+      }
+  
+      if (!lotterySnap.exists) {
+        throw new functions.https.HttpsError('not-found', 'La loteria no existe.');
+      }
+  
+      const lotteryData = lotterySnap.data() || {};
+      if (lotteryData.deletedAt != null) {
+        throw new functions.https.HttpsError(
+          'failed-precondition',
+          'lottery-inactive: La loteria ya no esta disponible.'
+        );
+      }
+  
+      const isFree = lotteryData.isFree !== false;
+      if (isFree && !hasSocialAccount && !isVerifiedUser) {
+        throw new functions.https.HttpsError(
+          'failed-precondition',
+          'unverified-account: Solo los usuarios con al menos una cuenta social vinculada y verificada (Google o Facebook) pueden participar en las loterías gratuitas.'
+        );
+      }
+  
+      const lotteryStatus = (lotteryData.status || 'draft') as LotteryStatus;
+      if (lotteryStatus !== 'active') {
+        throw new functions.https.HttpsError(
+          'failed-precondition',
+          'lottery-inactive: La loteria no esta activa.'
+        );
+      }
+  
+      if (lotteryData.winner) {
+        throw new functions.https.HttpsError(
+          'failed-precondition',
+          'lottery-inactive: La loteria ya tiene ganador.'
+        );
+      }
+  
+      const nowMs = Date.now();
+      const startsAt = lotteryData.startsAt instanceof admin.firestore.Timestamp
+        ? lotteryData.startsAt.toMillis()
+        : null;
+      const endsAt = lotteryData.endsAt instanceof admin.firestore.Timestamp
+        ? lotteryData.endsAt.toMillis()
+        : null;
+  
+      if (startsAt != null && startsAt > nowMs) {
+        throw new functions.https.HttpsError(
+          'failed-precondition',
+          'lottery-inactive: La loteria aun no inicio.'
+        );
+      }
+      if (endsAt != null && endsAt < nowMs) {
+        throw new functions.https.HttpsError(
+          'failed-precondition',
+          'lottery-inactive: La loteria ya finalizo la etapa de participacion.'
+        );
+      }
+  
+      const currentParticipantsRaw = Number(lotteryData.participantsCount || 0);
+      const currentParticipants = Number.isFinite(currentParticipantsRaw)
+        ? Math.max(0, Math.floor(currentParticipantsRaw))
+        : 0;
+  
+      const maxNumber = normalizeLotteryMaxNumber(lotteryData.maxNumber);
+      const maxTicketsPerUser = normalizeLotteryMaxTicketsPerUser(lotteryData.maxTicketsPerUser);
+      const extraTickets = normalizeLotteryExtraTickets(extraTicketsSnap.data()?.extraTickets);
+      const effectiveMaxTicketsPerUser = getLotteryEffectiveMaxTickets(
+        maxTicketsPerUser,
+        extraTickets,
+        maxNumber
+      );
+      if (selectedNumber < 1 || selectedNumber > maxNumber) {
+        throw new functions.https.HttpsError(
+          'failed-precondition',
+          `out-of-range: Debes seleccionar un numero entre 1 y ${maxNumber}.`
+        );
+      }
+  
+      const userTicketsCount = userEntriesSnap.size;
+  
+      if (entrySnap.exists) {
+        const existingEntry = entrySnap.data() || {};
+        const entryOwner = typeof existingEntry.userId === 'string' ? existingEntry.userId : '';
+        if (entryOwner === userId) {
+          return {
+            status: 'already_selected',
             lotteryId,
             selectedNumber,
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        };
-        if (idempotencyKeyRaw) {
-            entryPayload.idempotencyKey = idempotencyKeyRaw.slice(0, 120);
-        }
-        tx.set(entryRef, entryPayload);
-        tx.set(lotteryRef, {
-            participantsCount: admin.firestore.FieldValue.increment(1),
-            maxNumber,
-            maxTicketsPerUser,
-            entrySchemaVersion: lotteryUtils_1.LOTTERY_ENTRY_SCHEMA_VERSION,
-            migrationStatus: 'done',
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        }, { merge: true });
-        return {
-            status: 'ok',
-            lotteryId,
-            selectedNumber,
-            participantsCount: currentParticipants + 1,
-            userTicketsCount: userTicketsCount + 1,
+            participantsCount: currentParticipants,
+            userTicketsCount: Math.max(1, userTicketsCount),
             effectiveMaxTicketsPerUser
-        };
+          };
+        }
+        throw new functions.https.HttpsError(
+          'already-exists',
+          'number-taken: El numero seleccionado ya esta ocupado.'
+        );
+      }
+  
+      if (userTicketsCount >= effectiveMaxTicketsPerUser) {
+        throw new functions.https.HttpsError(
+          'failed-precondition',
+          `limit-reached: Alcanzaste el maximo de ${effectiveMaxTicketsPerUser} numeros para esta loteria.`
+        );
+      }
+  
+      const entryPayload: Record<string, unknown> = {
+        userId,
+        userName,
+        userUsername,
+        userProfilePicUrl,
+        lotteryId,
+        selectedNumber,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      };
+      if (idempotencyKeyRaw) {
+        entryPayload.idempotencyKey = idempotencyKeyRaw.slice(0, 120);
+      }
+  
+      tx.set(entryRef, entryPayload);
+      tx.set(
+        lotteryRef,
+        {
+          participantsCount: admin.firestore.FieldValue.increment(1),
+          maxNumber,
+          maxTicketsPerUser,
+          entrySchemaVersion: LOTTERY_ENTRY_SCHEMA_VERSION,
+          migrationStatus: 'done',
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        },
+        { merge: true }
+      );
+  
+      return {
+        status: 'ok',
+        lotteryId,
+        selectedNumber,
+        participantsCount: currentParticipants + 1,
+        userTicketsCount: userTicketsCount + 1,
+        effectiveMaxTicketsPerUser
+      };
     });
+  
     if (entryResult.status === 'ok') {
-        (0, lotteryUtils_1.publishLotteryBallToOBS)(entryResult.selectedNumber, userName, userProfilePicUrl);
+      publishLotteryBallToOBS(entryResult.selectedNumber, userName, userProfilePicUrl);
     }
     return entryResult;
+    */
 });
 // 9. Lottery draw callable (staff-only)
 exports.drawLotteryWinner = functions.https.onCall(async (data, context) => {
-    var _a;
-    await (0, userUtils_1.assertStaffUser)(db, context.auth);
-    const lotteryId = typeof (data === null || data === void 0 ? void 0 : data.lotteryId) === 'string' ? data.lotteryId.trim() : '';
+    return (0, lotteryRuntimeUtils_1.drawLotteryWinnerInternal)(db, data, context);
+    /*
+    await assertStaffUser(db, context.auth);
+  
+    const lotteryId = typeof data?.lotteryId === 'string' ? data.lotteryId.trim() : '';
     if (!lotteryId) {
-        throw new functions.https.HttpsError('invalid-argument', 'lotteryId es obligatorio.');
+      throw new functions.https.HttpsError('invalid-argument', 'lotteryId es obligatorio.');
     }
-    await (0, lotteryUtils_1.ensureLotteryEntriesSchemaV2)(lotteryId);
-    const requesterUid = ((_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid) || 'system';
+  
+    await ensureLotteryEntriesSchemaV2(lotteryId);
+  
+    const requesterUid = context.auth?.uid || 'system';
     const modulesConfigRef = db.collection('_config').doc('modules');
     const lotteryRef = db.collection('lotteries').doc(lotteryId);
+  
     const result = await db.runTransaction(async (tx) => {
-        const [modulesConfigSnap, lotterySnap] = await Promise.all([
-            tx.get(modulesConfigRef),
-            tx.get(lotteryRef)
-        ]);
-        if (!(0, moduleUtils_1.isLotteryModuleEnabled)(modulesConfigSnap.data())) {
-            throw new functions.https.HttpsError('failed-precondition', 'El modulo de loteria esta deshabilitado.');
-        }
-        if (!lotterySnap.exists) {
-            throw new functions.https.HttpsError('not-found', 'La loteria no existe.');
-        }
-        const lotteryData = lotterySnap.data() || {};
-        if (lotteryData.deletedAt != null) {
-            throw new functions.https.HttpsError('failed-precondition', 'La loteria ya no esta disponible.');
-        }
-        if (lotteryData.winner) {
-            throw new functions.https.HttpsError('failed-precondition', 'La loteria ya tiene ganador.');
-        }
-        const lotteryStatus = (lotteryData.status || 'draft');
-        if (lotteryStatus !== 'closed') {
-            throw new functions.https.HttpsError('failed-precondition', 'La loteria debe estar cerrada antes de sortear ganador.');
-        }
-        const entriesQuery = lotteryRef
-            .collection('entries')
-            .orderBy('selectedNumber', 'asc')
-            .limit(lotteryUtils_1.MAX_LOTTERY_DRAW_ENTRIES);
-        const entriesSnap = await tx.get(entriesQuery);
-        if (entriesSnap.empty) {
-            throw new functions.https.HttpsError('failed-precondition', 'No hay participantes para sortear.');
-        }
-        const randomIndex = Math.floor(Math.random() * entriesSnap.docs.length);
-        const winnerDoc = entriesSnap.docs[randomIndex];
-        const winnerData = winnerDoc.data() || {};
-        const winnerUserId = typeof winnerData.userId === 'string' ? winnerData.userId : winnerDoc.id;
-        const winnerUserName = typeof winnerData.userName === 'string'
-            ? winnerData.userName
-            : 'Usuario';
-        const winnerProfilePic = typeof winnerData.userProfilePicUrl === 'string'
-            ? winnerData.userProfilePicUrl
-            : '';
-        const winnerSelectedNumber = (0, lotteryUtils_1.parseSelectedLotteryNumber)(winnerData.selectedNumber) || null;
-        const participantsRaw = Number(lotteryData.participantsCount || 0);
-        const participantsCount = Number.isFinite(participantsRaw)
-            ? Math.max(0, Math.floor(participantsRaw))
-            : entriesSnap.docs.length;
-        tx.set(lotteryRef, {
-            status: 'completed',
-            winner: {
-                userId: winnerUserId,
-                userName: winnerUserName,
-                userProfilePicUrl: winnerProfilePic,
-                selectedNumber: winnerSelectedNumber,
-                selectedAt: admin.firestore.FieldValue.serverTimestamp()
-            },
-            updatedBy: requesterUid,
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        }, { merge: true });
-        return {
-            status: 'ok',
-            lotteryId,
-            winner: {
-                userId: winnerUserId,
-                userName: winnerUserName,
-                userProfilePicUrl: winnerProfilePic,
-                selectedNumber: winnerSelectedNumber
-            },
-            participantsCount,
-            lotteryTitle: lotteryData.title || lotteryData.nombre || 'Sorteo',
-            hasPremio: lotteryData.hasPremio !== false,
-            premioType: lotteryData.premioType || 'dinero',
-            premioDinero: typeof lotteryData.premioDinero === 'number' ? lotteryData.premioDinero : null,
-            premioOtros: typeof lotteryData.premioOtros === 'string' ? lotteryData.premioOtros : ''
-        };
+      const [modulesConfigSnap, lotterySnap] = await Promise.all([
+        tx.get(modulesConfigRef),
+        tx.get(lotteryRef)
+      ]);
+  
+      if (!isLotteryModuleEnabled(modulesConfigSnap.data())) {
+        throw new functions.https.HttpsError(
+          'failed-precondition',
+          'El modulo de loteria esta deshabilitado.'
+        );
+      }
+  
+      if (!lotterySnap.exists) {
+        throw new functions.https.HttpsError('not-found', 'La loteria no existe.');
+      }
+  
+      const lotteryData = lotterySnap.data() || {};
+      if (lotteryData.deletedAt != null) {
+        throw new functions.https.HttpsError(
+          'failed-precondition',
+          'La loteria ya no esta disponible.'
+        );
+      }
+  
+      if (lotteryData.winner) {
+        throw new functions.https.HttpsError(
+          'failed-precondition',
+          'La loteria ya tiene ganador.'
+        );
+      }
+  
+      const lotteryStatus = (lotteryData.status || 'draft') as LotteryStatus;
+      if (lotteryStatus !== 'closed') {
+        throw new functions.https.HttpsError(
+          'failed-precondition',
+          'La loteria debe estar cerrada antes de sortear ganador.'
+        );
+      }
+  
+      const entriesQuery = lotteryRef
+        .collection('entries')
+        .orderBy('selectedNumber', 'asc')
+        .limit(MAX_LOTTERY_DRAW_ENTRIES);
+      const entriesSnap = await tx.get(entriesQuery);
+  
+      if (entriesSnap.empty) {
+        throw new functions.https.HttpsError(
+          'failed-precondition',
+          'No hay participantes para sortear.'
+        );
+      }
+  
+      const randomIndex = Math.floor(Math.random() * entriesSnap.docs.length);
+      const winnerDoc = entriesSnap.docs[randomIndex];
+      const winnerData = winnerDoc.data() || {};
+  
+      const winnerUserId = typeof winnerData.userId === 'string' ? winnerData.userId : winnerDoc.id;
+      const winnerUserName = typeof winnerData.userName === 'string'
+        ? winnerData.userName
+        : 'Usuario';
+      const winnerProfilePic = typeof winnerData.userProfilePicUrl === 'string'
+        ? winnerData.userProfilePicUrl
+        : '';
+      const winnerSelectedNumber = parseSelectedLotteryNumber(winnerData.selectedNumber) || null;
+  
+      const participantsRaw = Number(lotteryData.participantsCount || 0);
+      const participantsCount = Number.isFinite(participantsRaw)
+        ? Math.max(0, Math.floor(participantsRaw))
+        : entriesSnap.docs.length;
+  
+      tx.set(
+        lotteryRef,
+        {
+          status: 'completed',
+          winner: {
+            userId: winnerUserId,
+            userName: winnerUserName,
+            userProfilePicUrl: winnerProfilePic,
+            selectedNumber: winnerSelectedNumber,
+            selectedAt: admin.firestore.FieldValue.serverTimestamp()
+          },
+          updatedBy: requesterUid,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        },
+        { merge: true }
+      );
+  
+      return {
+        status: 'ok',
+        lotteryId,
+        winner: {
+          userId: winnerUserId,
+          userName: winnerUserName,
+          userProfilePicUrl: winnerProfilePic,
+          selectedNumber: winnerSelectedNumber
+        },
+        participantsCount,
+        lotteryTitle: lotteryData.title || lotteryData.nombre || 'Sorteo',
+        hasPremio: lotteryData.hasPremio !== false,
+        premioType: lotteryData.premioType || 'dinero',
+        premioDinero: typeof lotteryData.premioDinero === 'number' ? lotteryData.premioDinero : null,
+        premioOtros: typeof lotteryData.premioOtros === 'string' ? lotteryData.premioOtros : ''
+      };
     });
+  
     // Emitir notificación del sistema y push al ganador fuera de la transacción
     try {
-        const winnerUserId = result.winner.userId;
-        const lotteryTitle = result.lotteryTitle;
-        const winnerSelectedNumber = result.winner.selectedNumber;
-        let premioMsg = '';
-        if (result.hasPremio) {
-            if (result.premioType === 'dinero' && result.premioDinero !== null) {
-                premioMsg = `un premio de $${result.premioDinero} ARS`;
-            }
-            else if (result.premioType === 'otros' && result.premioOtros) {
-                premioMsg = `el premio "${result.premioOtros}"`;
-            }
-            else {
-                premioMsg = 'el premio mayor';
-            }
+      const winnerUserId = result.winner.userId;
+      const lotteryTitle = result.lotteryTitle;
+      const winnerSelectedNumber = result.winner.selectedNumber;
+  
+      let premioMsg = '';
+      if (result.hasPremio) {
+        if (result.premioType === 'dinero' && result.premioDinero !== null) {
+          premioMsg = `un premio de $${result.premioDinero} ARS`;
+        } else if (result.premioType === 'otros' && result.premioOtros) {
+          premioMsg = `el premio "${result.premioOtros}"`;
+        } else {
+          premioMsg = 'el premio mayor';
         }
-        else {
-            premioMsg = 'el premio mayor';
-        }
-        const systemMessage = `🏆 ¡Felicidades! Has ganado el sorteo "${lotteryTitle}" con el número #${winnerSelectedNumber}. Tu premio es ${premioMsg}.`;
-        const notificationRef = db.collection('users')
-            .doc(winnerUserId)
-            .collection('notifications')
-            .doc();
-        await notificationRef.set({
-            type: 'system',
-            recipientUserId: winnerUserId,
-            actorUserId: 'system',
-            actorName: 'Sorteos Bot',
-            actorUsername: 'system',
-            actorProfilePictureUrl: 'https://bot.cdelu.io/images/logo.png',
-            contentId: lotteryId,
-            contentModule: '',
-            contentPublicRef: '',
-            contentSlug: '',
-            commentId: '',
-            replyId: '',
-            targetPath: '/perfil',
-            isRead: false,
-            readAt: null,
-            eventCount: 1,
-            systemMessage,
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-            lastEventAt: admin.firestore.FieldValue.serverTimestamp()
-        });
-        // Enviar alerta push
-        await (0, notificationRuntimeUtils_1.sendPushToNotificationDevices)(db, notificationRef, winnerUserId, 'system', 'Sorteos Bot', '/perfil').catch((err) => console.warn('Error sending winner push notification:', err));
+      } else {
+        premioMsg = 'el premio mayor';
+      }
+  
+      const systemMessage = `🏆 ¡Felicidades! Has ganado el sorteo "${lotteryTitle}" con el número #${winnerSelectedNumber}. Tu premio es ${premioMsg}.`;
+  
+      const notificationRef = db.collection('users')
+        .doc(winnerUserId)
+        .collection('notifications')
+        .doc();
+  
+      await notificationRef.set({
+        type: 'system',
+        recipientUserId: winnerUserId,
+        actorUserId: 'system',
+        actorName: 'Sorteos Bot',
+        actorUsername: 'system',
+        actorProfilePictureUrl: 'https://bot.cdelu.io/images/logo.png',
+        contentId: lotteryId,
+        contentModule: '',
+        contentPublicRef: '',
+        contentSlug: '',
+        commentId: '',
+        replyId: '',
+        targetPath: '/perfil',
+        isRead: false,
+        readAt: null,
+        eventCount: 1,
+        systemMessage,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastEventAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+  
+      // Enviar alerta push
+      await sendPushToNotificationDevices(db,
+        notificationRef,
+        winnerUserId,
+        'system',
+        'Sorteos Bot',
+        '/perfil'
+      ).catch((err) => console.warn('Error sending winner push notification:', err));
+  
+    } catch (error) {
+      console.error('Error recording winner notification:', error);
     }
-    catch (error) {
-        console.error('Error recording winner notification:', error);
-    }
+  
     return {
-        status: result.status,
-        lotteryId: result.lotteryId,
-        winner: result.winner,
-        participantsCount: result.participantsCount
+      status: result.status,
+      lotteryId: result.lotteryId,
+      winner: result.winner,
+      participantsCount: result.participantsCount
     };
+    */
 });
 // 10. Surveys vote callable (single vote per user/survey)
 exports.submitSurveyVote = functions.https.onCall(async (data, context) => {
-    var _a;
-    const userId = (_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid;
-    if (!userId) {
-        throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para votar.');
-    }
-    const surveyId = typeof (data === null || data === void 0 ? void 0 : data.surveyId) === 'string' ? data.surveyId.trim() : '';
-    const optionIds = (0, userUtils_1.normalizeOptionIds)(data === null || data === void 0 ? void 0 : data.optionIds);
-    const idempotencyKeyRaw = typeof (data === null || data === void 0 ? void 0 : data.idempotencyKey) === 'string'
-        ? data.idempotencyKey.trim()
-        : '';
-    const idempotencyKey = idempotencyKeyRaw ? idempotencyKeyRaw.slice(0, 120) : null;
-    if (!surveyId) {
-        throw new functions.https.HttpsError('invalid-argument', 'surveyId es obligatorio.');
-    }
-    if (optionIds.length === 0) {
-        throw new functions.https.HttpsError('invalid-argument', 'Debes seleccionar al menos una opcion.');
-    }
-    if (optionIds.length > MAX_SURVEY_OPTIONS_SELECTED) {
-        throw new functions.https.HttpsError('invalid-argument', 'Cantidad de opciones seleccionadas invalida.');
-    }
-    const surveyRef = db.collection('surveys').doc(surveyId);
-    const voteRef = db.collection('survey_votes').doc(`${surveyId}_${userId}`);
-    const modulesConfigRef = db.collection('_config').doc('modules');
-    return db.runTransaction(async (tx) => {
-        var _a, _b, _c, _d;
-        const [modulesConfigSnap, surveySnap, existingVoteSnap] = await Promise.all([
-            tx.get(modulesConfigRef),
-            tx.get(surveyRef),
-            tx.get(voteRef)
-        ]);
-        const surveysEnabled = Boolean((_c = (_b = (_a = modulesConfigSnap.data()) === null || _a === void 0 ? void 0 : _a.surveys) === null || _b === void 0 ? void 0 : _b.enabled) !== null && _c !== void 0 ? _c : true);
-        if (!surveysEnabled) {
-            throw new functions.https.HttpsError('failed-precondition', 'El modulo de encuestas esta deshabilitado.');
-        }
-        if (!surveySnap.exists) {
-            throw new functions.https.HttpsError('not-found', 'La encuesta no existe.');
-        }
-        const surveyData = surveySnap.data() || {};
-        const surveyStatus = (surveyData.status || 'inactive');
-        if (surveyStatus !== 'active') {
-            throw new functions.https.HttpsError('failed-precondition', 'La encuesta no esta activa.');
-        }
-        if (isExpired(surveyData.expiresAt)) {
-            throw new functions.https.HttpsError('failed-precondition', 'La encuesta ya expiro.');
-        }
-        const isMultipleChoice = Boolean(surveyData.isMultipleChoice);
-        const maxVotesRaw = Number((_d = surveyData.maxVotesPerUser) !== null && _d !== void 0 ? _d : 1);
-        const maxVotesPerUser = Number.isFinite(maxVotesRaw)
-            ? (isMultipleChoice ? Math.max(2, Math.floor(maxVotesRaw)) : 1)
-            : (isMultipleChoice ? 2 : 1);
-        if (!isMultipleChoice && optionIds.length !== 1) {
-            throw new functions.https.HttpsError('invalid-argument', 'Esta encuesta permite solo una opcion.');
-        }
-        if (optionIds.length > maxVotesPerUser) {
-            throw new functions.https.HttpsError('invalid-argument', 'Superaste el maximo de opciones permitidas.');
-        }
-        const surveyOptions = (0, userUtils_1.normalizeSurveyOptions)(surveyData.options);
-        if (surveyOptions.length < 2) {
-            throw new functions.https.HttpsError('failed-precondition', 'La encuesta no tiene opciones validas para votar.');
-        }
-        const availableOptionIds = new Set();
-        for (const option of surveyOptions) {
-            if (option.active) {
-                availableOptionIds.add(option.id);
-            }
-        }
-        for (const selectedOptionId of optionIds) {
-            if (!availableOptionIds.has(selectedOptionId)) {
-                throw new functions.https.HttpsError('invalid-argument', 'Seleccionaste una opcion invalida.');
-            }
-        }
-        if (existingVoteSnap.exists) {
-            const existingVote = existingVoteSnap.data() || {};
-            return {
-                status: 'already_voted',
-                surveyId,
-                optionIds: (0, userUtils_1.normalizeOptionIds)(existingVote.optionIds)
-            };
-        }
-        const optionSelectionCounts = new Map();
-        for (const optionId of optionIds) {
-            const previousCount = optionSelectionCounts.get(optionId) || 0;
-            optionSelectionCounts.set(optionId, previousCount + 1);
-        }
-        const nextOptions = surveyOptions.map((option) => {
-            const incrementBy = optionSelectionCounts.get(option.id) || 0;
-            if (incrementBy <= 0)
-                return option;
-            return Object.assign(Object.assign({}, option), { voteCount: option.voteCount + incrementBy });
-        });
-        const votePayload = {
-            surveyId,
-            userId,
-            optionIds,
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        };
-        if (idempotencyKey) {
-            votePayload.idempotencyKey = idempotencyKey;
-        }
-        tx.set(voteRef, votePayload);
-        tx.update(surveyRef, {
-            options: nextOptions,
-            totalVotes: admin.firestore.FieldValue.increment(optionIds.length),
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        });
-        return {
-            status: 'ok',
-            surveyId,
-            optionIds
-        };
-    });
+    return (0, surveyRuntimeUtils_1.submitSurveyVoteInternal)(db, data, context);
 });
 // 11. Auto-complete expired surveys
 exports.completeExpiredSurveys = functions.pubsub
     .schedule('every 1 minutes')
     .onRun(async () => {
-    let completedCount = 0;
-    while (true) {
-        const snapshot = await db.collection('surveys')
-            .where('status', '==', 'active')
-            .where('expiresAt', '<=', admin.firestore.Timestamp.now())
-            .orderBy('expiresAt', 'asc')
-            .limit(SURVEY_COMPLETE_BATCH_SIZE)
-            .get();
-        if (snapshot.empty)
-            break;
-        const batch = db.batch();
-        for (const surveyDoc of snapshot.docs) {
-            batch.update(surveyDoc.ref, {
-                status: 'completed',
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            });
-        }
-        await batch.commit();
-        completedCount += snapshot.size;
-        if (snapshot.size < SURVEY_COMPLETE_BATCH_SIZE)
-            break;
-    }
-    console.log(`Expired surveys completed: ${completedCount}`);
+    await (0, surveyRuntimeUtils_1.completeExpiredSurveysInternal)(db);
     return null;
 });
 exports.purgeOldNotifications = functions.pubsub
     .schedule('every day 03:00')
     .timeZone('Etc/UTC')
     .onRun(async () => {
-    const cutoffDate = new Date(Date.now() - NOTIFICATION_RETENTION_DAYS * 24 * 60 * 60 * 1000);
-    const cutoffTs = admin.firestore.Timestamp.fromDate(cutoffDate);
-    let removedCount = 0;
-    while (true) {
-        const snapshot = await db.collectionGroup('notifications')
-            .where('lastEventAt', '<=', cutoffTs)
-            .limit(NOTIFICATION_PAGE_SIZE)
-            .get();
-        if (snapshot.empty)
-            break;
-        const batch = db.batch();
-        for (const notificationDoc of snapshot.docs) {
-            batch.delete(notificationDoc.ref);
-        }
-        await batch.commit();
-        removedCount += snapshot.size;
-        if (snapshot.size < NOTIFICATION_PAGE_SIZE)
-            break;
-    }
+    const removedCount = await (0, notificationRuntimeUtils_1.purgeOldNotificationsInternal)(db, NOTIFICATION_RETENTION_DAYS, NOTIFICATION_PAGE_SIZE);
     console.log(`Old notifications removed: ${removedCount}`);
     return null;
 });
@@ -3133,52 +2523,7 @@ exports.purgeOldNotifications = functions.pubsub
 exports.onAdEventCreated = functions.firestore
     .document('ad_events/{eventId}')
     .onCreate(async (snap) => {
-    var _a;
-    const eventData = snap.data();
-    if (!eventData)
-        return null;
-    const adId = eventData.adId;
-    const eventType = eventData.eventType;
-    const countRaw = Number((_a = eventData.count) !== null && _a !== void 0 ? _a : 1);
-    const count = Number.isFinite(countRaw) ? Math.max(1, Math.min(Math.floor(countRaw), 20)) : 1;
-    if (!adId || (eventType !== 'impression' && eventType !== 'click')) {
-        console.log('Ignoring invalid ad event payload', { adId, eventType });
-        return null;
-    }
-    const adRef = db.collection('ads').doc(adId);
-    try {
-        await db.runTransaction(async (tx) => {
-            const adSnap = await tx.get(adRef);
-            if (!adSnap.exists) {
-                console.log(`Ad ${adId} does not exist. Event ignored.`);
-                return;
-            }
-            const adData = adSnap.data() || {};
-            const stats = adData.stats || {};
-            const currentImpressions = Number(stats.impressionsTotal || 0);
-            const currentClicks = Number(stats.clicksTotal || 0);
-            const impressionIncrement = eventType === 'impression' ? count : 0;
-            const clickIncrement = eventType === 'click' ? count : 0;
-            const nextImpressions = currentImpressions + impressionIncrement;
-            const nextClicks = currentClicks + clickIncrement;
-            const ctr = nextImpressions > 0
-                ? Number(((nextClicks / nextImpressions) * 100).toFixed(2))
-                : 0;
-            tx.set(adRef, {
-                stats: {
-                    impressionsTotal: admin.firestore.FieldValue.increment(impressionIncrement),
-                    clicksTotal: admin.firestore.FieldValue.increment(clickIncrement),
-                    ctr,
-                    lastEventAt: admin.firestore.FieldValue.serverTimestamp()
-                },
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            }, { merge: true });
-        });
-        return null;
-    }
-    catch (error) {
-        console.error(`Failed to aggregate ad event for ad ${adId}`, error);
-        return null;
-    }
+    await (0, adRuntimeUtils_1.handleAdEventCreatedInternal)(db, snap);
+    return null;
 });
 //# sourceMappingURL=index.js.map

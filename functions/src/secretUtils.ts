@@ -30,6 +30,13 @@ const SECRET_SEX_VALUES = new Set<string>([
   'hombre',
   'mujer'
 ]);
+const SECRET_MODERATION_STATUS_VALUES = new Set<string>([
+  'all',
+  'active',
+  'hidden_auto',
+  'hidden_admin',
+  'blocked'
+]);
 
 const clampInteger = (value: unknown, min: number, max: number, fallback: number): number => {
   const raw = Number(value);
@@ -87,6 +94,25 @@ export const normalizeSecretAge = (value: unknown): number | null => {
 export const normalizeSecretReportReason = (value: unknown): string => {
   const reason = sanitizeSecretText(value, SECRET_REPORT_REASON_MAX_LENGTH);
   return reason || 'contenido_inapropiado';
+};
+
+export const normalizeSecretModerationStatusFilter = (value: unknown): string => {
+  const normalized = sanitizeBoundedString(value, 40).toLowerCase();
+  if (SECRET_MODERATION_STATUS_VALUES.has(normalized)) return normalized;
+  return 'all';
+};
+
+export const normalizeSecretModerationAction = (
+  value: unknown
+): 'hide' | 'restore' | 'block' => {
+  const normalized = sanitizeBoundedString(value, 40).toLowerCase();
+  if (normalized === 'hide' || normalized === 'restore' || normalized === 'block') {
+    return normalized;
+  }
+  throw new functions.https.HttpsError(
+    'invalid-argument',
+    'action debe ser hide, restore o block.'
+  );
 };
 
 export const normalizeSecretClientAnonId = (value: unknown): string => {

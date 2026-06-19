@@ -1,9 +1,5 @@
 import * as functions from 'firebase-functions';
 import * as admin from 'firebase-admin';
-import * as path from 'path';
-import * as os from 'os';
-import * as fs from 'fs/promises';
-import { Readable } from 'stream';
 import {
   buildContentPublicIdKey,
   buildContentSlugBase,
@@ -13,9 +9,7 @@ import {
   normalizeContentSlug
 } from './contentUtils';
 import {
-  ANDROID_PUSH_CHANNEL_ID,
   buildProfileTargetPath,
-  safeNotificationPath,
   sanitizeNotificationDeviceId,
   type NotificationPlatform
 } from './notificationUtils';
@@ -27,6 +21,8 @@ import {
   normalizeSecretAge,
   normalizeSecretCategory,
   normalizeSecretReportReason,
+  normalizeSecretModerationAction,
+  normalizeSecretModerationStatusFilter,
   normalizeSecretSex,
   normalizeSecretZone,
   refreshSecretRankingsInternal,
@@ -40,37 +36,15 @@ import {
   timestampToMillisOrZero
 } from './secretUtils';
 import {
-  clampInteger,
-  LOTTERY_ENTRY_SCHEMA_VERSION,
-  LOTTERY_MAX_EXTRA_TICKETS_PER_USER,
-  LOTTERY_MAX_MAX_NUMBER,
-  LOTTERY_USER_EXTRA_TICKETS_COLLECTION,
-  MAX_LOTTERY_DRAW_ENTRIES,
-  ensureLotteryEntriesSchemaV2,
-  getLotteryEffectiveMaxTickets,
-  normalizeLotteryExtraTickets,
-  normalizeLotteryMaxNumber,
-  normalizeLotteryMaxTicketsPerUser,
-  parseSelectedLotteryNumber,
-  publishLotteryBallToOBS,
-  toLotteryEntryDocId,
-  toLotteryUserExtraDocId,
-  type LotteryStatus
+  clampInteger
 } from './lotteryUtils';
 import {
-  USERNAME_MAX_LENGTH,
-  USERNAME_MIN_LENGTH,
-  USERNAME_REGEX,
   assertAdminUser,
   assertStaffUser,
-  assertSystemAdminUser,
   buildPublicUserProfile,
   ensureNotificationTypeSettings,
   ensureUserSettings,
   ensureUserStats,
-  normalizeOptionIds,
-  normalizeSurveyOptions,
-  normalizeUsernameCandidate,
   normalizeUsernameLoose,
   normalizeUsernameStrict,
   propagateUserFields,
@@ -78,386 +52,59 @@ import {
 } from './userUtils';
 import {
   isLikeModuleEnabledForContent,
-  isLotteryModuleEnabled,
   isSecretsModuleEnabled
 } from './moduleUtils';
+import {
+  sanitizeOptionalUrl
+} from './hostingUtils';
+import { buildCommentRef } from './commentUtils';
+import {
+  onContentCreatedInternal,
+  onContentDeletedInternal
+} from './contentRuntimeUtils';
+import {
+  onCommunityPostImageFinalizedInternal,
+  uploadCommunityImageToHostingInternal
+} from './contentImageRuntimeUtils';
+import {
+  onOfficialNewsReceivedInternal,
+  onCommunityPostsReceivedInternal
+} from './contentSyncRuntimeUtils';
+import { submitSurveyVoteInternal, completeExpiredSurveysInternal } from './surveyRuntimeUtils';
+import { handleAdEventCreatedInternal } from './adRuntimeUtils';
+import {
+  getLotteryUserTicketExtrasInternal,
+  listLotteriesForAdminInternal,
+  grantLotteryUserExtraTicketsInternal
+} from './lotteryAdminRuntimeUtils';
+import {
+  updateUserManagementInternal,
+  getUsersSocialConnectionsInternal
+} from './userAdminRuntimeUtils';
+import {
+  enterLotteryInternal,
+  drawLotteryWinnerInternal
+} from './lotteryRuntimeUtils';
 import {
   buildContentTargetFromDoc,
   invalidateNotificationRecipientCache,
   loadNotificationActorIdentity,
-  sendPushToNotificationDevices,
+  purgeOldNotificationsInternal,
   subscribeTokenToPushTopics,
   unsubscribeTokenFromPushTopics,
   writeNotificationEvent
 } from './notificationRuntimeUtils';
+import { sendTestPushToAllUsersInternal } from './notificationRuntimeUtils';
 
 admin.initializeApp();
 const db = admin.firestore();
 
-type SurveyStatus = 'active' | 'inactive' | 'completed';
-type HostingFtpClient = {
-  ftp: { verbose: boolean };
-  access(options: {
-    host: string;
-    user: string;
-    password: string;
-    port: number;
-    secure: boolean;
-  }): Promise<void>;
-  ensureDir(path: string): Promise<void>;
-  uploadFrom(source: Readable, remotePath: string): Promise<void>;
-  remove(remotePath: string): Promise<void>;
-  close(): void;
-};
-
-const MAX_SURVEY_OPTIONS_SELECTED = 10;
-const SURVEY_COMPLETE_BATCH_SIZE = 200;
-const COMMUNITY_THUMB_MAX_SIDE = 480;
-const MAX_HOSTING_UPLOAD_BYTES = 6 * 1024 * 1024;
 const LIKE_WRITER_CALLABLE = 'callable_toggle_v1';
 const COMMUNITY_THUMBNAIL_BUCKET = process.env.COMMUNITY_IMAGES_BUCKET || 'cdeluar-ddefc-storage';
 const CONTENT_SLUG_MAX_LENGTH = 96;
 const NOTIFICATION_PAGE_SIZE = 300;
 const NOTIFICATION_RETENTION_DAYS = 30;
 const NOTIFICATION_DEVICE_ID_MAX_LENGTH = 120;
-
-const loadFtpClient = async (): Promise<{ Client: new (timeoutMs?: number) => HostingFtpClient }> => {
-  const ftpModule = await import('basic-ftp');
-  return (ftpModule as unknown as { Client?: new (timeoutMs?: number) => HostingFtpClient; default?: { Client: new (timeoutMs?: number) => HostingFtpClient } }).default
-    ? (ftpModule as unknown as { default: { Client: new (timeoutMs?: number) => HostingFtpClient } }).default
-    : (ftpModule as unknown as { Client: new (timeoutMs?: number) => HostingFtpClient });
-};
-
-const loadSharp = async (): Promise<(input: string) => any> => {
-  const sharpModule = await import('sharp');
-  return ((sharpModule as unknown as { default?: (input: string) => any }).default
-    ?? (sharpModule as unknown as (input: string) => any));
-};
-
-const buildCommentRef = (contentId: string, commentId: string) =>
-  db.collection('content').doc(contentId).collection('comments').doc(commentId);
-
-const sanitizeOptionalUrl = (value: unknown, fieldName: string): string => {
-  const raw = sanitizeBoundedString(value, 240);
-  if (!raw) return '';
-
-  const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
-  try {
-    const parsed = new URL(withProtocol);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      throw new Error('unsupported-protocol');
-    }
-    return parsed.toString().slice(0, 240);
-  } catch {
-    throw new functions.https.HttpsError(
-      'invalid-argument',
-      `${fieldName} debe ser una URL valida (http/https).`
-    );
-  }
-};
-
-const isExpired = (value: unknown): boolean => {
-
-  if (!value) return false;
-  if (value instanceof admin.firestore.Timestamp) {
-    return value.toMillis() <= Date.now();
-  }
-
-  if (value instanceof Date) {
-    return value.getTime() <= Date.now();
-  }
-
-  return false;
-};
-
-const ensureImageMime = (value: unknown): string => {
-  const mime = typeof value === 'string' ? value.trim().toLowerCase() : '';
-  if (!mime.startsWith('image/')) {
-    throw new functions.https.HttpsError(
-      'invalid-argument',
-      'Formato de archivo invalido.'
-    );
-  }
-  return mime;
-};
-
-const decodeBase64Payload = (value: unknown): Buffer => {
-  if (typeof value !== 'string' || !value.trim()) {
-    throw new functions.https.HttpsError(
-      'invalid-argument',
-      'No se recibio imagen.'
-    );
-  }
-
-  const sanitized = value.replace(/^data:[^;]+;base64,/, '').trim();
-  const buffer = Buffer.from(sanitized, 'base64');
-  if (buffer.length === 0) {
-    throw new functions.https.HttpsError(
-      'invalid-argument',
-      'No se pudo decodificar la imagen.'
-    );
-  }
-  if (buffer.length > MAX_HOSTING_UPLOAD_BYTES) {
-    throw new functions.https.HttpsError(
-      'invalid-argument',
-      'La imagen supera el limite permitido.'
-    );
-  }
-  return buffer;
-};
-
-const sanitizePathSegment = (value: string): string => {
-  const sanitized = value
-    .replace(/[^a-zA-Z0-9/_.-]/g, '-')
-    .replace(/\.\.+/g, '.')
-    .replace(/\/+/g, '/')
-    .replace(/^\//, '')
-    .replace(/\/$/, '');
-  return sanitized;
-};
-
-const getHostingFtpConfig = () => {
-  const host = process.env.HOSTING_FTP_HOST || '';
-  const user = process.env.HOSTING_FTP_USER || '';
-  const password = process.env.HOSTING_FTP_PASSWORD || '';
-  const basePath = process.env.HOSTING_FTP_BASE_PATH || '/domains/bot.cdelu.io/public_html/images';
-  const publicBaseUrl = process.env.HOSTING_PUBLIC_BASE_URL || 'https://bot.cdelu.io/images';
-  const port = Number(process.env.HOSTING_FTP_PORT || 21);
-
-  if (!host || !user || !password) {
-    throw new functions.https.HttpsError(
-      'failed-precondition',
-      'Falta configurar credenciales FTP del hosting.'
-    );
-  }
-
-  return {
-    host,
-    user,
-    password,
-    port: Number.isFinite(port) ? port : 21,
-    basePath,
-    publicBaseUrl: publicBaseUrl.replace(/\/$/, '')
-  };
-};
-
-const getHostingAvatarFtpConfig = () => {
-  const host = process.env.HOSTING_FTP_HOST || '';
-  const user = process.env.HOSTING_FTP_USER || '';
-  const password = process.env.HOSTING_FTP_PASSWORD || '';
-  const basePath = process.env.HOSTING_FTP_AVATAR_BASE_PATH || '/domains/bot.cdelu.io/public_html';
-  const publicBaseUrl = process.env.HOSTING_AVATAR_PUBLIC_BASE_URL || 'https://bot.cdelu.io';
-  const port = Number(process.env.HOSTING_FTP_PORT || 21);
-
-  if (!host || !user || !password) {
-    throw new functions.https.HttpsError(
-      'failed-precondition',
-      'Falta configurar credenciales FTP del hosting.'
-    );
-  }
-
-  return {
-    host,
-    user,
-    password,
-    port: Number.isFinite(port) ? port : 21,
-    basePath,
-    publicBaseUrl: publicBaseUrl.replace(/\/$/, '')
-  };
-};
-
-const normalizeHostedRelativePath = (value: string): string => {
-  return value
-    .replace(/\\/g, '/')
-    .replace(/^\/+/, '')
-    .replace(/\/+/g, '/')
-    .trim();
-};
-
-const extractHostedRelativePaths = (value: unknown, publicBaseUrl: string): string[] => {
-  const results = new Set<string>();
-  const publicBase = publicBaseUrl.replace(/\/+$/, '');
-
-  const pushPath = (candidate: string) => {
-    const normalized = normalizeHostedRelativePath(candidate);
-    if (!normalized || normalized.includes('..')) return;
-    results.add(normalized.replace(/^avatars\//i, 'AVATAR/'));
-  };
-
-  const pushFromString = (raw: string) => {
-    const value = raw.trim();
-    if (!value) return;
-
-    const directPath = normalizeHostedRelativePath(value);
-    if (/^(posts|AVATAR|avatars)\//i.test(directPath)) {
-      pushPath(directPath);
-      return;
-    }
-
-    if (/^https?:\/\//i.test(value)) {
-      try {
-        const urlObj = new URL(value);
-        const baseObj = new URL(publicBase);
-        if (urlObj.origin !== baseObj.origin) return;
-
-        const basePath = normalizeHostedRelativePath(baseObj.pathname);
-        let relativePath = normalizeHostedRelativePath(urlObj.pathname);
-
-        if (basePath && relativePath.toLowerCase().startsWith(`${basePath.toLowerCase()}/`)) {
-          relativePath = relativePath.slice(basePath.length + 1);
-        } else if (relativePath.toLowerCase().startsWith('images/')) {
-          relativePath = relativePath.slice('images/'.length);
-        } else if (relativePath.toLowerCase().startsWith('imagenes/')) {
-          relativePath = relativePath.slice('imagenes/'.length);
-        }
-
-        if (relativePath) {
-          pushPath(decodeURIComponent(relativePath));
-        }
-      } catch {
-        const base = publicBase.replace(/\/+$/, '');
-        if (value.startsWith(`${base}/`)) {
-          pushPath(decodeURIComponent(value.slice(base.length + 1)));
-        }
-      }
-    }
-  };
-
-  const visit = (entry: unknown) => {
-    if (!entry) return;
-
-    if (typeof entry === 'string') {
-      pushFromString(entry);
-      return;
-    }
-
-    if (Array.isArray(entry)) {
-      for (const item of entry) visit(item);
-      return;
-    }
-
-    if (typeof entry === 'object') {
-      const imageEntry = entry as Record<string, unknown>;
-      pushFromString(String(imageEntry.path || ''));
-      pushFromString(String(imageEntry.thumbPath || ''));
-      pushFromString(String(imageEntry.url || ''));
-      pushFromString(String(imageEntry.thumbUrl || ''));
-      pushFromString(String(imageEntry.image || ''));
-      pushFromString(String(imageEntry.imageUrl || ''));
-      pushFromString(String(imageEntry.thumbnail || ''));
-      pushFromString(String(imageEntry.thumbnailUrl || ''));
-      pushFromString(String(imageEntry.imgMiniatura || ''));
-      pushFromString(String(imageEntry.img_miniatura || ''));
-      pushFromString(String(imageEntry.coverImage || ''));
-      pushFromString(String(imageEntry.coverThumbnailUrl || ''));
-    }
-  };
-
-  visit(value);
-  return Array.from(results);
-};
-
-const deriveHostingThumbRelativePath = (relativePath: string): string | null => {
-  const normalized = normalizeHostedRelativePath(relativePath);
-  if (!normalized) return null;
-
-  const ext = path.posix.extname(normalized);
-  if (!ext) return null;
-
-  const dir = path.posix.dirname(normalized);
-  const baseName = path.posix.basename(normalized, ext);
-
-  if (baseName.endsWith('_t') || baseName.endsWith('_') || baseName.endsWith('-thumb')) {
-    return normalized;
-  }
-
-  if (baseName.endsWith('_o')) {
-    return path.posix.join(dir, `${baseName.slice(0, -2)}_t${ext}`);
-  }
-
-  return path.posix.join(dir, `${baseName}_${ext}`);
-};
-
-const cleanupHostingRelativePath = async (
-  ftpClient: HostingFtpClient,
-  ftpConfig: ReturnType<typeof getHostingFtpConfig>,
-  relativePath: string
-): Promise<boolean> => {
-  const cleaned = normalizeHostedRelativePath(relativePath);
-  if (!cleaned || cleaned.includes('..')) return false;
-
-  const remotePath = `${ftpConfig.basePath}/${cleaned}`.replace(/\/+/g, '/');
-
-  try {
-    await ftpClient.remove(remotePath);
-    return true;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (!/not found|no such file|550/i.test(message)) {
-      console.warn(`No se pudo borrar archivo remoto ${cleaned}:`, error);
-    }
-    return false;
-  }
-};
-
-const cleanupCommunityPostHostingMedia = async (postData: FirebaseFirestore.DocumentData): Promise<void> => {
-  const publicBaseUrl = process.env.HOSTING_PUBLIC_BASE_URL || 'https://bot.cdelu.io/images';
-  const ftpConfig = getHostingFtpConfig();
-
-  const paths = new Set<string>();
-  const addPaths = (value: unknown) => {
-    for (const candidate of extractHostedRelativePaths(value, publicBaseUrl)) {
-      paths.add(candidate);
-    }
-  };
-
-  addPaths(postData.imagesV2);
-  addPaths(postData.images);
-  addPaths(postData.imgMiniatura);
-  addPaths(postData.img_miniatura);
-  addPaths(postData.thumbnail);
-  addPaths(postData.thumbnailUrl);
-  addPaths(postData.coverThumbnailUrl);
-  addPaths(postData.custom_fields?.image);
-  addPaths(postData.custom_fields?.imgMiniatura);
-  addPaths(postData.custom_fields?.img_miniatura);
-  addPaths(postData.custom_fields?.thumbnail);
-  addPaths(postData.custom_fields?.thumbnailUrl);
-
-  for (const imageEntry of Array.isArray(postData.imagesV2) ? postData.imagesV2 : []) {
-    if (!imageEntry || typeof imageEntry !== 'object') continue;
-    const entry = imageEntry as Record<string, unknown>;
-    if (typeof entry.path === 'string') paths.add(normalizeHostedRelativePath(entry.path));
-    if (typeof entry.thumbPath === 'string') paths.add(normalizeHostedRelativePath(entry.thumbPath));
-  }
-
-  const derivedThumbs = Array.from(paths)
-    .map((relativePath) => deriveHostingThumbRelativePath(relativePath))
-    .filter((relativePath): relativePath is string => Boolean(relativePath));
-  for (const relativePath of derivedThumbs) {
-    paths.add(relativePath);
-  }
-
-  const { Client } = await loadFtpClient();
-  const ftpClient = new Client(30_000);
-  ftpClient.ftp.verbose = false;
-
-  try {
-    await ftpClient.access({
-      host: ftpConfig.host,
-      user: ftpConfig.user,
-      password: ftpConfig.password,
-      port: ftpConfig.port,
-      secure: false
-    });
-
-    for (const relativePath of paths) {
-      await cleanupHostingRelativePath(ftpClient, ftpConfig, relativePath);
-    }
-  } finally {
-    ftpClient.close();
-  }
-};
 
 // 1. Likes
 export const onLikeAdded = functions.firestore
@@ -1177,33 +824,6 @@ export const reportSecretCallable = functions.https.onCall(async (data, context)
   });
 });
 
-const SECRET_MODERATION_STATUS_VALUES = new Set([
-  'all',
-  'active',
-  'hidden_auto',
-  'hidden_admin',
-  'blocked'
-]);
-
-const normalizeSecretModerationStatusFilter = (value: unknown): string => {
-  const normalized = sanitizeBoundedString(value, 40).toLowerCase();
-  if (SECRET_MODERATION_STATUS_VALUES.has(normalized)) return normalized;
-  return 'all';
-};
-
-const normalizeSecretModerationAction = (
-  value: unknown
-): 'hide' | 'restore' | 'block' => {
-  const normalized = sanitizeBoundedString(value, 40).toLowerCase();
-  if (normalized === 'hide' || normalized === 'restore' || normalized === 'block') {
-    return normalized;
-  }
-  throw new functions.https.HttpsError(
-    'invalid-argument',
-    'action debe ser hide, restore o block.'
-  );
-};
-
 export const getSecretModerationQueueCallable = functions.https.onCall(async (data, context) => {
   await assertAdminUser(db, context.auth);
 
@@ -1424,7 +1044,7 @@ export const onReplyCreated = functions.firestore
     if (!replyData || !replyData.userId || replyData.deletedAt != null) return;
 
     try {
-      const commentRef = buildCommentRef(contentId, commentId);
+      const commentRef = buildCommentRef(db, contentId, commentId);
       await commentRef.set(
         {
           stats: {
@@ -1491,7 +1111,7 @@ export const onReplyUpdated = functions.firestore
 
     const delta = isAlive ? 1 : -1;
     try {
-      await buildCommentRef(contentId, commentId).set(
+      await buildCommentRef(db, contentId, commentId).set(
         {
           stats: {
             repliesCount: admin.firestore.FieldValue.increment(delta)
@@ -1938,6 +1558,9 @@ export const unregisterNotificationDevice = functions.https.onCall(async (data, 
 });
 
 export const sendTestPushToAllUsers = functions.https.onCall(async (data, context) => {
+  return sendTestPushToAllUsersInternal(db, data, context);
+
+  /*
   await assertAdminUser(db, context.auth);
 
   const title = sanitizeBoundedString(data?.title, 120) || 'Prueba de notificaciones';
@@ -1988,6 +1611,7 @@ export const sendTestPushToAllUsers = functions.https.onCall(async (data, contex
     topic,
     messageId
   };
+  */
 });
 
 export const markNotificationRead = functions.https.onCall(async (data, context) => {
@@ -2082,351 +1706,23 @@ export const markAllNotificationsRead = functions.https.onCall(async (_data, con
 });
 
 export const updateUserManagement = functions.https.onCall(async (data, context) => {
-  await assertStaffUser(db, context.auth);
-
-  const requesterAuth = context.auth;
-  const targetUserId = sanitizeBoundedString(data?.userId, 128);
-  if (!targetUserId) {
-    throw new functions.https.HttpsError('invalid-argument', 'userId es obligatorio.');
-  }
-
-  const nextRole = sanitizeBoundedString(data?.rol, 40);
-  const hasRoleUpdate = nextRole.length > 0;
-  const allowedRoles = new Set([
-    'usuario',
-    'colaborador',
-    'admin',
-    'administrador',
-    'super_admin',
-    'superadmin',
-    'Sistema-no-user',
-    'sistema-no-user'
-  ]);
-  if (hasRoleUpdate && !allowedRoles.has(nextRole)) {
-    throw new functions.https.HttpsError('invalid-argument', 'Rol invalido.');
-  }
-
-  const hasVerifiedUpdate = typeof data?.isVerified === 'boolean';
-  const nextIsVerified = hasVerifiedUpdate ? Boolean(data.isVerified) : null;
-
-  const nextNombreRaw = sanitizeBoundedString(data?.nombre, 120);
-  const nextEmailRaw = sanitizeBoundedString(data?.email, 320).toLowerCase();
-  const usernameCandidate = normalizeUsernameCandidate(data?.username);
-  const hasCoreFieldInput = (
-    typeof data?.nombre === 'string' ||
-    typeof data?.username === 'string' ||
-    typeof data?.email === 'string'
-  );
-
-  if (typeof data?.username === 'string' && usernameCandidate.length === 0) {
-    throw new functions.https.HttpsError('invalid-argument', 'Username invalido.');
-  }
-  if (
-    typeof data?.username === 'string' &&
-    (usernameCandidate.length < USERNAME_MIN_LENGTH ||
-      usernameCandidate.length > USERNAME_MAX_LENGTH ||
-      !USERNAME_REGEX.test(usernameCandidate))
-  ) {
-    throw new functions.https.HttpsError(
-      'invalid-argument',
-      'Username invalido. Usa entre 3 y 30 caracteres: a-z, 0-9 y _.'
-    );
-  }
-  if (typeof data?.nombre === 'string' && !nextNombreRaw) {
-    throw new functions.https.HttpsError('invalid-argument', 'Nombre invalido.');
-  }
-  if (typeof data?.email === 'string') {
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(nextEmailRaw)) {
-      throw new functions.https.HttpsError('invalid-argument', 'Email invalido.');
-    }
-  }
-
-  const userRef = db.collection('users').doc(targetUserId);
-  const userSnap = await userRef.get();
-  if (!userSnap.exists) {
-    throw new functions.https.HttpsError('not-found', 'Usuario no encontrado.');
-  }
-
-  const currentData = userSnap.data() || {};
-  const currentNombre = sanitizeBoundedString(currentData.nombre, 120);
-  const currentEmail = sanitizeBoundedString(currentData.email, 320).toLowerCase();
-  const currentUsernameLower = sanitizeBoundedString(currentData.usernameLower, USERNAME_MAX_LENGTH);
-  const nextUsernameLower = typeof data?.username === 'string'
-    ? usernameCandidate
-    : currentUsernameLower;
-
-  const nextNombre = typeof data?.nombre === 'string' ? nextNombreRaw : currentNombre;
-  const nextEmail = typeof data?.email === 'string' ? nextEmailRaw : currentEmail;
-  const willUpdateCoreFields = hasCoreFieldInput && (
-    nextNombre !== currentNombre ||
-    nextEmail !== currentEmail ||
-    nextUsernameLower !== currentUsernameLower
-  );
-
-  if (willUpdateCoreFields) {
-    assertSystemAdminUser(requesterAuth);
-  }
-
-  if (nextUsernameLower !== currentUsernameLower) {
-    const usernameRef = db.collection('usernames').doc(nextUsernameLower);
-    const usernameSnap = await usernameRef.get();
-    if (usernameSnap.exists && usernameSnap.data()?.uid !== targetUserId) {
-      throw new functions.https.HttpsError('already-exists', 'Ese username ya esta en uso.');
-    }
-  }
-
-  const updates: Record<string, unknown> = {
-    updatedAt: admin.firestore.FieldValue.serverTimestamp()
-  };
-  if (hasRoleUpdate) {
-    updates.rol = nextRole;
-  }
-  if (hasVerifiedUpdate) {
-    updates.isVerified = nextIsVerified;
-  }
-  if (willUpdateCoreFields) {
-    updates.nombre = nextNombre;
-    updates.email = nextEmail;
-    updates.username = nextUsernameLower;
-    updates.usernameLower = nextUsernameLower;
-  }
-
-  await userRef.set(updates, { merge: true });
-
-  if (willUpdateCoreFields && nextEmail !== currentEmail) {
-    await admin.auth().updateUser(targetUserId, { email: nextEmail });
-  }
-
-  return {
-    ok: true,
-    userId: targetUserId,
-    updated: {
-      rol: hasRoleUpdate ? nextRole : currentData.rol,
-      isVerified: hasVerifiedUpdate ? nextIsVerified : currentData.isVerified,
-      nombre: willUpdateCoreFields ? nextNombre : currentData.nombre,
-      email: willUpdateCoreFields ? nextEmail : currentData.email,
-      username: willUpdateCoreFields ? nextUsernameLower : currentData.username
-    }
-  };
+  return updateUserManagementInternal(db, data, context);
 });
 
 export const getUsersSocialConnections = functions.https.onCall(async (data, context) => {
-  await assertStaffUser(db, context.auth);
-
-  const rawUserIds = Array.isArray(data?.userIds) ? data.userIds : [];
-  const normalizedUserIds: string[] = rawUserIds
-    .map((value: unknown) => sanitizeBoundedString(value, 128))
-    .filter((value: string) => value.length > 0);
-  const userIds: string[] = Array.from(new Set(normalizedUserIds)).slice(0, 50);
-
-  if (userIds.length === 0) {
-    return {
-      ok: true,
-      records: {}
-    };
-  }
-
-  const records: Record<string, { providerIds: string[] }> = {};
-  await Promise.all(
-    userIds.map(async (uid) => {
-      try {
-        const userRecord = await admin.auth().getUser(uid);
-        const providerIds = Array.from(
-          new Set(
-            (userRecord.providerData || [])
-              .map((provider) => sanitizeBoundedString(provider.providerId, 64))
-              .filter((providerId) => providerId.length > 0)
-          )
-        );
-        records[uid] = { providerIds };
-      } catch (error: any) {
-        if (error?.code === 'auth/user-not-found') {
-          records[uid] = { providerIds: [] };
-          return;
-        }
-        console.error(`Error loading auth providers for uid ${uid}:`, error);
-      }
-    })
-  );
-
-  return {
-    ok: true,
-    records
-  };
+  return getUsersSocialConnectionsInternal(db, data, context);
 });
 
 export const getLotteryUserTicketExtras = functions.https.onCall(async (data, context) => {
-  const requesterUid = context.auth?.uid || '';
-  if (!requesterUid) {
-    throw new functions.https.HttpsError(
-      'unauthenticated',
-      'Debes iniciar sesion para consultar tickets extra.'
-    );
-  }
-
-  const requestedUserId = sanitizeBoundedString(data?.userId, 128);
-  const targetUserId = requestedUserId || requesterUid;
-  if (targetUserId !== requesterUid) {
-    await assertAdminUser(db, context.auth);
-  }
-
-  const snapshot = await db
-    .collection(LOTTERY_USER_EXTRA_TICKETS_COLLECTION)
-    .where('userId', '==', targetUserId)
-    .limit(400)
-    .get();
-
-  const records: Record<string, number> = {};
-  for (const docSnap of snapshot.docs) {
-    const row = docSnap.data() || {};
-    const lotteryId = sanitizeBoundedString(row.lotteryId, 128);
-    if (!lotteryId) continue;
-    const extraTickets = normalizeLotteryExtraTickets(row.extraTickets);
-    if (extraTickets <= 0) continue;
-    records[lotteryId] = extraTickets;
-  }
-
-  return {
-    ok: true,
-    userId: targetUserId,
-    records
-  };
+  return getLotteryUserTicketExtrasInternal(db, data, context);
 });
 
 export const listLotteriesForAdmin = functions.https.onCall(async (_data, context) => {
-  await assertAdminUser(db, context.auth);
-
-  const snapshot = await db
-    .collection('lotteries')
-    .where('deletedAt', '==', null)
-    .orderBy('createdAt', 'desc')
-    .limit(300)
-    .get();
-
-  const lotteries = snapshot.docs.map((lotteryDoc) => {
-    const row = lotteryDoc.data() || {};
-    return {
-      id: lotteryDoc.id,
-      title: sanitizeBoundedString(row.title, 150) || '(Sin titulo)',
-      status: sanitizeBoundedString(row.status, 40) || 'draft',
-      maxNumber: normalizeLotteryMaxNumber(row.maxNumber),
-      maxTicketsPerUser: normalizeLotteryMaxTicketsPerUser(row.maxTicketsPerUser)
-    };
-  });
-
-  return {
-    ok: true,
-    lotteries
-  };
+  return listLotteriesForAdminInternal(db, context);
 });
 
 export const grantLotteryUserExtraTickets = functions.https.onCall(async (data, context) => {
-  await assertAdminUser(db, context.auth);
-
-  const adminUid = context.auth?.uid || 'system';
-  const adminEmail = sanitizeBoundedString((context.auth?.token || {}).email, 320).toLowerCase();
-  const userId = sanitizeBoundedString(data?.userId, 128);
-  const lotteryId = sanitizeBoundedString(data?.lotteryId, 128);
-  const quantity = clampInteger(data?.quantity, 1, LOTTERY_MAX_EXTRA_TICKETS_PER_USER, 1);
-
-  if (!userId) {
-    throw new functions.https.HttpsError('invalid-argument', 'userId es obligatorio.');
-  }
-  if (!lotteryId) {
-    throw new functions.https.HttpsError('invalid-argument', 'lotteryId es obligatorio.');
-  }
-
-  const userRef = db.collection('users').doc(userId);
-  const lotteryRef = db.collection('lotteries').doc(lotteryId);
-  const extraRef = db
-    .collection(LOTTERY_USER_EXTRA_TICKETS_COLLECTION)
-    .doc(toLotteryUserExtraDocId(lotteryId, userId));
-
-  return db.runTransaction(async (tx) => {
-    const [userSnap, lotterySnap, extraSnap] = await Promise.all([
-      tx.get(userRef),
-      tx.get(lotteryRef),
-      tx.get(extraRef)
-    ]);
-
-    if (!userSnap.exists) {
-      throw new functions.https.HttpsError('not-found', 'Usuario no encontrado.');
-    }
-    if (!lotterySnap.exists) {
-      throw new functions.https.HttpsError('not-found', 'Loteria no encontrada.');
-    }
-
-    const lotteryData = lotterySnap.data() || {};
-    if (lotteryData.deletedAt != null) {
-      throw new functions.https.HttpsError(
-        'failed-precondition',
-        'No se pueden asignar tickets extra en una loteria eliminada.'
-      );
-    }
-
-    const currentExtra = normalizeLotteryExtraTickets(extraSnap.data()?.extraTickets);
-    const nextExtra = normalizeLotteryExtraTickets(currentExtra + quantity);
-    if (nextExtra === currentExtra) {
-      throw new functions.https.HttpsError(
-        'failed-precondition',
-        'No se puede aumentar mas el cupo de tickets extra para este usuario.'
-      );
-    }
-
-    const maxNumber = normalizeLotteryMaxNumber(lotteryData.maxNumber);
-    const baseLimit = normalizeLotteryMaxTicketsPerUser(lotteryData.maxTicketsPerUser);
-    const effectiveLimit = getLotteryEffectiveMaxTickets(baseLimit, nextExtra, maxNumber);
-    const lotteryTitle = sanitizeBoundedString(lotteryData.title, 150) || 'Loteria';
-
-    const payload: Record<string, unknown> = {
-      userId,
-      lotteryId,
-      extraTickets: nextExtra,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedBy: adminUid,
-      updatedByEmail: adminEmail
-    };
-    if (!extraSnap.exists) {
-      payload.createdAt = admin.firestore.FieldValue.serverTimestamp();
-    }
-
-    tx.set(extraRef, payload, { merge: true });
-
-    const notificationRef = db.collection('users').doc(userId).collection('notifications').doc();
-    const notificationMessage = `Se te agregaron ${nextExtra - currentExtra} ticket(s) extra en la loteria "${lotteryTitle}".`;
-    tx.set(notificationRef, {
-      type: 'system',
-      recipientUserId: userId,
-      actorUserId: adminUid,
-      actorName: 'Sistema',
-      actorUsername: 'sistema',
-      actorProfilePictureUrl: '',
-      contentId: lotteryId,
-      contentModule: 'community',
-      contentPublicRef: '',
-      contentSlug: '',
-      commentId: '',
-      replyId: '',
-      targetPath: '/loteria',
-      systemMessage: notificationMessage,
-      eventCount: 1,
-      isRead: false,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      lastEventAt: admin.firestore.FieldValue.serverTimestamp()
-    });
-
-    return {
-      ok: true,
-      userId,
-      lotteryId,
-      added: nextExtra - currentExtra,
-      extraTickets: nextExtra,
-      baseLimit,
-      effectiveLimit
-    };
-  });
+  return grantLotteryUserExtraTicketsInternal(db, data, context);
 });
 
 export const syncPublicUserProfile = functions.firestore
@@ -2728,6 +2024,9 @@ export const onContentSlugSync = functions.firestore
 export const onContentCreated = functions.firestore
   .document('content/{contentId}')
   .onCreate(async (snap, context) => {
+    return onContentCreatedInternal(db, snap);
+
+    /*
     const contentData = snap.data();
     if (!contentData) return;
 
@@ -2742,11 +2041,15 @@ export const onContentCreated = functions.firestore
     } catch (error) {
       console.error(`âŒ Content created increment failed:`, error);
     }
+    */
   });
 
 export const onContentDeleted = functions.firestore
   .document('content/{contentId}')
   .onUpdate(async (change, context) => {
+    return onContentDeletedInternal(db, change, context);
+
+    /*
     const { contentId } = context.params;
     const beforeData = change.before.data();
     const afterData = change.after.data();
@@ -2784,12 +2087,16 @@ export const onContentDeleted = functions.firestore
     } catch (error) {
       console.error(`âŒ Content deletion handling failed:`, error);
     }
+    */
   });
 
 // 5. IntegraciÃ³n Oficial de Noticias desde WordPress via Realtime Database
 export const onOfficialNewsReceived = functions.database
   .ref('/news/{newsId}')
   .onWrite(async (change, context) => {
+    return onOfficialNewsReceivedInternal(db, change, context);
+
+    /*
     const { newsId } = context.params;
     const afterData = change.after.val();
 
@@ -3013,12 +2320,16 @@ export const onOfficialNewsReceived = functions.database
       console.error(`❌ Falló la sincronización de RTDB a Firestore para ${newsId}:`, error);
       return null;
     }
+    */
   });
 
 // 5.5 Integración de Publicaciones Scraping a la Comunidad via Realtime Database
 export const onCommunityPostsReceived = functions.database
   .ref('/c/{postId}')
   .onWrite(async (change, context) => {
+    return onCommunityPostsReceivedInternal(db, change, context);
+
+    /*
     const { postId } = context.params;
     const afterData = change.after.val();
 
@@ -3253,6 +2564,7 @@ export const onCommunityPostsReceived = functions.database
       console.error(`❌ Falló la sincronización de comunidad a Firestore para ${postId}:`, error);
       return null;
     }
+    */
   });
 
 // 6. Community image thumbnails
@@ -3260,150 +2572,19 @@ export const onCommunityPostImageFinalized = functions.storage
   .bucket(COMMUNITY_THUMBNAIL_BUCKET)
   .object()
   .onFinalize(async (object) => {
-    const filePath = object.name;
-    const contentType = object.contentType || '';
-    const bucketName = object.bucket;
-    const metadata = object.metadata || {};
-
-    if (!filePath || !bucketName) return null;
-    if (!filePath.startsWith('posts/')) return null;
-    if (!contentType.startsWith('image/')) return null;
-    if (filePath.includes('/thumbs/')) return null;
-    if (metadata.generatedBy === 'community-thumbnail') return null;
-
-    const ext = path.posix.extname(filePath).toLowerCase();
-    const baseName = path.posix.basename(filePath, ext);
-    if (baseName.endsWith('_t') || baseName.endsWith('-thumb')) return null;
-
-    const directory = path.posix.dirname(filePath);
-    const thumbPath = `${directory}/thumbs/${baseName}.webp`;
-    const bucket = admin.storage().bucket(bucketName);
-    const thumbFile = bucket.file(thumbPath);
-    const [alreadyExists] = await thumbFile.exists();
-    if (alreadyExists) return null;
-
-    const sourceTempFile = path.join(os.tmpdir(), `${Date.now()}-${path.basename(filePath)}`);
-    const thumbTempFile = path.join(os.tmpdir(), `${Date.now()}-${baseName}.webp`);
-
-    try {
-      await bucket.file(filePath).download({ destination: sourceTempFile });
-
-      const sharp = await loadSharp();
-      await sharp(sourceTempFile)
-        .rotate()
-        .resize(COMMUNITY_THUMB_MAX_SIDE, COMMUNITY_THUMB_MAX_SIDE, {
-          fit: 'inside',
-          withoutEnlargement: true
-        })
-        .webp({ quality: 78, effort: 4 })
-        .toFile(thumbTempFile);
-
-      await bucket.upload(thumbTempFile, {
-        destination: thumbPath,
-        metadata: {
-          contentType: 'image/webp',
-          cacheControl: 'public,max-age=604800',
-          metadata: {
-            generatedBy: 'community-thumbnail',
-            sourcePath: filePath
-          }
-        }
-      });
-    } catch (error) {
-      console.error('Thumbnail generation failed', { filePath, error });
-    } finally {
-      await Promise.all([
-        fs.unlink(sourceTempFile).catch(() => undefined),
-        fs.unlink(thumbTempFile).catch(() => undefined)
-      ]);
-    }
-
-    return null;
+    return onCommunityPostImageFinalizedInternal(object);
   });
 
 // 7. Hosting FTP image upload fallback for community posts
 export const uploadCommunityImageToHosting = functions.https.onCall(async (data, context) => {
-  const userId = context.auth?.uid;
-  if (!userId) {
-    throw new functions.https.HttpsError(
-      'unauthenticated',
-      'Debes iniciar sesion para subir imagenes.'
-    );
-  }
-
-  const relativePathRaw = typeof data?.path === 'string' ? data.path.trim() : '';
-  const contentType = ensureImageMime(data?.contentType);
-  const base64Data = decodeBase64Payload(data?.base64Data);
-
-  if (!relativePathRaw) {
-    throw new functions.https.HttpsError('invalid-argument', 'Ruta de imagen invalida.');
-  }
-
-  const relativePath = sanitizePathSegment(relativePathRaw).replace(/^(?:imagenes|images)\//, '');
-  const allowedPrefix = `posts/${userId}/`;
-  const allowedAvatarPrefix = `AVATAR/${userId}/`;
-  const legacyAvatarPrefix = `avatars/${userId}/`;
-  if (
-    !relativePath.startsWith(allowedPrefix) &&
-    !relativePath.startsWith(allowedAvatarPrefix) &&
-    !relativePath.startsWith(legacyAvatarPrefix)
-  ) {
-    throw new functions.https.HttpsError('permission-denied', 'Ruta de subida no permitida.');
-  }
-
-  const ext = path.posix.extname(relativePath).toLowerCase();
-  const safeExt = ext && ext.length <= 6 ? ext : '.webp';
-  const fileNameBase = path.posix.basename(relativePath, ext || undefined)
-    .replace(/[^a-zA-Z0-9_-]/g, '-')
-    .slice(0, 80) || `${Date.now()}`;
-  const normalizedUploadPath = relativePath.startsWith(legacyAvatarPrefix)
-    ? relativePath.replace(/^avatars\//, 'AVATAR/')
-    : relativePath;
-  const targetRelativePath = `${path.posix.dirname(normalizedUploadPath)}/${fileNameBase}${safeExt}`.replace(/\/+/g, '/');
-
-  const isAvatarUpload =
-    normalizedUploadPath.startsWith(allowedAvatarPrefix) ||
-    normalizedUploadPath.startsWith('AVATAR/');
-  const ftpConfig = isAvatarUpload ? getHostingAvatarFtpConfig() : getHostingFtpConfig();
-  const remoteFilePath = `${ftpConfig.basePath}/${targetRelativePath}`.replace(/\/+/g, '/');
-  const remoteDir = path.posix.dirname(remoteFilePath);
-  const publicUrl = `${ftpConfig.publicBaseUrl}/${targetRelativePath}`;
-
-  const { Client } = await loadFtpClient();
-  const ftpClient = new Client(30_000);
-  ftpClient.ftp.verbose = false;
-
-  try {
-    await ftpClient.access({
-      host: ftpConfig.host,
-      user: ftpConfig.user,
-      password: ftpConfig.password,
-      port: ftpConfig.port,
-      secure: false
-    });
-
-    await ftpClient.ensureDir(remoteDir);
-    await ftpClient.uploadFrom(Readable.from(base64Data), remoteFilePath);
-  } catch (error) {
-    console.error('FTP hosting upload failed', { userId, relativePath: targetRelativePath, error });
-    throw new functions.https.HttpsError(
-      'internal',
-      'No se pudo subir la imagen al hosting.'
-    );
-  } finally {
-    ftpClient.close();
-  }
-
-  return {
-    url: publicUrl,
-    path: targetRelativePath,
-    sizeBytes: base64Data.length,
-    contentType
-  };
+  return uploadCommunityImageToHostingInternal(data, context);
 });
 
 // 8. Lottery entry callable (number-based entries, supports multiple tickets per user)
 export const enterLottery = functions.https.onCall(async (data, context) => {
+  return enterLotteryInternal(db, data, context);
+
+  /*
   const userId = context.auth?.uid;
   if (!userId) {
     throw new functions.https.HttpsError(
@@ -3620,10 +2801,14 @@ export const enterLottery = functions.https.onCall(async (data, context) => {
     publishLotteryBallToOBS(entryResult.selectedNumber, userName, userProfilePicUrl);
   }
   return entryResult;
+  */
 });
 
 // 9. Lottery draw callable (staff-only)
 export const drawLotteryWinner = functions.https.onCall(async (data, context) => {
+  return drawLotteryWinnerInternal(db, data, context);
+
+  /*
   await assertStaffUser(db, context.auth);
 
   const lotteryId = typeof data?.lotteryId === 'string' ? data.lotteryId.trim() : '';
@@ -3811,205 +2996,19 @@ export const drawLotteryWinner = functions.https.onCall(async (data, context) =>
     winner: result.winner,
     participantsCount: result.participantsCount
   };
+  */
 });
 
 // 10. Surveys vote callable (single vote per user/survey)
 export const submitSurveyVote = functions.https.onCall(async (data, context) => {
-  const userId = context.auth?.uid;
-  if (!userId) {
-    throw new functions.https.HttpsError(
-      'unauthenticated',
-      'Debes iniciar sesion para votar.'
-    );
-  }
-
-  const surveyId = typeof data?.surveyId === 'string' ? data.surveyId.trim() : '';
-  const optionIds = normalizeOptionIds(data?.optionIds);
-  const idempotencyKeyRaw = typeof data?.idempotencyKey === 'string'
-    ? data.idempotencyKey.trim()
-    : '';
-  const idempotencyKey = idempotencyKeyRaw ? idempotencyKeyRaw.slice(0, 120) : null;
-
-  if (!surveyId) {
-    throw new functions.https.HttpsError('invalid-argument', 'surveyId es obligatorio.');
-  }
-  if (optionIds.length === 0) {
-    throw new functions.https.HttpsError(
-      'invalid-argument',
-      'Debes seleccionar al menos una opcion.'
-    );
-  }
-  if (optionIds.length > MAX_SURVEY_OPTIONS_SELECTED) {
-    throw new functions.https.HttpsError(
-      'invalid-argument',
-      'Cantidad de opciones seleccionadas invalida.'
-    );
-  }
-
-  const surveyRef = db.collection('surveys').doc(surveyId);
-  const voteRef = db.collection('survey_votes').doc(`${surveyId}_${userId}`);
-  const modulesConfigRef = db.collection('_config').doc('modules');
-
-  return db.runTransaction(async (tx) => {
-    const [modulesConfigSnap, surveySnap, existingVoteSnap] = await Promise.all([
-      tx.get(modulesConfigRef),
-      tx.get(surveyRef),
-      tx.get(voteRef)
-    ]);
-
-    const surveysEnabled = Boolean(modulesConfigSnap.data()?.surveys?.enabled ?? true);
-    if (!surveysEnabled) {
-      throw new functions.https.HttpsError(
-        'failed-precondition',
-        'El modulo de encuestas esta deshabilitado.'
-      );
-    }
-
-    if (!surveySnap.exists) {
-      throw new functions.https.HttpsError('not-found', 'La encuesta no existe.');
-    }
-
-    const surveyData = surveySnap.data() || {};
-    const surveyStatus = (surveyData.status || 'inactive') as SurveyStatus;
-    if (surveyStatus !== 'active') {
-      throw new functions.https.HttpsError(
-        'failed-precondition',
-        'La encuesta no esta activa.'
-      );
-    }
-    if (isExpired(surveyData.expiresAt)) {
-      throw new functions.https.HttpsError(
-        'failed-precondition',
-        'La encuesta ya expiro.'
-      );
-    }
-
-    const isMultipleChoice = Boolean(surveyData.isMultipleChoice);
-    const maxVotesRaw = Number(surveyData.maxVotesPerUser ?? 1);
-    const maxVotesPerUser = Number.isFinite(maxVotesRaw)
-      ? (isMultipleChoice ? Math.max(2, Math.floor(maxVotesRaw)) : 1)
-      : (isMultipleChoice ? 2 : 1);
-
-    if (!isMultipleChoice && optionIds.length !== 1) {
-      throw new functions.https.HttpsError(
-        'invalid-argument',
-        'Esta encuesta permite solo una opcion.'
-      );
-    }
-    if (optionIds.length > maxVotesPerUser) {
-      throw new functions.https.HttpsError(
-        'invalid-argument',
-        'Superaste el maximo de opciones permitidas.'
-      );
-    }
-
-    const surveyOptions = normalizeSurveyOptions(surveyData.options);
-    if (surveyOptions.length < 2) {
-      throw new functions.https.HttpsError(
-        'failed-precondition',
-        'La encuesta no tiene opciones validas para votar.'
-      );
-    }
-
-    const availableOptionIds = new Set<string>();
-    for (const option of surveyOptions) {
-      if (option.active) {
-        availableOptionIds.add(option.id);
-      }
-    }
-
-    for (const selectedOptionId of optionIds) {
-      if (!availableOptionIds.has(selectedOptionId)) {
-        throw new functions.https.HttpsError(
-          'invalid-argument',
-          'Seleccionaste una opcion invalida.'
-        );
-      }
-    }
-
-    if (existingVoteSnap.exists) {
-      const existingVote = existingVoteSnap.data() || {};
-      return {
-        status: 'already_voted',
-        surveyId,
-        optionIds: normalizeOptionIds(existingVote.optionIds)
-      };
-    }
-
-    const optionSelectionCounts = new Map<string, number>();
-    for (const optionId of optionIds) {
-      const previousCount = optionSelectionCounts.get(optionId) || 0;
-      optionSelectionCounts.set(optionId, previousCount + 1);
-    }
-
-    const nextOptions = surveyOptions.map((option) => {
-      const incrementBy = optionSelectionCounts.get(option.id) || 0;
-      if (incrementBy <= 0) return option;
-
-      return {
-        ...option,
-        voteCount: option.voteCount + incrementBy
-      };
-    });
-
-    const votePayload: Record<string, unknown> = {
-      surveyId,
-      userId,
-      optionIds,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    };
-
-    if (idempotencyKey) {
-      votePayload.idempotencyKey = idempotencyKey;
-    }
-
-    tx.set(voteRef, votePayload);
-    tx.update(surveyRef, {
-      options: nextOptions,
-      totalVotes: admin.firestore.FieldValue.increment(optionIds.length),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    });
-
-    return {
-      status: 'ok',
-      surveyId,
-      optionIds
-    };
-  });
+  return submitSurveyVoteInternal(db, data, context);
 });
 
 // 11. Auto-complete expired surveys
 export const completeExpiredSurveys = functions.pubsub
   .schedule('every 1 minutes')
   .onRun(async () => {
-    let completedCount = 0;
-
-    while (true) {
-      const snapshot = await db.collection('surveys')
-        .where('status', '==', 'active')
-        .where('expiresAt', '<=', admin.firestore.Timestamp.now())
-        .orderBy('expiresAt', 'asc')
-        .limit(SURVEY_COMPLETE_BATCH_SIZE)
-        .get();
-
-      if (snapshot.empty) break;
-
-      const batch = db.batch();
-      for (const surveyDoc of snapshot.docs) {
-        batch.update(surveyDoc.ref, {
-          status: 'completed',
-          updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        });
-      }
-
-      await batch.commit();
-      completedCount += snapshot.size;
-
-      if (snapshot.size < SURVEY_COMPLETE_BATCH_SIZE) break;
-    }
-
-    console.log(`Expired surveys completed: ${completedCount}`);
+    await completeExpiredSurveysInternal(db);
     return null;
   });
 
@@ -4017,27 +3016,11 @@ export const purgeOldNotifications = functions.pubsub
   .schedule('every day 03:00')
   .timeZone('Etc/UTC')
   .onRun(async () => {
-    const cutoffDate = new Date(Date.now() - NOTIFICATION_RETENTION_DAYS * 24 * 60 * 60 * 1000);
-    const cutoffTs = admin.firestore.Timestamp.fromDate(cutoffDate);
-    let removedCount = 0;
-
-    while (true) {
-      const snapshot = await db.collectionGroup('notifications')
-        .where('lastEventAt', '<=', cutoffTs)
-        .limit(NOTIFICATION_PAGE_SIZE)
-        .get();
-      if (snapshot.empty) break;
-
-      const batch = db.batch();
-      for (const notificationDoc of snapshot.docs) {
-        batch.delete(notificationDoc.ref);
-      }
-      await batch.commit();
-      removedCount += snapshot.size;
-
-      if (snapshot.size < NOTIFICATION_PAGE_SIZE) break;
-    }
-
+    const removedCount = await purgeOldNotificationsInternal(
+      db,
+      NOTIFICATION_RETENTION_DAYS,
+      NOTIFICATION_PAGE_SIZE
+    );
     console.log(`Old notifications removed: ${removedCount}`);
     return null;
   });
@@ -4046,61 +3029,6 @@ export const purgeOldNotifications = functions.pubsub
 export const onAdEventCreated = functions.firestore
   .document('ad_events/{eventId}')
   .onCreate(async (snap) => {
-    const eventData = snap.data();
-    if (!eventData) return null;
-
-    const adId = eventData.adId as string | undefined;
-    const eventType = eventData.eventType as 'impression' | 'click' | undefined;
-    const countRaw = Number(eventData.count ?? 1);
-    const count = Number.isFinite(countRaw) ? Math.max(1, Math.min(Math.floor(countRaw), 20)) : 1;
-
-    if (!adId || (eventType !== 'impression' && eventType !== 'click')) {
-      console.log('Ignoring invalid ad event payload', { adId, eventType });
-      return null;
-    }
-
-    const adRef = db.collection('ads').doc(adId);
-
-    try {
-      await db.runTransaction(async (tx) => {
-        const adSnap = await tx.get(adRef);
-        if (!adSnap.exists) {
-          console.log(`Ad ${adId} does not exist. Event ignored.`);
-          return;
-        }
-
-        const adData = adSnap.data() || {};
-        const stats = adData.stats || {};
-        const currentImpressions = Number(stats.impressionsTotal || 0);
-        const currentClicks = Number(stats.clicksTotal || 0);
-
-        const impressionIncrement = eventType === 'impression' ? count : 0;
-        const clickIncrement = eventType === 'click' ? count : 0;
-
-        const nextImpressions = currentImpressions + impressionIncrement;
-        const nextClicks = currentClicks + clickIncrement;
-        const ctr = nextImpressions > 0
-          ? Number(((nextClicks / nextImpressions) * 100).toFixed(2))
-          : 0;
-
-        tx.set(
-          adRef,
-          {
-            stats: {
-              impressionsTotal: admin.firestore.FieldValue.increment(impressionIncrement),
-              clicksTotal: admin.firestore.FieldValue.increment(clickIncrement),
-              ctr,
-              lastEventAt: admin.firestore.FieldValue.serverTimestamp()
-            },
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-          },
-          { merge: true }
-        );
-      });
-
-      return null;
-    } catch (error) {
-      console.error(`Failed to aggregate ad event for ad ${adId}`, error);
-      return null;
-    }
+    await handleAdEventCreatedInternal(db, snap);
+    return null;
   });

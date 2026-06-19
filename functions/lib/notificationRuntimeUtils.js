@@ -1,7 +1,8 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.writeNotificationEvent = exports.unsubscribeTokenFromPushTopics = exports.subscribeTokenToPushTopics = exports.sendPushToNotificationDevices = exports.getNotificationRecipientData = exports.invalidateNotificationRecipientCache = exports.getModulesConfigData = exports.loadNotificationActorIdentity = exports.buildContentTargetFromDoc = void 0;
+exports.purgeOldNotificationsInternal = exports.writeNotificationEvent = exports.unsubscribeTokenFromPushTopics = exports.subscribeTokenToPushTopics = exports.sendTestPushToAllUsersInternal = exports.sendPushToNotificationDevices = exports.getNotificationRecipientData = exports.invalidateNotificationRecipientCache = exports.getModulesConfigData = exports.loadNotificationActorIdentity = exports.buildContentTargetFromDoc = void 0;
 const admin = require("firebase-admin");
+const functions = require("firebase-functions");
 const notificationUtils_1 = require("./notificationUtils");
 const userUtils_1 = require("./userUtils");
 const contentUtils_1 = require("./contentUtils");
@@ -178,6 +179,51 @@ const sendPushToNotificationDevices = async (db, notificationRef, recipientUserI
     await batch.commit();
 };
 exports.sendPushToNotificationDevices = sendPushToNotificationDevices;
+const sendTestPushToAllUsersInternal = async (db, data, context) => {
+    await (0, userUtils_1.assertAdminUser)(db, context.auth);
+    const title = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.title, 120) || 'Prueba de notificaciones';
+    const body = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.body, 220) || 'Este es un test push para todos los usuarios.';
+    const targetPath = (0, notificationUtils_1.safeNotificationPath)(data === null || data === void 0 ? void 0 : data.targetPath, '/notificaciones');
+    const platformRaw = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.platform, 20).toLowerCase();
+    const topic = platformRaw === 'android'
+        ? 'android_users'
+        : platformRaw === 'web'
+            ? 'web_users'
+            : 'all_users';
+    if (platformRaw && platformRaw !== 'android' && platformRaw !== 'web' && platformRaw !== 'all') {
+        throw new functions.https.HttpsError('invalid-argument', 'platform debe ser "all", "android" o "web".');
+    }
+    const messageId = await admin.messaging().send({
+        topic,
+        notification: {
+            title,
+            body
+        },
+        data: {
+            type: 'admin_broadcast_test',
+            targetPath,
+            sentAt: new Date().toISOString()
+        },
+        android: {
+            priority: 'high',
+            notification: {
+                channelId: notificationUtils_1.ANDROID_PUSH_CHANNEL_ID,
+                sound: 'default'
+            }
+        },
+        webpush: {
+            fcmOptions: {
+                link: targetPath
+            }
+        }
+    });
+    return {
+        ok: true,
+        topic,
+        messageId
+    };
+};
+exports.sendTestPushToAllUsersInternal = sendTestPushToAllUsersInternal;
 const subscribeTokenToPushTopics = async (token, platform) => {
     const topics = (0, notificationUtils_1.getNotificationTopicsForPlatform)(platform);
     await Promise.all(topics.map(async (topic) => {
@@ -285,4 +331,27 @@ const writeNotificationEvent = async (db, input) => {
     await (0, exports.sendPushToNotificationDevices)(db, notificationRef, input.recipientUserId, input.type, input.actor.actorName, (0, notificationUtils_1.safeNotificationPath)(input.targetPath, '/notificaciones'));
 };
 exports.writeNotificationEvent = writeNotificationEvent;
+const purgeOldNotificationsInternal = async (db, retentionDays, pageSize) => {
+    const cutoffDate = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
+    const cutoffTs = admin.firestore.Timestamp.fromDate(cutoffDate);
+    let removedCount = 0;
+    while (true) {
+        const snapshot = await db.collectionGroup('notifications')
+            .where('lastEventAt', '<=', cutoffTs)
+            .limit(pageSize)
+            .get();
+        if (snapshot.empty)
+            break;
+        const batch = db.batch();
+        for (const notificationDoc of snapshot.docs) {
+            batch.delete(notificationDoc.ref);
+        }
+        await batch.commit();
+        removedCount += snapshot.size;
+        if (snapshot.size < pageSize)
+            break;
+    }
+    return removedCount;
+};
+exports.purgeOldNotificationsInternal = purgeOldNotificationsInternal;
 //# sourceMappingURL=notificationRuntimeUtils.js.map

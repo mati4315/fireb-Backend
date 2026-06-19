@@ -1,7 +1,8 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.refreshSecretRankingsInternal = exports.buildSecretRankingsSnapshot = exports.takeUniqueSecretRankingItems = exports.toSecretRankingItem = exports.isSecretActiveForRanking = exports.computeSecretRank = exports.resolveSecretRuntimeSettings = exports.createSecretAlias = exports.buildSecretFingerprintHash = exports.timestampToMillisOrZero = exports.normalizeSecretClientAnonId = exports.normalizeSecretReportReason = exports.normalizeSecretAge = exports.normalizeSecretZone = exports.normalizeSecretSex = exports.normalizeSecretCategory = exports.sanitizeSecretText = exports.hasMeaningfulSecretText = exports.SECRET_RANKINGS_LIST_LIMIT = exports.SECRET_RANKINGS_SAMPLE_LIMIT = exports.SECRET_AUTO_HIDE_REPORT_THRESHOLD = exports.SECRET_FINGERPRINT_TTL_MS = exports.SECRET_DAILY_LIMIT = exports.SECRET_REPORT_REASON_MAX_LENGTH = exports.SECRET_ZONE_MAX_LENGTH = exports.SECRET_COMMENT_MAX_LENGTH = exports.SECRET_COMMENT_MIN_LENGTH = exports.SECRET_NUMERIC_ID_START = exports.SECRET_TEXT_MAX_ABSOLUTE = exports.SECRET_TEXT_MAX_LENGTH = exports.SECRET_TEXT_MIN_LENGTH = void 0;
+exports.refreshSecretRankingsInternal = exports.buildSecretRankingsSnapshot = exports.takeUniqueSecretRankingItems = exports.toSecretRankingItem = exports.isSecretActiveForRanking = exports.computeSecretRank = exports.resolveSecretRuntimeSettings = exports.createSecretAlias = exports.buildSecretFingerprintHash = exports.timestampToMillisOrZero = exports.normalizeSecretClientAnonId = exports.normalizeSecretModerationAction = exports.normalizeSecretModerationStatusFilter = exports.normalizeSecretReportReason = exports.normalizeSecretAge = exports.normalizeSecretZone = exports.normalizeSecretSex = exports.normalizeSecretCategory = exports.sanitizeSecretText = exports.hasMeaningfulSecretText = exports.SECRET_RANKINGS_LIST_LIMIT = exports.SECRET_RANKINGS_SAMPLE_LIMIT = exports.SECRET_AUTO_HIDE_REPORT_THRESHOLD = exports.SECRET_FINGERPRINT_TTL_MS = exports.SECRET_DAILY_LIMIT = exports.SECRET_REPORT_REASON_MAX_LENGTH = exports.SECRET_ZONE_MAX_LENGTH = exports.SECRET_COMMENT_MAX_LENGTH = exports.SECRET_COMMENT_MIN_LENGTH = exports.SECRET_NUMERIC_ID_START = exports.SECRET_TEXT_MAX_ABSOLUTE = exports.SECRET_TEXT_MAX_LENGTH = exports.SECRET_TEXT_MIN_LENGTH = void 0;
 const admin = require("firebase-admin");
+const functions = require("firebase-functions");
 const crypto = require("crypto");
 const getDb = () => admin.firestore();
 exports.SECRET_TEXT_MIN_LENGTH = 12;
@@ -28,6 +29,13 @@ const SECRET_SEX_VALUES = new Set([
     'no_responder',
     'hombre',
     'mujer'
+]);
+const SECRET_MODERATION_STATUS_VALUES = new Set([
+    'all',
+    'active',
+    'hidden_auto',
+    'hidden_admin',
+    'blocked'
 ]);
 const clampInteger = (value, min, max, fallback) => {
     const raw = Number(value);
@@ -92,6 +100,21 @@ const normalizeSecretReportReason = (value) => {
     return reason || 'contenido_inapropiado';
 };
 exports.normalizeSecretReportReason = normalizeSecretReportReason;
+const normalizeSecretModerationStatusFilter = (value) => {
+    const normalized = sanitizeBoundedString(value, 40).toLowerCase();
+    if (SECRET_MODERATION_STATUS_VALUES.has(normalized))
+        return normalized;
+    return 'all';
+};
+exports.normalizeSecretModerationStatusFilter = normalizeSecretModerationStatusFilter;
+const normalizeSecretModerationAction = (value) => {
+    const normalized = sanitizeBoundedString(value, 40).toLowerCase();
+    if (normalized === 'hide' || normalized === 'restore' || normalized === 'block') {
+        return normalized;
+    }
+    throw new functions.https.HttpsError('invalid-argument', 'action debe ser hide, restore o block.');
+};
+exports.normalizeSecretModerationAction = normalizeSecretModerationAction;
 const normalizeSecretClientAnonId = (value) => {
     const raw = sanitizeBoundedString(value, 120);
     return raw.replace(/[^a-zA-Z0-9_-]/g, '');

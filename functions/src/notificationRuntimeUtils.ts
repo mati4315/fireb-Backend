@@ -1,4 +1,5 @@
 import * as admin from 'firebase-admin';
+import * as functions from 'firebase-functions';
 import {
   ANDROID_PUSH_CHANNEL_ID,
   buildPushTextForNotification,
@@ -10,6 +11,7 @@ import {
 import {
   ensureNotificationTypeSettings,
   ensureUserSettings,
+  assertAdminUser,
   isNotificationTypeEnabled,
   normalizeUsernameLoose,
   sanitizeBoundedString
@@ -264,6 +266,63 @@ export const sendPushToNotificationDevices = async (
   await batch.commit();
 };
 
+export const sendTestPushToAllUsersInternal = async (
+  db: FirebaseFirestore.Firestore,
+  data: any,
+  context: functions.https.CallableContext
+): Promise<Record<string, unknown>> => {
+  await assertAdminUser(db, context.auth);
+
+  const title = sanitizeBoundedString(data?.title, 120) || 'Prueba de notificaciones';
+  const body = sanitizeBoundedString(data?.body, 220) || 'Este es un test push para todos los usuarios.';
+  const targetPath = safeNotificationPath(data?.targetPath, '/notificaciones');
+  const platformRaw = sanitizeBoundedString(data?.platform, 20).toLowerCase();
+
+  const topic = platformRaw === 'android'
+    ? 'android_users'
+    : platformRaw === 'web'
+      ? 'web_users'
+      : 'all_users';
+
+  if (platformRaw && platformRaw !== 'android' && platformRaw !== 'web' && platformRaw !== 'all') {
+    throw new functions.https.HttpsError(
+      'invalid-argument',
+      'platform debe ser "all", "android" o "web".'
+    );
+  }
+
+  const messageId = await admin.messaging().send({
+    topic,
+    notification: {
+      title,
+      body
+    },
+    data: {
+      type: 'admin_broadcast_test',
+      targetPath,
+      sentAt: new Date().toISOString()
+    },
+    android: {
+      priority: 'high',
+      notification: {
+        channelId: ANDROID_PUSH_CHANNEL_ID,
+        sound: 'default'
+      }
+    },
+    webpush: {
+      fcmOptions: {
+        link: targetPath
+      }
+    }
+  });
+
+  return {
+    ok: true,
+    topic,
+    messageId
+  };
+};
+
 export const subscribeTokenToPushTopics = async (
   token: string,
   platform: NotificationPlatform
@@ -391,4 +450,33 @@ export const writeNotificationEvent = async (
     input.actor.actorName,
     safeNotificationPath(input.targetPath, '/notificaciones')
   );
+};
+
+export const purgeOldNotificationsInternal = async (
+  db: FirebaseFirestore.Firestore,
+  retentionDays: number,
+  pageSize: number
+): Promise<number> => {
+  const cutoffDate = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
+  const cutoffTs = admin.firestore.Timestamp.fromDate(cutoffDate);
+  let removedCount = 0;
+
+  while (true) {
+    const snapshot = await db.collectionGroup('notifications')
+      .where('lastEventAt', '<=', cutoffTs)
+      .limit(pageSize)
+      .get();
+    if (snapshot.empty) break;
+
+    const batch = db.batch();
+    for (const notificationDoc of snapshot.docs) {
+      batch.delete(notificationDoc.ref);
+    }
+    await batch.commit();
+    removedCount += snapshot.size;
+
+    if (snapshot.size < pageSize) break;
+  }
+
+  return removedCount;
 };
