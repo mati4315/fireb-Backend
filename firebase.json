@@ -12,6 +12,20 @@
       ]
     }
   ],
+  "hosting": {
+    "site": "api-cdelu-ar",
+    "public": "hosting",
+    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+    "rewrites": [
+      {
+        "source": "/private/mcp",
+        "function": {
+          "functionId": "privateMcp",
+          "region": "us-central1"
+        }
+      }
+    ]
+  },
   "firestore": {
     "database": "(default)",
     "location": "us-central1",
