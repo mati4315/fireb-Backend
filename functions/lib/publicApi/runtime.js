@@ -13,7 +13,20 @@ const DEFAULT_LIMIT = 20;
 const MAX_QUERY_SCAN = 100;
 const RATE_WINDOW_MS = 60000;
 const DEFAULT_ORIGIN = 'https://cdelu.ar';
+const MAX_RESPONSE_BYTES = 900000;
+const CACHE_TTL_SECONDS = { list: 30, detail: 60, categories: 120, search: 15 };
+const PUBLIC_CONTENT_FIELDS = [
+    'module', 'type', 'source', 'isOficial', 'deletedAt', 'visibility', 'status', 'moderation',
+    'titulo', 'descripcion', 'publishedAt', 'createdAt', 'updatedAt', 'slug', 'category',
+    'images', 'imagesV2', 'imgMiniatura', 'publicId', 'postId'
+];
+const PUBLIC_EVENT_FIELDS = [
+    'module', 'type', 'source', 'deletedAt', 'visibility', 'status', 'name', 'titulo',
+    'summary', 'descripcion', 'canonicalUrl', 'slug', 'startAt', 'start_at', 'endAt',
+    'end_at', 'publishedAt', 'updatedAt', 'originalUrl', 'sourceUrl', 'venue'
+];
 const rateBuckets = new Map();
+const responseCache = new Map();
 const getString = (value) => typeof value === 'string' ? value.trim() : '';
 const getRequestId = (req) => {
     const supplied = getString(req.get('x-request-id'));
@@ -39,6 +52,54 @@ const applyCors = (req, res) => {
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Request-Id');
     res.setHeader('Access-Control-Max-Age', '600');
 };
+const cacheKey = (prefix, value) => `${prefix}:${JSON.stringify(value, Object.keys(value).sort())}`;
+const getCached = (key, req) => {
+    const entry = responseCache.get(key);
+    if (!entry)
+        return null;
+    if (entry.expiresAt <= Date.now()) {
+        responseCache.delete(key);
+        return null;
+    }
+    req.cacheHit = true;
+    return entry.value;
+};
+const setCached = (key, value, ttlSeconds) => {
+    if (responseCache.size > 500) {
+        for (const [entryKey, entry] of responseCache) {
+            if (entry.expiresAt <= Date.now())
+                responseCache.delete(entryKey);
+        }
+    }
+    responseCache.set(key, { value, expiresAt: Date.now() + ttlSeconds * 1000 });
+};
+const sendJson = (req, res, status, body, options = {}) => {
+    var _a;
+    const serialized = JSON.stringify(body);
+    const bytes = Buffer.byteLength(serialized, 'utf8');
+    res.responseBytes = bytes;
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('X-Response-Bytes', String(bytes));
+    res.setHeader('X-Cache', req.cacheHit ? 'HIT' : 'MISS');
+    if (bytes > MAX_RESPONSE_BYTES) {
+        return res.status(413).json({
+            error: {
+                code: 'RESPONSE_TOO_LARGE',
+                message: 'La respuesta supera el límite permitido.',
+                request_id: getRequestId(req),
+                details: []
+            }
+        });
+    }
+    const etag = `W/\"${crypto.createHash('sha256').update(JSON.stringify((_a = options.etagSource) !== null && _a !== void 0 ? _a : body)).digest('hex')}\"`;
+    res.setHeader('ETag', etag);
+    res.setHeader('Cache-Control', options.cacheSeconds ? `public, max-age=${options.cacheSeconds}` : 'no-store');
+    if (req.get('if-none-match') === etag) {
+        res.status(304).end();
+        return res;
+    }
+    return res.status(status).json(body);
+};
 const errorResponse = (res, status, code, message, requestId, details = []) => res.status(status).json({
     error: { code, message, request_id: requestId, details }
 });
@@ -47,12 +108,17 @@ const successMeta = (requestId) => ({
     generated_at: new Date().toISOString(),
     api_version: API_VERSION
 });
-const collectionResponse = (res, data, requestId, limit, nextCursor, hasNext) => res.status(200).json({
-    data,
-    pagination: { limit, next_cursor: nextCursor, has_next: hasNext },
-    meta: successMeta(requestId)
+const collectionResponse = (req, res, data, requestId, limit, nextCursor, hasNext) => {
+    const pagination = { limit, next_cursor: nextCursor, has_next: hasNext };
+    return sendJson(req, res, 200, { data, pagination, meta: successMeta(requestId) }, {
+        cacheSeconds: CACHE_TTL_SECONDS.list,
+        etagSource: { data, pagination }
+    });
+};
+const detailResponse = (req, res, data, requestId) => sendJson(req, res, 200, { data, meta: successMeta(requestId) }, {
+    cacheSeconds: CACHE_TTL_SECONDS.detail,
+    etagSource: data
 });
-const detailResponse = (res, data, requestId) => res.status(200).json({ data, meta: successMeta(requestId) });
 const parseLimit = (value, max = MAX_LIMIT) => {
     const raw = value === undefined ? String(DEFAULT_LIMIT) : getString(value);
     if (!/^\d+$/.test(raw))
@@ -107,7 +173,8 @@ const newsQuery = (query) => {
     let result = getDb().collection('content')
         .where('deletedAt', '==', null)
         .where('module', '==', 'news')
-        .orderBy('createdAt', 'desc');
+        .orderBy('createdAt', 'desc')
+        .select(...PUBLIC_CONTENT_FIELDS);
     const from = parseDate(query.from, 'from').value;
     const until = parseDate(query.until, 'until').value;
     if (from)
@@ -123,25 +190,35 @@ const eventQuery = (query) => {
     let result = getDb().collection('content')
         .where('deletedAt', '==', null)
         .where('module', '==', 'events')
-        .orderBy('createdAt', 'desc');
+        .orderBy('createdAt', 'desc')
+        .select(...PUBLIC_EVENT_FIELDS);
     const cursor = decodeCursor(query.cursor);
     if (cursor)
         result = result.startAfter(cursor);
     return result;
 };
-const readNews = async (query, requestedLimit, includeContent) => {
+const readNews = async (query, requestedLimit, includeContent, req) => {
+    const key = cacheKey(`news-read:${includeContent}:${requestedLimit}`, query);
+    const cached = req ? getCached(key, req) : null;
+    if (cached)
+        return cached;
     const snapshot = await newsQuery(query).limit(Math.min(requestedLimit + 1, MAX_QUERY_SCAN)).get();
+    if (req)
+        req.firestoreReads = (req.firestoreReads || 0) + snapshot.docs.length;
     const mapped = snapshot.docs
         .map((doc) => includeContent ? (0, mappers_1.mapPublicNews)(publicSnapshot(doc)) : (0, mappers_1.mapPublicNewsSummary)(publicSnapshot(doc)))
         .filter((item) => item !== null);
     const items = mapped.slice(0, requestedLimit);
     const hasNext = snapshot.docs.length > requestedLimit;
     const lastDoc = snapshot.docs[Math.min(requestedLimit, snapshot.docs.length) - 1];
-    return {
+    const result = {
         items,
         hasNext,
         nextCursor: hasNext && lastDoc ? encodeCursor(lastDoc.get('createdAt')) : null
     };
+    if (req)
+        setCached(key, result, CACHE_TTL_SECONDS.list);
+    return result;
 };
 const resolveNewsSnapshot = async (id) => {
     const direct = await getDb().collection('content').doc(id).get();
@@ -179,16 +256,16 @@ const publicNewsList = async (req, res, requestId) => {
     const dateError = dates.find((item) => item.error);
     if (dateError === null || dateError === void 0 ? void 0 : dateError.error)
         return errorResponse(res, 400, 'INVALID_PARAMETER', dateError.error, requestId);
-    const result = await readNews(req.query, parsedLimit.value || DEFAULT_LIMIT, false);
+    const result = await readNews(req.query, parsedLimit.value || DEFAULT_LIMIT, false, req);
     const filtered = result.items.filter((item) => matchesNewsFilters(item, req.query));
-    return collectionResponse(res, filtered, requestId, parsedLimit.value || DEFAULT_LIMIT, result.nextCursor, result.hasNext);
+    return collectionResponse(req, res, filtered, requestId, parsedLimit.value || DEFAULT_LIMIT, result.nextCursor, result.hasNext);
 };
-const publicNewsDetail = async (id, res, requestId) => {
+const publicNewsDetail = async (id, req, res, requestId) => {
     const snapshot = await resolveNewsSnapshot(id);
     const item = snapshot ? (0, mappers_1.mapPublicNews)(publicSnapshot(snapshot)) : null;
     if (!item)
         return errorResponse(res, 404, 'NOT_FOUND', 'La noticia no existe o no es pública.', requestId);
-    return detailResponse(res, item, requestId);
+    return detailResponse(req, res, item, requestId);
 };
 const publicEventsList = async (req, res, requestId) => {
     const unsupportedKey = validateQueryKeys(req.query, new Set(['limit', 'cursor']));
@@ -199,24 +276,27 @@ const publicEventsList = async (req, res, requestId) => {
         return errorResponse(res, 400, 'INVALID_PARAMETER', parsedLimit.error, requestId);
     const limit = parsedLimit.value || DEFAULT_LIMIT;
     const snapshot = await eventQuery(req.query).limit(limit + 1).get();
+    req.firestoreReads = (req.firestoreReads || 0) + snapshot.docs.length;
     const items = snapshot.docs.map((doc) => (0, mappers_1.mapPublicEvent)(publicSnapshot(doc))).filter((item) => item !== null).slice(0, limit);
     const hasNext = snapshot.docs.length > limit;
     const lastDoc = snapshot.docs[Math.min(limit, snapshot.docs.length) - 1];
     const nextCursor = hasNext && lastDoc ? encodeCursor(lastDoc.get('createdAt')) : null;
-    return collectionResponse(res, items, requestId, limit, nextCursor, hasNext);
+    return collectionResponse(req, res, items, requestId, limit, nextCursor, hasNext);
 };
-const publicEventDetail = async (id, res, requestId) => {
+const publicEventDetail = async (id, req, res, requestId) => {
     const snapshot = await getDb().collection('content').doc(id).get();
+    req.firestoreReads = (req.firestoreReads || 0) + 1;
     const item = snapshot.exists ? (0, mappers_1.mapPublicEvent)(publicSnapshot(snapshot)) : null;
     if (!item)
         return errorResponse(res, 404, 'NOT_FOUND', 'El evento no existe o no es público.', requestId);
-    return detailResponse(res, item, requestId);
+    return detailResponse(req, res, item, requestId);
 };
 const publicCategories = async (req, res, requestId) => {
     const unsupportedKey = validateQueryKeys(req.query, new Set([]));
     if (unsupportedKey)
         return errorResponse(res, 400, 'INVALID_PARAMETER', `El parámetro ${unsupportedKey} no está disponible en esta versión.`, requestId, [{ field: unsupportedKey, reason: 'unsupported_parameter' }]);
     const snapshot = await newsQuery(req.query).limit(MAX_QUERY_SCAN).get();
+    req.firestoreReads = (req.firestoreReads || 0) + snapshot.docs.length;
     const categories = new Map();
     for (const doc of snapshot.docs) {
         const item = (0, mappers_1.mapPublicNewsSummary)(publicSnapshot(doc));
@@ -224,7 +304,7 @@ const publicCategories = async (req, res, requestId) => {
             continue;
         categories.set(item.category.id, item.category);
     }
-    return collectionResponse(res, Array.from(categories.values()).filter((item) => item !== null), requestId, categories.size, null, false);
+    return collectionResponse(req, res, Array.from(categories.values()).filter((item) => item !== null), requestId, categories.size, null, false);
 };
 const publicSearch = async (req, res, requestId) => {
     const unsupportedKey = validateQueryKeys(req.query, new Set(['q', 'types', 'limit', 'cursor', 'category', 'from', 'until']));
@@ -244,9 +324,9 @@ const publicSearch = async (req, res, requestId) => {
     if (dateError === null || dateError === void 0 ? void 0 : dateError.error)
         return errorResponse(res, 400, 'INVALID_PARAMETER', dateError.error, requestId);
     if (types.includes('event') && !types.includes('news')) {
-        return collectionResponse(res, [], requestId, parsedLimit.value || DEFAULT_LIMIT, null, false);
+        return collectionResponse(req, res, [], requestId, parsedLimit.value || DEFAULT_LIMIT, null, false);
     }
-    const scan = await readNews(req.query, Math.min(MAX_QUERY_SCAN, Math.max(parsedLimit.value || DEFAULT_LIMIT, 20)), true);
+    const scan = await readNews(req.query, Math.min(MAX_QUERY_SCAN, Math.max(parsedLimit.value || DEFAULT_LIMIT, 20)), true, req);
     const results = [];
     for (const item of scan.items) {
         if (item.type !== 'news' || !('content' in item))
@@ -261,9 +341,9 @@ const publicSearch = async (req, res, requestId) => {
         if (results.length >= (parsedLimit.value || DEFAULT_LIMIT))
             break;
     }
-    return collectionResponse(res, results, requestId, parsedLimit.value || DEFAULT_LIMIT, scan.nextCursor, scan.hasNext);
+    return collectionResponse(req, res, results, requestId, parsedLimit.value || DEFAULT_LIMIT, scan.nextCursor, scan.hasNext);
 };
-const health = (res, requestId) => detailResponse(res, {
+const health = (req, res, requestId) => detailResponse(req, res, {
     status: 'ok',
     service: 'cdelu-public-api',
     version: API_VERSION
@@ -292,6 +372,7 @@ exports.publicApi = functions.https.onRequest(async (req, res) => {
     const typedReq = req;
     const typedRes = res;
     const requestId = getRequestId(typedReq);
+    const startedAt = Date.now();
     applyCors(typedReq, typedRes);
     if (req.method === 'OPTIONS') {
         res.status(204).end();
@@ -310,12 +391,12 @@ exports.publicApi = functions.https.onRequest(async (req, res) => {
     }
     try {
         if (parts.length === 3 && parts[0] === 'api' && parts[1] === API_VERSION && parts[2] === 'health') {
-            health(typedRes, requestId);
+            health(typedReq, typedRes, requestId);
             return;
         }
         if (parts.length >= 3 && parts[0] === 'api' && parts[1] === API_VERSION && parts[2] === 'news') {
             if (parts.length === 4) {
-                await publicNewsDetail(decodeURIComponent(parts[3]), typedRes, requestId);
+                await publicNewsDetail(decodeURIComponent(parts[3]), typedReq, typedRes, requestId);
                 return;
             }
             await publicNewsList(typedReq, typedRes, requestId);
@@ -323,7 +404,7 @@ exports.publicApi = functions.https.onRequest(async (req, res) => {
         }
         if (parts.length >= 3 && parts[0] === 'api' && parts[1] === API_VERSION && parts[2] === 'events') {
             if (parts.length === 4) {
-                await publicEventDetail(decodeURIComponent(parts[3]), typedRes, requestId);
+                await publicEventDetail(decodeURIComponent(parts[3]), typedReq, typedRes, requestId);
                 return;
             }
             await publicEventsList(typedReq, typedRes, requestId);
@@ -342,6 +423,18 @@ exports.publicApi = functions.https.onRequest(async (req, res) => {
     catch (error) {
         console.error('[public-api] request failed', { requestId, error });
         errorResponse(typedRes, 500, 'INTERNAL_ERROR', 'No se pudo completar la solicitud.', requestId);
+    }
+    finally {
+        console.log('[public-api-metrics]', JSON.stringify({
+            request_id: requestId,
+            method: req.method,
+            path: req.path,
+            status: typedRes.statusCode || 500,
+            latency_ms: Date.now() - startedAt,
+            firestore_reads: typedReq.firestoreReads || 0,
+            cache_hit: typedReq.cacheHit === true,
+            response_bytes: typedRes.responseBytes || 0
+        }));
     }
 });
 //# sourceMappingURL=runtime.js.map
