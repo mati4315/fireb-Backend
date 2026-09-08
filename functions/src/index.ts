@@ -96,6 +96,7 @@ import {
 } from './notificationRuntimeUtils';
 import { sendTestPushToAllUsersInternal } from './notificationRuntimeUtils';
 export { publicApi } from './publicApi/runtime';
+export { privateMcp } from './privateMcpRuntime';
 
 admin.initializeApp();
 const db = admin.firestore();
