@@ -16,6 +16,7 @@ firebase-sa-key.json
 
 # Local config
 .firebaserc
+.firebase/
 
 # Large files or temporary exports
 exports/
