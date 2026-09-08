@@ -95,6 +95,7 @@ import {
   writeNotificationEvent
 } from './notificationRuntimeUtils';
 import { sendTestPushToAllUsersInternal } from './notificationRuntimeUtils';
+export { publicApi } from './publicApi/runtime';
 
 admin.initializeApp();
 const db = admin.firestore();

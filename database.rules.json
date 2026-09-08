@@ -1,6 +1,18 @@
 {
   "rules": {
     ".read": false,
-    ".write": false
+    ".write": false,
+    "news": {
+      "$newsId": {
+        ".write": true,
+        ".validate": "newData.hasChildren(['titulo', 'descripcion'])"
+      }
+    },
+    "c": {
+      "$postId": {
+        ".write": true,
+        ".validate": "newData.hasChildren(['content', 'author_name'])"
+      }
+    }
   }
 }
