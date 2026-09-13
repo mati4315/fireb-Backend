@@ -132,7 +132,12 @@ const mapImages = (data: UnknownRecord): PublicImage[] => {
     const url = asHttpUrl(entry.url || entry.thumbUrl || entry.thumbnailUrl);
     if (!url || isInvalidWordpressThumbnail(url) || seen.has(url)) continue;
     seen.add(url);
-    result.push({ url, alt: asNullableString(entry.alt || entry.altText, 240) });
+    const thumbnailUrl = asHttpUrl(entry.thumbUrl || entry.thumbnailUrl || entry.thumbnail_url);
+    result.push({
+      url,
+      alt: asNullableString(entry.alt || entry.altText, 240),
+      thumbnail_url: thumbnailUrl && !isInvalidWordpressThumbnail(thumbnailUrl) ? thumbnailUrl : null
+    });
     if (result.length >= MAX_IMAGES) break;
   }
   return result;

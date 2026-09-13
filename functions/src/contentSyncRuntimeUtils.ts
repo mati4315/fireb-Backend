@@ -1,6 +1,7 @@
 import * as admin from 'firebase-admin';
 import * as functions from 'firebase-functions';
 import { buildContentPublicIdKey, extractNewsPublicIdFromPayload } from './contentUtils';
+import { createOfficialNewsThumbnail } from './officialNewsThumbnailRuntimeUtils';
 
 const parseDateCandidate = (value: unknown): admin.firestore.Timestamp | null => {
   if (!value) return null;
@@ -154,6 +155,20 @@ export const onOfficialNewsReceivedInternal = async (
     if (isInvalidWordpressThumbnail(coverThumbnailUrl)) {
       coverThumbnailUrl = primaryImageUrl;
     }
+
+    const sourceUrl = normalizeUrlCandidate(afterData.originalUrl) ||
+      normalizeUrlCandidate(afterData.sourceUrl) ||
+      normalizeUrlCandidate(afterData.url);
+    const publishedAt = parsedCreatedAt || (
+      existingCreatedAt instanceof admin.firestore.Timestamp ? existingCreatedAt : null
+    );
+    const optimizedThumbnailUrl = await createOfficialNewsThumbnail({
+      newsId,
+      sourceUrl,
+      primaryImageUrl,
+      publishedAt: publishedAt ? publishedAt.toDate() : null
+    });
+    if (optimizedThumbnailUrl) coverThumbnailUrl = optimizedThumbnailUrl;
 
     const rawImages = Array.isArray(afterData.images)
       ? afterData.images

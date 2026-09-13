@@ -36,6 +36,7 @@ export interface PublicLocation {
 export interface PublicImage {
   url: string;
   alt: string | null;
+  thumbnail_url: string | null;
 }
 
 export interface PublicNews {

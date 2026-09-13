@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.onCommunityPostsReceivedInternal = exports.getContentFingerprint = exports.onOfficialNewsReceivedInternal = void 0;
 const admin = require("firebase-admin");
 const contentUtils_1 = require("./contentUtils");
+const officialNewsThumbnailRuntimeUtils_1 = require("./officialNewsThumbnailRuntimeUtils");
 const parseDateCandidate = (value) => {
     if (!value)
         return null;
@@ -127,6 +128,18 @@ const onOfficialNewsReceivedInternal = async (db, change, context) => {
         if (isInvalidWordpressThumbnail(coverThumbnailUrl)) {
             coverThumbnailUrl = primaryImageUrl;
         }
+        const sourceUrl = normalizeUrlCandidate(afterData.originalUrl) ||
+            normalizeUrlCandidate(afterData.sourceUrl) ||
+            normalizeUrlCandidate(afterData.url);
+        const publishedAt = parsedCreatedAt || (existingCreatedAt instanceof admin.firestore.Timestamp ? existingCreatedAt : null);
+        const optimizedThumbnailUrl = await (0, officialNewsThumbnailRuntimeUtils_1.createOfficialNewsThumbnail)({
+            newsId,
+            sourceUrl,
+            primaryImageUrl,
+            publishedAt: publishedAt ? publishedAt.toDate() : null
+        });
+        if (optimizedThumbnailUrl)
+            coverThumbnailUrl = optimizedThumbnailUrl;
         const rawImages = Array.isArray(afterData.images)
             ? afterData.images
             : [afterData.img, afterData.image, afterData.imageUrl, afterData.coverImage, (_k = afterData.custom_fields) === null || _k === void 0 ? void 0 : _k.img, (_l = afterData.custom_fields) === null || _l === void 0 ? void 0 : _l.image];
