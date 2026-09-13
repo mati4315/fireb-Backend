@@ -66,6 +66,17 @@ const normalizeUrlCandidate = (value: unknown): string => {
   return value.trim().slice(0, 2400);
 };
 
+const INVALID_WORDPRESS_THUMBNAILS = new Set([
+  'https://arribanoticias.com.ar/wp-content/uploads/2025/04/logo-arriba-300x201.png',
+  'https://www.elmiercolesdigital.com.ar/wp-content/uploads/2015/04/galeano-300x275.jpg'
+]);
+
+const isInvalidWordpressThumbnail = (value: string): boolean => {
+  if (!value) return false;
+  const normalized = value.split(/[?#]/, 1)[0].replace(/\\/g, '/').toLowerCase();
+  return INVALID_WORDPRESS_THUMBNAILS.has(normalized);
+};
+
 export const onOfficialNewsReceivedInternal = async (
   db: FirebaseFirestore.Firestore,
   change: functions.Change<admin.database.DataSnapshot>,
@@ -124,7 +135,7 @@ export const onOfficialNewsReceivedInternal = async (
 
     const normalizedPostId = extractNewsPublicIdFromPayload(afterData);
     const postIdNumber = normalizedPostId ? Number(normalizedPostId) : null;
-    const coverThumbnailUrl = [
+    let coverThumbnailUrl = [
       normalizeUrlCandidate(afterData.img_miniatura),
       normalizeUrlCandidate(afterData.imgMiniatura),
       normalizeUrlCandidate(afterData.thumbnail),
@@ -135,9 +146,18 @@ export const onOfficialNewsReceivedInternal = async (
       normalizeUrlCandidate(afterData.custom_fields?.thumbnailUrl)
     ].find((value) => value.length > 0) || '';
 
+    const primaryImageUrl = normalizeUrlCandidate(afterData.img) ||
+      normalizeUrlCandidate(afterData.image) ||
+      normalizeUrlCandidate(afterData.imageUrl) ||
+      normalizeUrlCandidate(afterData.coverImage) ||
+      normalizeUrlCandidate(afterData.custom_fields?.img);
+    if (isInvalidWordpressThumbnail(coverThumbnailUrl)) {
+      coverThumbnailUrl = primaryImageUrl;
+    }
+
     const rawImages = Array.isArray(afterData.images)
       ? afterData.images
-      : [afterData.image, afterData.imageUrl, afterData.coverImage, afterData.custom_fields?.image];
+      : [afterData.img, afterData.image, afterData.imageUrl, afterData.coverImage, afterData.custom_fields?.img, afterData.custom_fields?.image];
     const normalizedImages = Array.from(
       new Set(
         rawImages

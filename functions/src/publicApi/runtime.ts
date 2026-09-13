@@ -23,7 +23,7 @@ const CACHE_TTL_SECONDS = { list: 30, detail: 60, categories: 120, search: 15 } 
 const PUBLIC_CONTENT_FIELDS = [
   'module', 'type', 'source', 'isOficial', 'deletedAt', 'visibility', 'status', 'moderation',
   'titulo', 'descripcion', 'publishedAt', 'createdAt', 'updatedAt', 'slug', 'category',
-  'images', 'imagesV2', 'imgMiniatura', 'publicId', 'postId'
+  'images', 'imagesV2', 'img', 'imgMiniatura', 'publicId', 'postId'
 ];
 const PUBLIC_EVENT_FIELDS = [
   'module', 'type', 'source', 'deletedAt', 'visibility', 'status', 'name', 'titulo',

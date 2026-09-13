@@ -51,8 +51,18 @@ const normalizeUrlCandidate = (value) => {
         return '';
     return value.trim().slice(0, 2400);
 };
+const INVALID_WORDPRESS_THUMBNAILS = new Set([
+    'https://arribanoticias.com.ar/wp-content/uploads/2025/04/logo-arriba-300x201.png',
+    'https://www.elmiercolesdigital.com.ar/wp-content/uploads/2015/04/galeano-300x275.jpg'
+]);
+const isInvalidWordpressThumbnail = (value) => {
+    if (!value)
+        return false;
+    const normalized = value.split(/[?#]/, 1)[0].replace(/\\/g, '/').toLowerCase();
+    return INVALID_WORDPRESS_THUMBNAILS.has(normalized);
+};
 const onOfficialNewsReceivedInternal = async (db, change, context) => {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p;
     const { newsId } = context.params;
     const afterData = change.after.val();
     if (!afterData) {
@@ -99,7 +109,7 @@ const onOfficialNewsReceivedInternal = async (db, change, context) => {
         const updatedAtTs = parsedUpdatedAt || admin.firestore.FieldValue.serverTimestamp();
         const normalizedPostId = (0, contentUtils_1.extractNewsPublicIdFromPayload)(afterData);
         const postIdNumber = normalizedPostId ? Number(normalizedPostId) : null;
-        const coverThumbnailUrl = [
+        let coverThumbnailUrl = [
             normalizeUrlCandidate(afterData.img_miniatura),
             normalizeUrlCandidate(afterData.imgMiniatura),
             normalizeUrlCandidate(afterData.thumbnail),
@@ -109,9 +119,17 @@ const onOfficialNewsReceivedInternal = async (db, change, context) => {
             normalizeUrlCandidate((_g = afterData.custom_fields) === null || _g === void 0 ? void 0 : _g.thumbnail),
             normalizeUrlCandidate((_h = afterData.custom_fields) === null || _h === void 0 ? void 0 : _h.thumbnailUrl)
         ].find((value) => value.length > 0) || '';
+        const primaryImageUrl = normalizeUrlCandidate(afterData.img) ||
+            normalizeUrlCandidate(afterData.image) ||
+            normalizeUrlCandidate(afterData.imageUrl) ||
+            normalizeUrlCandidate(afterData.coverImage) ||
+            normalizeUrlCandidate((_j = afterData.custom_fields) === null || _j === void 0 ? void 0 : _j.img);
+        if (isInvalidWordpressThumbnail(coverThumbnailUrl)) {
+            coverThumbnailUrl = primaryImageUrl;
+        }
         const rawImages = Array.isArray(afterData.images)
             ? afterData.images
-            : [afterData.image, afterData.imageUrl, afterData.coverImage, (_j = afterData.custom_fields) === null || _j === void 0 ? void 0 : _j.image];
+            : [afterData.img, afterData.image, afterData.imageUrl, afterData.coverImage, (_k = afterData.custom_fields) === null || _k === void 0 ? void 0 : _k.img, (_l = afterData.custom_fields) === null || _l === void 0 ? void 0 : _l.image];
         const normalizedImages = Array.from(new Set(rawImages
             .map((value) => normalizeUrlCandidate(value))
             .filter((value) => value.length > 0)));
@@ -139,9 +157,9 @@ const onOfficialNewsReceivedInternal = async (db, change, context) => {
             userName: afterData.userName || 'Redaccion CdeluAR',
             userProfilePicUrl: afterData.userProfilePicUrl || '',
             stats: {
-                likesCount: ((_k = afterData.stats) === null || _k === void 0 ? void 0 : _k.likesCount) || 0,
-                commentsCount: ((_l = afterData.stats) === null || _l === void 0 ? void 0 : _l.commentsCount) || 0,
-                viewsCount: ((_m = afterData.stats) === null || _m === void 0 ? void 0 : _m.viewsCount) || 0
+                likesCount: ((_m = afterData.stats) === null || _m === void 0 ? void 0 : _m.likesCount) || 0,
+                commentsCount: ((_o = afterData.stats) === null || _o === void 0 ? void 0 : _o.commentsCount) || 0,
+                viewsCount: ((_p = afterData.stats) === null || _p === void 0 ? void 0 : _p.viewsCount) || 0
             },
             createdAt: createdAtTs,
             updatedAt: updatedAtTs,

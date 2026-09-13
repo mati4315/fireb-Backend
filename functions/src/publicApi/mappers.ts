@@ -22,6 +22,10 @@ const MAX_SLUG_LENGTH = 96;
 const MAX_SUMMARY_LENGTH = 500;
 const MAX_CONTENT_LENGTH = 120_000;
 const MAX_IMAGES = 12;
+const INVALID_WORDPRESS_THUMBNAILS = new Set([
+  'https://arribanoticias.com.ar/wp-content/uploads/2025/04/logo-arriba-300x201.png',
+  'https://www.elmiercolesdigital.com.ar/wp-content/uploads/2015/04/galeano-300x275.jpg'
+]);
 
 const isRecord = (value: unknown): value is UnknownRecord =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -35,6 +39,9 @@ const asNullableString = (value: unknown, maxLength = 2400): string | null => {
   const normalized = asString(value, maxLength);
   return normalized || null;
 };
+
+const isInvalidWordpressThumbnail = (value: string): boolean =>
+  INVALID_WORDPRESS_THUMBNAILS.has(value.split(/[?#]/, 1)[0].replace(/\\/g, '/').toLowerCase());
 
 const decodeBasicEntities = (value: string): string =>
   value
@@ -115,6 +122,7 @@ const mapImages = (data: UnknownRecord): PublicImage[] => {
   const rawImages: unknown[] = [];
   if (Array.isArray(data.imagesV2)) rawImages.push(...data.imagesV2);
   if (Array.isArray(data.images)) rawImages.push(...data.images);
+  if (typeof data.img === 'string') rawImages.push(data.img);
   if (typeof data.imgMiniatura === 'string') rawImages.push(data.imgMiniatura);
 
   const seen = new Set<string>();
@@ -122,7 +130,7 @@ const mapImages = (data: UnknownRecord): PublicImage[] => {
   for (const raw of rawImages) {
     const entry = isRecord(raw) ? raw : { url: raw };
     const url = asHttpUrl(entry.url || entry.thumbUrl || entry.thumbnailUrl);
-    if (!url || seen.has(url)) continue;
+    if (!url || isInvalidWordpressThumbnail(url) || seen.has(url)) continue;
     seen.add(url);
     result.push({ url, alt: asNullableString(entry.alt || entry.altText, 240) });
     if (result.length >= MAX_IMAGES) break;
