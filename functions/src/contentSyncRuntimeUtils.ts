@@ -1,7 +1,7 @@
 import * as admin from 'firebase-admin';
 import * as functions from 'firebase-functions';
 import { buildContentPublicIdKey, extractNewsPublicIdFromPayload } from './contentUtils';
-import { createOfficialNewsThumbnail } from './officialNewsThumbnailRuntimeUtils';
+import { createOfficialNewsThumbnail, isOfficialThumbnailSource } from './officialNewsThumbnailRuntimeUtils';
 
 const parseDateCandidate = (value: unknown): admin.firestore.Timestamp | null => {
   if (!value) return null;
@@ -156,9 +156,16 @@ export const onOfficialNewsReceivedInternal = async (
       coverThumbnailUrl = primaryImageUrl;
     }
 
-    const sourceUrl = normalizeUrlCandidate(afterData.originalUrl) ||
-      normalizeUrlCandidate(afterData.sourceUrl) ||
-      normalizeUrlCandidate(afterData.url);
+    const sourceCandidates = [
+      normalizeUrlCandidate(afterData.originalUrl),
+      normalizeUrlCandidate(afterData.sourceUrl),
+      normalizeUrlCandidate(afterData.url),
+      normalizeUrlCandidate(afterData.link_post),
+      normalizeUrlCandidate(afterData.custom_fields?.link_post),
+      normalizeUrlCandidate(afterData.custom_fields?.sourceUrl),
+      normalizeUrlCandidate(afterData.custom_fields?.source_url)
+    ].filter(Boolean);
+    const sourceUrl = sourceCandidates.find((candidate) => isOfficialThumbnailSource(candidate)) || sourceCandidates[0] || '';
     const publishedAt = parsedCreatedAt || (
       existingCreatedAt instanceof admin.firestore.Timestamp ? existingCreatedAt : null
     );

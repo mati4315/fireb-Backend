@@ -63,7 +63,7 @@ const isInvalidWordpressThumbnail = (value) => {
     return INVALID_WORDPRESS_THUMBNAILS.has(normalized);
 };
 const onOfficialNewsReceivedInternal = async (db, change, context) => {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s;
     const { newsId } = context.params;
     const afterData = change.after.val();
     if (!afterData) {
@@ -128,9 +128,16 @@ const onOfficialNewsReceivedInternal = async (db, change, context) => {
         if (isInvalidWordpressThumbnail(coverThumbnailUrl)) {
             coverThumbnailUrl = primaryImageUrl;
         }
-        const sourceUrl = normalizeUrlCandidate(afterData.originalUrl) ||
-            normalizeUrlCandidate(afterData.sourceUrl) ||
-            normalizeUrlCandidate(afterData.url);
+        const sourceCandidates = [
+            normalizeUrlCandidate(afterData.originalUrl),
+            normalizeUrlCandidate(afterData.sourceUrl),
+            normalizeUrlCandidate(afterData.url),
+            normalizeUrlCandidate(afterData.link_post),
+            normalizeUrlCandidate((_k = afterData.custom_fields) === null || _k === void 0 ? void 0 : _k.link_post),
+            normalizeUrlCandidate((_l = afterData.custom_fields) === null || _l === void 0 ? void 0 : _l.sourceUrl),
+            normalizeUrlCandidate((_m = afterData.custom_fields) === null || _m === void 0 ? void 0 : _m.source_url)
+        ].filter(Boolean);
+        const sourceUrl = sourceCandidates.find((candidate) => (0, officialNewsThumbnailRuntimeUtils_1.isOfficialThumbnailSource)(candidate)) || sourceCandidates[0] || '';
         const publishedAt = parsedCreatedAt || (existingCreatedAt instanceof admin.firestore.Timestamp ? existingCreatedAt : null);
         const optimizedThumbnailUrl = await (0, officialNewsThumbnailRuntimeUtils_1.createOfficialNewsThumbnail)({
             newsId,
@@ -142,7 +149,7 @@ const onOfficialNewsReceivedInternal = async (db, change, context) => {
             coverThumbnailUrl = optimizedThumbnailUrl;
         const rawImages = Array.isArray(afterData.images)
             ? afterData.images
-            : [afterData.img, afterData.image, afterData.imageUrl, afterData.coverImage, (_k = afterData.custom_fields) === null || _k === void 0 ? void 0 : _k.img, (_l = afterData.custom_fields) === null || _l === void 0 ? void 0 : _l.image];
+            : [afterData.img, afterData.image, afterData.imageUrl, afterData.coverImage, (_o = afterData.custom_fields) === null || _o === void 0 ? void 0 : _o.img, (_p = afterData.custom_fields) === null || _p === void 0 ? void 0 : _p.image];
         const normalizedImages = Array.from(new Set(rawImages
             .map((value) => normalizeUrlCandidate(value))
             .filter((value) => value.length > 0)));
@@ -170,9 +177,9 @@ const onOfficialNewsReceivedInternal = async (db, change, context) => {
             userName: afterData.userName || 'Redaccion CdeluAR',
             userProfilePicUrl: afterData.userProfilePicUrl || '',
             stats: {
-                likesCount: ((_m = afterData.stats) === null || _m === void 0 ? void 0 : _m.likesCount) || 0,
-                commentsCount: ((_o = afterData.stats) === null || _o === void 0 ? void 0 : _o.commentsCount) || 0,
-                viewsCount: ((_p = afterData.stats) === null || _p === void 0 ? void 0 : _p.viewsCount) || 0
+                likesCount: ((_q = afterData.stats) === null || _q === void 0 ? void 0 : _q.likesCount) || 0,
+                commentsCount: ((_r = afterData.stats) === null || _r === void 0 ? void 0 : _r.commentsCount) || 0,
+                viewsCount: ((_s = afterData.stats) === null || _s === void 0 ? void 0 : _s.viewsCount) || 0
             },
             createdAt: createdAtTs,
             updatedAt: updatedAtTs,
