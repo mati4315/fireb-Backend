@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.onAdEventCreated = exports.purgeOldNotifications = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onCommunityPostsReceived = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.grantLotteryUserExtraTickets = exports.listLotteriesForAdmin = exports.getLotteryUserTicketExtras = exports.getUsersSocialConnections = exports.updateUserManagement = exports.markAllNotificationsRead = exports.markNotificationRead = exports.sendTestPushToAllUsers = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateHomeFeedPreference = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.refreshSecretRankings = exports.refreshSecretRankingsCallable = exports.deleteSecretAdminCallable = exports.moderateSecretReportCallable = exports.getSecretReportsCallable = exports.moderateSecretCallable = exports.getSecretModerationQueueCallable = exports.reportSecretCallable = exports.createSecretCommentCallable = exports.voteSecretCallable = exports.createSecretCallable = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = exports.privateMcp = exports.publicApi = void 0;
+exports.purgeOldNotifications = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onCommunityPostsReceived = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.grantLotteryUserExtraTickets = exports.listLotteriesForAdmin = exports.getLotteryUserTicketExtras = exports.getUsersSocialConnections = exports.updateUserManagement = exports.markAllNotificationsRead = exports.markNotificationRead = exports.sendTestPushToAllUsers = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateHomeFeedPreference = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.refreshSecretRankings = exports.refreshSecretRankingsCallable = exports.deleteSecretAdminCallable = exports.moderateSecretReportCallable = exports.getSecretReportsCallable = exports.moderateSecretCallable = exports.getSecretModerationQueueCallable = exports.reportContentCallable = exports.reportSecretCallable = exports.createSecretCommentCallable = exports.voteSecretCallable = exports.createSecretCallable = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = exports.privateMcp = exports.publicApi = void 0;
+exports.onAdEventCreated = void 0;
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const contentUtils_1 = require("./contentUtils");
@@ -591,6 +592,53 @@ exports.reportSecretCallable = functions.https.onCall(async (data, context) => {
             reportsCount,
             moderationStatus: nextStatus
         };
+    });
+});
+exports.reportContentCallable = functions.https.onCall(async (data, context) => {
+    const contentId = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.contentId, 128);
+    const moduleName = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.module, 32).toLowerCase();
+    if (!contentId || (moduleName !== 'news' && moduleName !== 'community')) {
+        throw new functions.https.HttpsError('invalid-argument', 'contentId y module deben identificar una noticia o una publicación comunitaria.');
+    }
+    const reason = (0, secretUtils_1.normalizeSecretReportReason)(data === null || data === void 0 ? void 0 : data.reason);
+    const comment = (0, secretUtils_1.sanitizeSecretText)(data === null || data === void 0 ? void 0 : data.comment, secretUtils_1.SECRET_REPORT_COMMENT_MAX_LENGTH);
+    if (reason === 'otros' && !comment) {
+        throw new functions.https.HttpsError('invalid-argument', 'Debes explicar el motivo cuando eliges Otros.');
+    }
+    const fingerprintHash = (0, secretUtils_1.buildSecretFingerprintHash)(data, context);
+    const contentRef = db.collection('content').doc(contentId);
+    const reportRef = contentRef.collection('content_reports').doc(fingerprintHash);
+    return db.runTransaction(async (tx) => {
+        const contentSnap = await tx.get(contentRef);
+        if (!contentSnap.exists) {
+            throw new functions.https.HttpsError('not-found', 'La publicación no existe.');
+        }
+        const contentData = contentSnap.data() || {};
+        const actualModule = contentData.module === 'news' || contentData.type === 'news'
+            ? 'news'
+            : contentData.module === 'community' || contentData.type === 'post'
+                ? 'community'
+                : '';
+        if (contentData.deletedAt != null || actualModule !== moduleName) {
+            throw new functions.https.HttpsError('failed-precondition', 'La publicación no está disponible.');
+        }
+        const existingReport = await tx.get(reportRef);
+        if (existingReport.exists) {
+            return { status: 'already_reported', contentId };
+        }
+        tx.set(reportRef, {
+            contentId,
+            module: moduleName,
+            reason,
+            comment: comment || null,
+            status: 'pending',
+            createdAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        tx.set(contentRef, {
+            'stats.reportsCount': admin.firestore.FieldValue.increment(1),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+        return { status: 'ok', contentId };
     });
 });
 exports.getSecretModerationQueueCallable = functions.https.onCall(async (data, context) => {

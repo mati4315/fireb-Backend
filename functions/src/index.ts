@@ -839,6 +839,66 @@ export const reportSecretCallable = functions.https.onCall(async (data, context)
   });
 });
 
+export const reportContentCallable = functions.https.onCall(async (data, context) => {
+  const contentId = sanitizeBoundedString(data?.contentId, 128);
+  const moduleName = sanitizeBoundedString(data?.module, 32).toLowerCase();
+  if (!contentId || (moduleName !== 'news' && moduleName !== 'community')) {
+    throw new functions.https.HttpsError(
+      'invalid-argument',
+      'contentId y module deben identificar una noticia o una publicación comunitaria.'
+    );
+  }
+
+  const reason = normalizeSecretReportReason(data?.reason);
+  const comment = sanitizeSecretText(data?.comment, SECRET_REPORT_COMMENT_MAX_LENGTH);
+  if (reason === 'otros' && !comment) {
+    throw new functions.https.HttpsError(
+      'invalid-argument',
+      'Debes explicar el motivo cuando eliges Otros.'
+    );
+  }
+
+  const fingerprintHash = buildSecretFingerprintHash(data, context);
+  const contentRef = db.collection('content').doc(contentId);
+  const reportRef = contentRef.collection('content_reports').doc(fingerprintHash);
+
+  return db.runTransaction(async (tx) => {
+    const contentSnap = await tx.get(contentRef);
+    if (!contentSnap.exists) {
+      throw new functions.https.HttpsError('not-found', 'La publicación no existe.');
+    }
+    const contentData = contentSnap.data() || {};
+    const actualModule = contentData.module === 'news' || contentData.type === 'news'
+      ? 'news'
+      : contentData.module === 'community' || contentData.type === 'post'
+        ? 'community'
+        : '';
+    if (contentData.deletedAt != null || actualModule !== moduleName) {
+      throw new functions.https.HttpsError('failed-precondition', 'La publicación no está disponible.');
+    }
+
+    const existingReport = await tx.get(reportRef);
+    if (existingReport.exists) {
+      return { status: 'already_reported', contentId };
+    }
+
+    tx.set(reportRef, {
+      contentId,
+      module: moduleName,
+      reason,
+      comment: comment || null,
+      status: 'pending',
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+    tx.set(contentRef, {
+      'stats.reportsCount': admin.firestore.FieldValue.increment(1),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+
+    return { status: 'ok', contentId };
+  });
+});
+
 export const getSecretModerationQueueCallable = functions.https.onCall(async (data, context) => {
   await assertAdminUser(db, context.auth);
 
