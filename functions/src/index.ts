@@ -1041,6 +1041,30 @@ export const moderateSecretReportCallable = functions.https.onCall(async (data, 
   return { status: 'ok', secretId, reportId, reportStatus: action === 'resolve' ? 'resolved' : action === 'dismiss' ? 'dismissed' : 'pending' };
 });
 
+export const deleteSecretAdminCallable = functions.https.onCall(async (data, context) => {
+  await assertAdminUser(db, context.auth);
+
+  const secretId = sanitizeBoundedString(data?.secretId, 128);
+  if (!secretId) {
+    throw new functions.https.HttpsError('invalid-argument', 'secretId es obligatorio.');
+  }
+
+  const secretRef = db.collection('content').doc(secretId);
+  const secretSnap = await secretRef.get();
+  if (!secretSnap.exists) {
+    throw new functions.https.HttpsError('not-found', 'El secreto no existe.');
+  }
+  if (secretSnap.data()?.module !== 'secrets') {
+    throw new functions.https.HttpsError(
+      'failed-precondition',
+      'El documento indicado no pertenece al modulo de secretos.'
+    );
+  }
+
+  await db.recursiveDelete(secretRef);
+  return { status: 'ok', secretId, deletedBy: context.auth?.uid || 'admin' };
+});
+
 export const refreshSecretRankingsCallable = functions.https.onCall(async (_data, context) => {
   await assertStaffUser(db, context.auth);
   const rankings = await refreshSecretRankingsInternal();

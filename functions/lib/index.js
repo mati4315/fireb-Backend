@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.onAdEventCreated = exports.purgeOldNotifications = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onCommunityPostsReceived = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.grantLotteryUserExtraTickets = exports.listLotteriesForAdmin = exports.getLotteryUserTicketExtras = exports.getUsersSocialConnections = exports.updateUserManagement = exports.markAllNotificationsRead = exports.markNotificationRead = exports.sendTestPushToAllUsers = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateHomeFeedPreference = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.refreshSecretRankings = exports.refreshSecretRankingsCallable = exports.moderateSecretReportCallable = exports.getSecretReportsCallable = exports.moderateSecretCallable = exports.getSecretModerationQueueCallable = exports.reportSecretCallable = exports.createSecretCommentCallable = exports.voteSecretCallable = exports.createSecretCallable = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = exports.privateMcp = exports.publicApi = void 0;
+exports.onAdEventCreated = exports.purgeOldNotifications = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onCommunityPostsReceived = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.grantLotteryUserExtraTickets = exports.listLotteriesForAdmin = exports.getLotteryUserTicketExtras = exports.getUsersSocialConnections = exports.updateUserManagement = exports.markAllNotificationsRead = exports.markNotificationRead = exports.sendTestPushToAllUsers = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateHomeFeedPreference = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.refreshSecretRankings = exports.refreshSecretRankingsCallable = exports.deleteSecretAdminCallable = exports.moderateSecretReportCallable = exports.getSecretReportsCallable = exports.moderateSecretCallable = exports.getSecretModerationQueueCallable = exports.reportSecretCallable = exports.createSecretCommentCallable = exports.voteSecretCallable = exports.createSecretCallable = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = exports.privateMcp = exports.publicApi = void 0;
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const contentUtils_1 = require("./contentUtils");
@@ -765,6 +765,24 @@ exports.moderateSecretReportCallable = functions.https.onCall(async (data, conte
         });
     });
     return { status: 'ok', secretId, reportId, reportStatus: action === 'resolve' ? 'resolved' : action === 'dismiss' ? 'dismissed' : 'pending' };
+});
+exports.deleteSecretAdminCallable = functions.https.onCall(async (data, context) => {
+    var _a, _b;
+    await (0, userUtils_1.assertAdminUser)(db, context.auth);
+    const secretId = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.secretId, 128);
+    if (!secretId) {
+        throw new functions.https.HttpsError('invalid-argument', 'secretId es obligatorio.');
+    }
+    const secretRef = db.collection('content').doc(secretId);
+    const secretSnap = await secretRef.get();
+    if (!secretSnap.exists) {
+        throw new functions.https.HttpsError('not-found', 'El secreto no existe.');
+    }
+    if (((_a = secretSnap.data()) === null || _a === void 0 ? void 0 : _a.module) !== 'secrets') {
+        throw new functions.https.HttpsError('failed-precondition', 'El documento indicado no pertenece al modulo de secretos.');
+    }
+    await db.recursiveDelete(secretRef);
+    return { status: 'ok', secretId, deletedBy: ((_b = context.auth) === null || _b === void 0 ? void 0 : _b.uid) || 'admin' };
 });
 exports.refreshSecretRankingsCallable = functions.https.onCall(async (_data, context) => {
     var _a;
