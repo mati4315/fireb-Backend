@@ -12,7 +12,12 @@ const MAX_SEARCH_LIMIT = 50;
 const DEFAULT_LIMIT = 20;
 const MAX_QUERY_SCAN = 100;
 const RATE_WINDOW_MS = 60000;
-const DEFAULT_ORIGIN = 'https://cdelu.ar';
+const DEFAULT_ORIGIN = [
+    'https://cdelu.ar',
+    'https://www.cdelu.ar',
+    'https://cdelu-ar.web.app',
+    'https://cdelu-ar.firebaseapp.com'
+].join(',');
 const MAX_RESPONSE_BYTES = 900000;
 const CACHE_TTL_SECONDS = { list: 30, detail: 60, categories: 120, search: 15 };
 const PUBLIC_CONTENT_FIELDS = [
