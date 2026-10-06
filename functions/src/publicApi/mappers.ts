@@ -120,10 +120,10 @@ const buildNewsCanonicalUrl = (id: string, data: UnknownRecord, slug: string): s
 
 const mapImages = (data: UnknownRecord): PublicImage[] => {
   const rawImages: unknown[] = [];
+  const legacyThumbnail = asHttpUrl(data.imgMiniatura || data.img_miniatura);
   if (Array.isArray(data.imagesV2)) rawImages.push(...data.imagesV2);
   if (Array.isArray(data.images)) rawImages.push(...data.images);
   if (typeof data.img === 'string') rawImages.push(data.img);
-  if (typeof data.imgMiniatura === 'string') rawImages.push(data.imgMiniatura);
 
   const seen = new Set<string>();
   const result: PublicImage[] = [];
@@ -136,7 +136,11 @@ const mapImages = (data: UnknownRecord): PublicImage[] => {
     result.push({
       url,
       alt: asNullableString(entry.alt || entry.altText, 240),
-      thumbnail_url: thumbnailUrl && !isInvalidWordpressThumbnail(thumbnailUrl) ? thumbnailUrl : null
+      thumbnail_url: thumbnailUrl && !isInvalidWordpressThumbnail(thumbnailUrl)
+        ? thumbnailUrl
+        : (result.length === 0 && legacyThumbnail && !isInvalidWordpressThumbnail(legacyThumbnail)
+          ? legacyThumbnail
+          : null)
     });
     if (result.length >= MAX_IMAGES) break;
   }
