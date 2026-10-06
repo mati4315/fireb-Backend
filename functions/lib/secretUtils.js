@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.refreshSecretRankingsInternal = exports.buildSecretRankingsSnapshot = exports.takeUniqueSecretRankingItems = exports.toSecretRankingItem = exports.isSecretActiveForRanking = exports.computeSecretRank = exports.resolveSecretRuntimeSettings = exports.createSecretAlias = exports.buildSecretFingerprintHash = exports.timestampToMillisOrZero = exports.normalizeSecretClientAnonId = exports.normalizeSecretModerationAction = exports.normalizeSecretModerationStatusFilter = exports.normalizeSecretReportReason = exports.normalizeSecretAge = exports.normalizeSecretZone = exports.normalizeSecretSex = exports.normalizeSecretCategory = exports.sanitizeSecretText = exports.hasMeaningfulSecretText = exports.SECRET_RANKINGS_LIST_LIMIT = exports.SECRET_RANKINGS_SAMPLE_LIMIT = exports.SECRET_AUTO_HIDE_REPORT_THRESHOLD = exports.SECRET_FINGERPRINT_TTL_MS = exports.SECRET_DAILY_LIMIT = exports.SECRET_REPORT_REASON_MAX_LENGTH = exports.SECRET_ZONE_MAX_LENGTH = exports.SECRET_COMMENT_MAX_LENGTH = exports.SECRET_COMMENT_MIN_LENGTH = exports.SECRET_NUMERIC_ID_START = exports.SECRET_TEXT_MAX_ABSOLUTE = exports.SECRET_TEXT_MAX_LENGTH = exports.SECRET_TEXT_MIN_LENGTH = void 0;
+exports.refreshSecretRankingsInternal = exports.buildSecretRankingsSnapshot = exports.takeUniqueSecretRankingItems = exports.toSecretRankingItem = exports.isSecretActiveForRanking = exports.computeSecretRank = exports.resolveSecretRuntimeSettings = exports.createSecretAlias = exports.buildSecretFingerprintHash = exports.timestampToMillisOrZero = exports.normalizeSecretClientAnonId = exports.normalizeSecretModerationAction = exports.normalizeSecretModerationStatusFilter = exports.normalizeSecretReportAction = exports.normalizeSecretReportReason = exports.normalizeSecretAge = exports.normalizeSecretZone = exports.normalizeSecretSex = exports.normalizeSecretCategory = exports.sanitizeSecretText = exports.hasMeaningfulSecretText = exports.SECRET_RANKINGS_LIST_LIMIT = exports.SECRET_RANKINGS_SAMPLE_LIMIT = exports.SECRET_AUTO_HIDE_REPORT_THRESHOLD = exports.SECRET_FINGERPRINT_TTL_MS = exports.SECRET_DAILY_LIMIT = exports.SECRET_REPORT_COMMENT_MAX_LENGTH = exports.SECRET_REPORT_REASON_MAX_LENGTH = exports.SECRET_ZONE_MAX_LENGTH = exports.SECRET_COMMENT_MAX_LENGTH = exports.SECRET_COMMENT_MIN_LENGTH = exports.SECRET_NUMERIC_ID_START = exports.SECRET_TEXT_MAX_ABSOLUTE = exports.SECRET_TEXT_MAX_LENGTH = exports.SECRET_TEXT_MIN_LENGTH = void 0;
 const admin = require("firebase-admin");
 const functions = require("firebase-functions");
 const crypto = require("crypto");
@@ -13,6 +13,7 @@ exports.SECRET_COMMENT_MIN_LENGTH = 2;
 exports.SECRET_COMMENT_MAX_LENGTH = 300;
 exports.SECRET_ZONE_MAX_LENGTH = 48;
 exports.SECRET_REPORT_REASON_MAX_LENGTH = 140;
+exports.SECRET_REPORT_COMMENT_MAX_LENGTH = 500;
 exports.SECRET_DAILY_LIMIT = 5;
 exports.SECRET_FINGERPRINT_TTL_MS = 72 * 60 * 60 * 1000;
 exports.SECRET_AUTO_HIDE_REPORT_THRESHOLD = 6;
@@ -36,6 +37,15 @@ const SECRET_MODERATION_STATUS_VALUES = new Set([
     'hidden_auto',
     'hidden_admin',
     'blocked'
+]);
+const SECRET_REPORT_REASON_VALUES = new Set([
+    'contenido_inapropiado',
+    'acoso',
+    'odio_discriminacion',
+    'violencia_amenazas',
+    'spam_publicidad',
+    'informacion_personal',
+    'otros'
 ]);
 const clampInteger = (value, min, max, fallback) => {
     const raw = Number(value);
@@ -96,10 +106,17 @@ const normalizeSecretAge = (value) => {
 };
 exports.normalizeSecretAge = normalizeSecretAge;
 const normalizeSecretReportReason = (value) => {
-    const reason = (0, exports.sanitizeSecretText)(value, exports.SECRET_REPORT_REASON_MAX_LENGTH);
-    return reason || 'contenido_inapropiado';
+    const reason = sanitizeBoundedString(value, exports.SECRET_REPORT_REASON_MAX_LENGTH).toLowerCase();
+    return SECRET_REPORT_REASON_VALUES.has(reason) ? reason : 'contenido_inapropiado';
 };
 exports.normalizeSecretReportReason = normalizeSecretReportReason;
+const normalizeSecretReportAction = (value) => {
+    const action = sanitizeBoundedString(value, 40).toLowerCase();
+    if (action === 'resolve' || action === 'dismiss' || action === 'reopen')
+        return action;
+    throw new functions.https.HttpsError('invalid-argument', 'action debe ser resolve, dismiss o reopen.');
+};
+exports.normalizeSecretReportAction = normalizeSecretReportAction;
 const normalizeSecretModerationStatusFilter = (value) => {
     const normalized = sanitizeBoundedString(value, 40).toLowerCase();
     if (SECRET_MODERATION_STATUS_VALUES.has(normalized))

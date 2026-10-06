@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.onAdEventCreated = exports.purgeOldNotifications = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onCommunityPostsReceived = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.grantLotteryUserExtraTickets = exports.listLotteriesForAdmin = exports.getLotteryUserTicketExtras = exports.getUsersSocialConnections = exports.updateUserManagement = exports.markAllNotificationsRead = exports.markNotificationRead = exports.sendTestPushToAllUsers = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateHomeFeedPreference = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.refreshSecretRankings = exports.refreshSecretRankingsCallable = exports.moderateSecretCallable = exports.getSecretModerationQueueCallable = exports.reportSecretCallable = exports.createSecretCommentCallable = exports.voteSecretCallable = exports.createSecretCallable = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = exports.privateMcp = exports.publicApi = void 0;
+exports.onAdEventCreated = exports.purgeOldNotifications = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onCommunityPostsReceived = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.grantLotteryUserExtraTickets = exports.listLotteriesForAdmin = exports.getLotteryUserTicketExtras = exports.getUsersSocialConnections = exports.updateUserManagement = exports.markAllNotificationsRead = exports.markNotificationRead = exports.sendTestPushToAllUsers = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateHomeFeedPreference = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.refreshSecretRankings = exports.refreshSecretRankingsCallable = exports.moderateSecretReportCallable = exports.getSecretReportsCallable = exports.moderateSecretCallable = exports.getSecretModerationQueueCallable = exports.reportSecretCallable = exports.createSecretCommentCallable = exports.voteSecretCallable = exports.createSecretCallable = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = exports.privateMcp = exports.publicApi = void 0;
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const contentUtils_1 = require("./contentUtils");
@@ -516,6 +516,10 @@ exports.reportSecretCallable = functions.https.onCall(async (data, context) => {
         throw new functions.https.HttpsError('invalid-argument', 'secretId es obligatorio.');
     }
     const reason = (0, secretUtils_1.normalizeSecretReportReason)(data === null || data === void 0 ? void 0 : data.reason);
+    const comment = (0, secretUtils_1.sanitizeSecretText)(data === null || data === void 0 ? void 0 : data.comment, secretUtils_1.SECRET_REPORT_COMMENT_MAX_LENGTH);
+    if (reason === 'otros' && !comment) {
+        throw new functions.https.HttpsError('invalid-argument', 'Debes explicar el motivo cuando eliges Otros.');
+    }
     const fingerprintHash = (0, secretUtils_1.buildSecretFingerprintHash)(data, context);
     const nowMs = Date.now();
     const nowTs = admin.firestore.Timestamp.fromMillis(nowMs);
@@ -560,7 +564,10 @@ exports.reportSecretCallable = functions.https.onCall(async (data, context) => {
             nextReason = 'report_threshold';
         }
         tx.set(reportRef, {
+            secretId,
             reason,
+            comment: comment || null,
+            status: 'pending',
             createdAt: admin.firestore.FieldValue.serverTimestamp()
         });
         tx.update(secretRef, {
@@ -680,6 +687,84 @@ exports.moderateSecretCallable = functions.https.onCall(async (data, context) =>
             action
         };
     });
+});
+exports.getSecretReportsCallable = functions.https.onCall(async (data, context) => {
+    await (0, userUtils_1.assertAdminUser)(db, context.auth);
+    const requestedStatus = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.status, 24).toLowerCase();
+    const statusFilter = requestedStatus === 'pending' || requestedStatus === 'resolved' || requestedStatus === 'dismissed'
+        ? requestedStatus
+        : 'all';
+    const limitValue = (0, lotteryUtils_1.clampInteger)(data === null || data === void 0 ? void 0 : data.limit, 10, 200, 100);
+    const reportsSnapshot = await db.collectionGroup('secret_reports').get();
+    const reportDocs = reportsSnapshot.docs
+        .map((reportDoc) => {
+        var _a;
+        const reportData = reportDoc.data() || {};
+        const secretId = (0, userUtils_1.sanitizeBoundedString)(reportData.secretId || ((_a = reportDoc.ref.parent.parent) === null || _a === void 0 ? void 0 : _a.id), 128);
+        return {
+            reportDoc,
+            reportData,
+            secretId,
+            createdAtMs: (0, secretUtils_1.timestampToMillisOrZero)(reportData.createdAt)
+        };
+    })
+        .filter(({ reportData }) => statusFilter === 'all' || (reportData.status || 'pending') === statusFilter)
+        .sort((a, b) => b.createdAtMs - a.createdAtMs)
+        .slice(0, limitValue);
+    const secretSnapshots = await Promise.all(reportDocs.map(({ secretId }) => db.collection('content').doc(secretId).get()));
+    const items = reportDocs.map(({ reportDoc, reportData, secretId }, index) => {
+        var _a, _b;
+        const secretData = secretSnapshots[index].data() || {};
+        return {
+            reportId: reportDoc.id,
+            secretId,
+            reason: (0, userUtils_1.sanitizeBoundedString)(reportData.reason, secretUtils_1.SECRET_REPORT_REASON_MAX_LENGTH),
+            comment: (0, secretUtils_1.sanitizeSecretText)(reportData.comment, secretUtils_1.SECRET_REPORT_COMMENT_MAX_LENGTH),
+            status: (0, userUtils_1.sanitizeBoundedString)(reportData.status, 24) || 'pending',
+            createdAtMs: (0, secretUtils_1.timestampToMillisOrZero)(reportData.createdAt),
+            reviewedAtMs: (0, secretUtils_1.timestampToMillisOrZero)(reportData.reviewedAt),
+            reviewedBy: (0, userUtils_1.sanitizeBoundedString)(reportData.reviewedBy, 128),
+            secret: {
+                textPreview: (0, secretUtils_1.sanitizeSecretText)(secretData.descripcion, 280),
+                category: (0, userUtils_1.sanitizeBoundedString)(secretData.category, 40),
+                zone: (0, userUtils_1.sanitizeBoundedString)(secretData.zone, 60),
+                moderationStatus: (0, userUtils_1.sanitizeBoundedString)((_a = secretData === null || secretData === void 0 ? void 0 : secretData.moderation) === null || _a === void 0 ? void 0 : _a.status, 40) || 'active',
+                reportsCount: Math.max(0, Math.floor(Number(((_b = secretData === null || secretData === void 0 ? void 0 : secretData.stats) === null || _b === void 0 ? void 0 : _b.reportsCount) || 0)))
+            }
+        };
+    });
+    return {
+        status: 'ok',
+        filter: statusFilter,
+        count: items.length,
+        items,
+        fetchedAtMs: Date.now()
+    };
+});
+exports.moderateSecretReportCallable = functions.https.onCall(async (data, context) => {
+    var _a;
+    await (0, userUtils_1.assertAdminUser)(db, context.auth);
+    const secretId = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.secretId, 128);
+    const reportId = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.reportId, 128);
+    const action = (0, secretUtils_1.normalizeSecretReportAction)(data === null || data === void 0 ? void 0 : data.action);
+    if (!secretId || !reportId) {
+        throw new functions.https.HttpsError('invalid-argument', 'secretId y reportId son obligatorios.');
+    }
+    const reportRef = db.collection('content').doc(secretId).collection('secret_reports').doc(reportId);
+    const reviewerUid = ((_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid) || 'admin';
+    await db.runTransaction(async (tx) => {
+        const reportSnap = await tx.get(reportRef);
+        if (!reportSnap.exists) {
+            throw new functions.https.HttpsError('not-found', 'El reporte no existe.');
+        }
+        const nextStatus = action === 'resolve' ? 'resolved' : action === 'dismiss' ? 'dismissed' : 'pending';
+        tx.update(reportRef, {
+            status: nextStatus,
+            reviewedBy: reviewerUid,
+            reviewedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+    });
+    return { status: 'ok', secretId, reportId, reportStatus: action === 'resolve' ? 'resolved' : action === 'dismiss' ? 'dismissed' : 'pending' };
 });
 exports.refreshSecretRankingsCallable = functions.https.onCall(async (_data, context) => {
     var _a;

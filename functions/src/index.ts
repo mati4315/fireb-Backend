@@ -21,6 +21,7 @@ import {
   normalizeSecretAge,
   normalizeSecretCategory,
   normalizeSecretReportReason,
+  normalizeSecretReportAction,
   normalizeSecretModerationAction,
   normalizeSecretModerationStatusFilter,
   normalizeSecretSex,
@@ -30,6 +31,8 @@ import {
   sanitizeSecretText,
   SECRET_COMMENT_MIN_LENGTH,
   SECRET_COMMENT_MAX_LENGTH,
+  SECRET_REPORT_REASON_MAX_LENGTH,
+  SECRET_REPORT_COMMENT_MAX_LENGTH,
   SECRET_FINGERPRINT_TTL_MS,
   SECRET_NUMERIC_ID_START,
   SECRET_TEXT_MAX_ABSOLUTE,
@@ -736,6 +739,13 @@ export const reportSecretCallable = functions.https.onCall(async (data, context)
   }
 
   const reason = normalizeSecretReportReason(data?.reason);
+  const comment = sanitizeSecretText(data?.comment, SECRET_REPORT_COMMENT_MAX_LENGTH);
+  if (reason === 'otros' && !comment) {
+    throw new functions.https.HttpsError(
+      'invalid-argument',
+      'Debes explicar el motivo cuando eliges Otros.'
+    );
+  }
   const fingerprintHash = buildSecretFingerprintHash(data, context);
   const nowMs = Date.now();
   const nowTs = admin.firestore.Timestamp.fromMillis(nowMs);
@@ -790,7 +800,10 @@ export const reportSecretCallable = functions.https.onCall(async (data, context)
     }
 
     tx.set(reportRef, {
+      secretId,
       reason,
+      comment: comment || null,
+      status: 'pending',
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
@@ -934,6 +947,98 @@ export const moderateSecretCallable = functions.https.onCall(async (data, contex
       action
     };
   });
+});
+
+export const getSecretReportsCallable = functions.https.onCall(async (data, context) => {
+  await assertAdminUser(db, context.auth);
+
+  const requestedStatus = sanitizeBoundedString(data?.status, 24).toLowerCase();
+  const statusFilter = requestedStatus === 'pending' || requestedStatus === 'resolved' || requestedStatus === 'dismissed'
+    ? requestedStatus
+    : 'all';
+  const limitValue = clampInteger(data?.limit, 10, 200, 100);
+  const reportsSnapshot = await db.collectionGroup('secret_reports').get();
+  const reportDocs = reportsSnapshot.docs
+    .map((reportDoc) => {
+      const reportData = reportDoc.data() || {};
+      const secretId = sanitizeBoundedString(
+        reportData.secretId || reportDoc.ref.parent.parent?.id,
+        128
+      );
+      return {
+        reportDoc,
+        reportData,
+        secretId,
+        createdAtMs: timestampToMillisOrZero(reportData.createdAt)
+      };
+    })
+    .filter(({ reportData }) => statusFilter === 'all' || (reportData.status || 'pending') === statusFilter)
+    .sort((a, b) => b.createdAtMs - a.createdAtMs)
+    .slice(0, limitValue);
+
+  const secretSnapshots = await Promise.all(
+    reportDocs.map(({ secretId }) => db.collection('content').doc(secretId).get())
+  );
+
+  const items = reportDocs.map(({ reportDoc, reportData, secretId }, index) => {
+    const secretData = secretSnapshots[index].data() || {};
+    return {
+      reportId: reportDoc.id,
+      secretId,
+      reason: sanitizeBoundedString(reportData.reason, SECRET_REPORT_REASON_MAX_LENGTH),
+      comment: sanitizeSecretText(reportData.comment, SECRET_REPORT_COMMENT_MAX_LENGTH),
+      status: sanitizeBoundedString(reportData.status, 24) || 'pending',
+      createdAtMs: timestampToMillisOrZero(reportData.createdAt),
+      reviewedAtMs: timestampToMillisOrZero(reportData.reviewedAt),
+      reviewedBy: sanitizeBoundedString(reportData.reviewedBy, 128),
+      secret: {
+        textPreview: sanitizeSecretText(secretData.descripcion, 280),
+        category: sanitizeBoundedString(secretData.category, 40),
+        zone: sanitizeBoundedString(secretData.zone, 60),
+        moderationStatus: sanitizeBoundedString(secretData?.moderation?.status, 40) || 'active',
+        reportsCount: Math.max(0, Math.floor(Number(secretData?.stats?.reportsCount || 0)))
+      }
+    };
+  });
+
+  return {
+    status: 'ok',
+    filter: statusFilter,
+    count: items.length,
+    items,
+    fetchedAtMs: Date.now()
+  };
+});
+
+export const moderateSecretReportCallable = functions.https.onCall(async (data, context) => {
+  await assertAdminUser(db, context.auth);
+
+  const secretId = sanitizeBoundedString(data?.secretId, 128);
+  const reportId = sanitizeBoundedString(data?.reportId, 128);
+  const action = normalizeSecretReportAction(data?.action);
+  if (!secretId || !reportId) {
+    throw new functions.https.HttpsError(
+      'invalid-argument',
+      'secretId y reportId son obligatorios.'
+    );
+  }
+
+  const reportRef = db.collection('content').doc(secretId).collection('secret_reports').doc(reportId);
+  const reviewerUid = context.auth?.uid || 'admin';
+  await db.runTransaction(async (tx) => {
+    const reportSnap = await tx.get(reportRef);
+    if (!reportSnap.exists) {
+      throw new functions.https.HttpsError('not-found', 'El reporte no existe.');
+    }
+    const nextStatus = action === 'resolve' ? 'resolved' : action === 'dismiss' ? 'dismissed' : 'pending';
+    tx.update(reportRef, {
+      status: nextStatus,
+      reviewedBy: reviewerUid,
+      reviewedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+  });
+
+  return { status: 'ok', secretId, reportId, reportStatus: action === 'resolve' ? 'resolved' : action === 'dismiss' ? 'dismissed' : 'pending' };
 });
 
 export const refreshSecretRankingsCallable = functions.https.onCall(async (_data, context) => {

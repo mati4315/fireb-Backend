@@ -12,6 +12,7 @@ export const SECRET_COMMENT_MIN_LENGTH = 2;
 export const SECRET_COMMENT_MAX_LENGTH = 300;
 export const SECRET_ZONE_MAX_LENGTH = 48;
 export const SECRET_REPORT_REASON_MAX_LENGTH = 140;
+export const SECRET_REPORT_COMMENT_MAX_LENGTH = 500;
 export const SECRET_DAILY_LIMIT = 5;
 export const SECRET_FINGERPRINT_TTL_MS = 72 * 60 * 60 * 1000;
 export const SECRET_AUTO_HIDE_REPORT_THRESHOLD = 6;
@@ -36,6 +37,15 @@ const SECRET_MODERATION_STATUS_VALUES = new Set<string>([
   'hidden_auto',
   'hidden_admin',
   'blocked'
+]);
+const SECRET_REPORT_REASON_VALUES = new Set<string>([
+  'contenido_inapropiado',
+  'acoso',
+  'odio_discriminacion',
+  'violencia_amenazas',
+  'spam_publicidad',
+  'informacion_personal',
+  'otros'
 ]);
 
 const clampInteger = (value: unknown, min: number, max: number, fallback: number): number => {
@@ -92,8 +102,19 @@ export const normalizeSecretAge = (value: unknown): number | null => {
 };
 
 export const normalizeSecretReportReason = (value: unknown): string => {
-  const reason = sanitizeSecretText(value, SECRET_REPORT_REASON_MAX_LENGTH);
-  return reason || 'contenido_inapropiado';
+  const reason = sanitizeBoundedString(value, SECRET_REPORT_REASON_MAX_LENGTH).toLowerCase();
+  return SECRET_REPORT_REASON_VALUES.has(reason) ? reason : 'contenido_inapropiado';
+};
+
+export const normalizeSecretReportAction = (
+  value: unknown
+): 'resolve' | 'dismiss' | 'reopen' => {
+  const action = sanitizeBoundedString(value, 40).toLowerCase();
+  if (action === 'resolve' || action === 'dismiss' || action === 'reopen') return action;
+  throw new functions.https.HttpsError(
+    'invalid-argument',
+    'action debe ser resolve, dismiss o reopen.'
+  );
 };
 
 export const normalizeSecretModerationStatusFilter = (value: unknown): string => {
