@@ -1,7 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.purgeOldNotifications = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onCommunityPostsReceived = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.grantLotteryUserExtraTickets = exports.listLotteriesForAdmin = exports.getLotteryUserTicketExtras = exports.getUsersSocialConnections = exports.updateUserManagement = exports.markAllNotificationsRead = exports.markNotificationRead = exports.sendTestPushToAllUsers = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateHomeFeedPreference = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.refreshSecretRankings = exports.refreshSecretRankingsCallable = exports.deleteSecretAdminCallable = exports.moderateSecretReportCallable = exports.getSecretReportsCallable = exports.moderateSecretCallable = exports.getSecretModerationQueueCallable = exports.reportContentCallable = exports.reportSecretCallable = exports.createSecretCommentCallable = exports.voteSecretCallable = exports.createSecretCallable = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = exports.privateMcp = exports.publicApi = void 0;
-exports.onAdEventCreated = void 0;
+exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onCommunityPostsReceived = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.grantLotteryUserExtraTickets = exports.listLotteriesForAdmin = exports.getLotteryUserTicketExtras = exports.getUsersSocialConnections = exports.updateUserManagement = exports.markAllNotificationsRead = exports.markNotificationRead = exports.sendTestPushToAllUsers = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateHomeFeedPreference = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.refreshSecretRankings = exports.refreshSecretRankingsCallable = exports.deleteSecretAdminCallable = exports.moderateSecretReportCallable = exports.getSecretReportsCallable = exports.moderateSecretCallable = exports.getSecretModerationQueueCallable = exports.reportContentCallable = exports.reportSecretCallable = exports.createSecretCommentCallable = exports.voteSecretCallable = exports.createSecretCallable = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = exports.onLotteryCreatedNotifyUsers = exports.privateMcp = exports.publicApi = void 0;
+exports.onAdEventCreated = exports.purgeOldNotifications = void 0;
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const contentUtils_1 = require("./contentUtils");
@@ -34,6 +34,95 @@ const CONTENT_SLUG_MAX_LENGTH = 96;
 const NOTIFICATION_PAGE_SIZE = 300;
 const NOTIFICATION_RETENTION_DAYS = 30;
 const NOTIFICATION_DEVICE_ID_MAX_LENGTH = 120;
+exports.onLotteryCreatedNotifyUsers = functions.firestore
+    .document('lotteries/{lotteryId}')
+    .onCreate(async (snapshot, context) => {
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k;
+    const lottery = snapshot.data() || {};
+    const now = Date.now();
+    const startsAt = (_e = (_d = (_c = (_b = (_a = lottery.startsAt) === null || _a === void 0 ? void 0 : _a.toDate) === null || _b === void 0 ? void 0 : _b.call(_a)) === null || _c === void 0 ? void 0 : _c.getTime) === null || _d === void 0 ? void 0 : _d.call(_c)) !== null && _e !== void 0 ? _e : 0;
+    const endsAt = (_k = (_j = (_h = (_g = (_f = lottery.endsAt) === null || _f === void 0 ? void 0 : _f.toDate) === null || _g === void 0 ? void 0 : _g.call(_f)) === null || _h === void 0 ? void 0 : _h.getTime) === null || _j === void 0 ? void 0 : _j.call(_h)) !== null && _k !== void 0 ? _k : Number.MAX_SAFE_INTEGER;
+    if (lottery.deletedAt != null ||
+        lottery.status !== 'active' ||
+        startsAt > now ||
+        endsAt <= now) {
+        return;
+    }
+    const modulesSnapshot = await db.collection('_config').doc('modules').get();
+    if (!(0, moduleUtils_1.isLotteryModuleEnabled)(modulesSnapshot.data()))
+        return;
+    const lotteryId = context.params.lotteryId;
+    const title = (0, userUtils_1.sanitizeBoundedString)(lottery.title, 150) || 'Nueva lotería';
+    const notificationId = `lottery_${lotteryId}`;
+    const systemMessage = `La lotería «${title}» ya está disponible. ¡Participa ahora!`;
+    let cursor;
+    while (true) {
+        let usersQuery = db.collection('users')
+            .orderBy(admin.firestore.FieldPath.documentId())
+            .limit(400);
+        if (cursor)
+            usersQuery = usersQuery.startAfter(cursor);
+        const usersSnapshot = await usersQuery.get();
+        if (usersSnapshot.empty)
+            break;
+        const batch = db.batch();
+        for (const userSnapshot of usersSnapshot.docs) {
+            const notificationRef = userSnapshot.ref.collection('notifications').doc(notificationId);
+            batch.set(notificationRef, {
+                type: 'system',
+                recipientUserId: userSnapshot.id,
+                actorUserId: 'system',
+                actorName: '🔔 Nueva lotería',
+                actorUsername: 'system',
+                actorProfilePictureUrl: 'https://bot.cdelu.io/images/logo.png',
+                contentId: lotteryId,
+                contentModule: '',
+                contentPublicRef: '',
+                contentSlug: '',
+                commentId: '',
+                replyId: '',
+                targetPath: '/loteria',
+                isRead: false,
+                readAt: null,
+                eventCount: 1,
+                systemMessage,
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                lastEventAt: admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+        }
+        await batch.commit();
+        cursor = usersSnapshot.docs[usersSnapshot.docs.length - 1];
+        if (usersSnapshot.size < 400)
+            break;
+    }
+    await admin.messaging().send({
+        topic: 'all_users',
+        notification: {
+            title: '🎉 Nueva lotería disponible',
+            body: `${title}. ¡Participa ahora!`
+        },
+        data: {
+            type: 'system',
+            lotteryId,
+            targetPath: '/loteria'
+        },
+        android: {
+            priority: 'high',
+            notification: {
+                channelId: 'default',
+                sound: 'default'
+            }
+        },
+        webpush: {
+            fcmOptions: {
+                link: '/loteria'
+            }
+        }
+    }).catch((error) => {
+        console.warn(`Lottery push delivery failed for ${lotteryId}:`, error);
+    });
+});
 // 1. Likes
 exports.onLikeAdded = functions.firestore
     .document('content/{contentId}/likes/{userId}')
@@ -1198,9 +1287,22 @@ exports.updateHomeFeedPreference = functions.https.onCall(async (data, context) 
     if (!userId) {
         throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para configurar tu feed.');
     }
-    const rawDefaultFeedTab = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.defaultFeedTab, 40).toLowerCase();
-    if (!['todo', 'news', 'post', 'surveys', 'lottery'].includes(rawDefaultFeedTab)) {
+    const hasDefaultFeedTab = typeof (data === null || data === void 0 ? void 0 : data.defaultFeedTab) === 'string';
+    const hasThemePreference = typeof (data === null || data === void 0 ? void 0 : data.themePreference) === 'string';
+    const rawDefaultFeedTab = hasDefaultFeedTab
+        ? (0, userUtils_1.sanitizeBoundedString)(data.defaultFeedTab, 40).toLowerCase()
+        : '';
+    const rawThemePreference = hasThemePreference
+        ? (0, userUtils_1.sanitizeBoundedString)(data.themePreference, 20).toLowerCase()
+        : '';
+    if (!hasDefaultFeedTab && !hasThemePreference) {
+        throw new functions.https.HttpsError('invalid-argument', 'Debes indicar al menos una preferencia para guardar.');
+    }
+    if (hasDefaultFeedTab && !['todo', 'news', 'post', 'surveys', 'lottery'].includes(rawDefaultFeedTab)) {
         throw new functions.https.HttpsError('invalid-argument', 'defaultFeedTab invalido. Valores permitidos: todo, news, post, surveys, lottery.');
+    }
+    if (hasThemePreference && !['light', 'dark'].includes(rawThemePreference)) {
+        throw new functions.https.HttpsError('invalid-argument', 'themePreference invalido. Valores permitidos: light, dark.');
     }
     const userRef = db.collection('users').doc(userId);
     const userSnap = await userRef.get();
@@ -1208,7 +1310,7 @@ exports.updateHomeFeedPreference = functions.https.onCall(async (data, context) 
         throw new functions.https.HttpsError('not-found', 'No se encontro el perfil del usuario.');
     }
     const currentSettings = (0, userUtils_1.ensureUserSettings)((_b = userSnap.data()) === null || _b === void 0 ? void 0 : _b.settings);
-    const nextSettings = Object.assign(Object.assign({}, currentSettings), { defaultFeedTab: rawDefaultFeedTab });
+    const nextSettings = Object.assign(Object.assign(Object.assign({}, currentSettings), (hasDefaultFeedTab ? { defaultFeedTab: rawDefaultFeedTab } : {})), (hasThemePreference ? { themePreference: rawThemePreference } : {}));
     await userRef.set({
         settings: nextSettings,
         updatedAt: admin.firestore.FieldValue.serverTimestamp()

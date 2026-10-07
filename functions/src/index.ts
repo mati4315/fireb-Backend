@@ -55,7 +55,8 @@ import {
 } from './userUtils';
 import {
   isLikeModuleEnabledForContent,
-  isSecretsModuleEnabled
+  isSecretsModuleEnabled,
+  isLotteryModuleEnabled
 } from './moduleUtils';
 import {
   sanitizeOptionalUrl
@@ -110,6 +111,101 @@ const CONTENT_SLUG_MAX_LENGTH = 96;
 const NOTIFICATION_PAGE_SIZE = 300;
 const NOTIFICATION_RETENTION_DAYS = 30;
 const NOTIFICATION_DEVICE_ID_MAX_LENGTH = 120;
+
+export const onLotteryCreatedNotifyUsers = functions.firestore
+  .document('lotteries/{lotteryId}')
+  .onCreate(async (snapshot, context) => {
+    const lottery = snapshot.data() || {};
+    const now = Date.now();
+    const startsAt = lottery.startsAt?.toDate?.()?.getTime?.() ?? 0;
+    const endsAt = lottery.endsAt?.toDate?.()?.getTime?.() ?? Number.MAX_SAFE_INTEGER;
+
+    if (
+      lottery.deletedAt != null ||
+      lottery.status !== 'active' ||
+      startsAt > now ||
+      endsAt <= now
+    ) {
+      return;
+    }
+
+    const modulesSnapshot = await db.collection('_config').doc('modules').get();
+    if (!isLotteryModuleEnabled(modulesSnapshot.data())) return;
+
+    const lotteryId = context.params.lotteryId;
+    const title = sanitizeBoundedString(lottery.title, 150) || 'Nueva lotería';
+    const notificationId = `lottery_${lotteryId}`;
+    const systemMessage = `La lotería «${title}» ya está disponible. ¡Participa ahora!`;
+    let cursor: FirebaseFirestore.QueryDocumentSnapshot | undefined;
+
+    while (true) {
+      let usersQuery = db.collection('users')
+        .orderBy(admin.firestore.FieldPath.documentId())
+        .limit(400);
+      if (cursor) usersQuery = usersQuery.startAfter(cursor);
+
+      const usersSnapshot = await usersQuery.get();
+      if (usersSnapshot.empty) break;
+
+      const batch = db.batch();
+      for (const userSnapshot of usersSnapshot.docs) {
+        const notificationRef = userSnapshot.ref.collection('notifications').doc(notificationId);
+        batch.set(notificationRef, {
+          type: 'system',
+          recipientUserId: userSnapshot.id,
+          actorUserId: 'system',
+          actorName: '🔔 Nueva lotería',
+          actorUsername: 'system',
+          actorProfilePictureUrl: 'https://bot.cdelu.io/images/logo.png',
+          contentId: lotteryId,
+          contentModule: '',
+          contentPublicRef: '',
+          contentSlug: '',
+          commentId: '',
+          replyId: '',
+          targetPath: '/loteria',
+          isRead: false,
+          readAt: null,
+          eventCount: 1,
+          systemMessage,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          lastEventAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+      }
+      await batch.commit();
+
+      cursor = usersSnapshot.docs[usersSnapshot.docs.length - 1];
+      if (usersSnapshot.size < 400) break;
+    }
+
+    await admin.messaging().send({
+      topic: 'all_users',
+      notification: {
+        title: '🎉 Nueva lotería disponible',
+        body: `${title}. ¡Participa ahora!`
+      },
+      data: {
+        type: 'system',
+        lotteryId,
+        targetPath: '/loteria'
+      },
+      android: {
+        priority: 'high',
+        notification: {
+          channelId: 'default',
+          sound: 'default'
+        }
+      },
+      webpush: {
+        fcmOptions: {
+          link: '/loteria'
+        }
+      }
+    }).catch((error) => {
+      console.warn(`Lottery push delivery failed for ${lotteryId}:`, error);
+    });
+  });
 
 // 1. Likes
 export const onLikeAdded = functions.firestore
@@ -1560,11 +1656,31 @@ export const updateHomeFeedPreference = functions.https.onCall(async (data, cont
     );
   }
 
-  const rawDefaultFeedTab = sanitizeBoundedString(data?.defaultFeedTab, 40).toLowerCase();
-  if (!['todo', 'news', 'post', 'surveys', 'lottery'].includes(rawDefaultFeedTab)) {
+  const hasDefaultFeedTab = typeof data?.defaultFeedTab === 'string';
+  const hasThemePreference = typeof data?.themePreference === 'string';
+  const rawDefaultFeedTab = hasDefaultFeedTab
+    ? sanitizeBoundedString(data.defaultFeedTab, 40).toLowerCase()
+    : '';
+  const rawThemePreference = hasThemePreference
+    ? sanitizeBoundedString(data.themePreference, 20).toLowerCase()
+    : '';
+
+  if (!hasDefaultFeedTab && !hasThemePreference) {
+    throw new functions.https.HttpsError(
+      'invalid-argument',
+      'Debes indicar al menos una preferencia para guardar.'
+    );
+  }
+  if (hasDefaultFeedTab && !['todo', 'news', 'post', 'surveys', 'lottery'].includes(rawDefaultFeedTab)) {
     throw new functions.https.HttpsError(
       'invalid-argument',
       'defaultFeedTab invalido. Valores permitidos: todo, news, post, surveys, lottery.'
+    );
+  }
+  if (hasThemePreference && !['light', 'dark'].includes(rawThemePreference)) {
+    throw new functions.https.HttpsError(
+      'invalid-argument',
+      'themePreference invalido. Valores permitidos: light, dark.'
     );
   }
 
@@ -1580,7 +1696,8 @@ export const updateHomeFeedPreference = functions.https.onCall(async (data, cont
   const currentSettings = ensureUserSettings(userSnap.data()?.settings);
   const nextSettings = {
     ...currentSettings,
-    defaultFeedTab: rawDefaultFeedTab
+    ...(hasDefaultFeedTab ? { defaultFeedTab: rawDefaultFeedTab } : {}),
+    ...(hasThemePreference ? { themePreference: rawThemePreference } : {})
   };
 
   await userRef.set(
