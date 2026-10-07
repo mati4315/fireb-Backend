@@ -125,6 +125,22 @@ Agrega métricas de:
 - errores.
 
 No agregues embeddings todavía.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 Paso 5: MCP privado
 Implementa el MCP privado read-only siguiendo Api_Publica.md.
 

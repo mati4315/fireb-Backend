@@ -528,6 +528,23 @@ service cloud.firestore {
       }
     }
 
+    // Allow collection-group reads only for entries nested under lottery documents.
+    match /{path=**}/lotteries/{lotteryId}/entries/{entryUserId} {
+      allow read: if true;
+    }
+
+    // Public Anormalia 22 episodes; only site administrators manage the catalog.
+    match /anormalia22_episodes/{episodeId} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Home notices are public to read, but only administrators can publish or remove them.
+    match /home_notices/{noticeId} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
     match /_content_slugs/{slugKey} {
       allow read: if true;
       allow write: if false;
@@ -559,11 +576,27 @@ service cloud.firestore {
       allow delete: if isStaff();
     }
 
-    // Configuration and feature flags
-    match /_config/{document=**} {
+    match /_config/lottery_new_user_promotion {
       allow read: if true;
-      allow write: if isStaff() && document != 'modules';
-      allow delete: if isStaff() && document != 'modules';
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /_config/home_notice_settings {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Configuration and feature flags
+    match /_config/{document} {
+      allow read: if true;
+      allow write: if isStaff() &&
+        document != 'modules' &&
+        document != 'lottery_new_user_promotion' &&
+        document != 'home_notice_settings';
+      allow delete: if isStaff() &&
+        document != 'modules' &&
+        document != 'lottery_new_user_promotion' &&
+        document != 'home_notice_settings';
     }
   }
 }

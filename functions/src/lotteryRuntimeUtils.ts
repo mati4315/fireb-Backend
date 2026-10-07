@@ -69,6 +69,7 @@ export const enterLotteryInternal = async (
   const userProfilePicUrl = userProfilePicRaw.trim();
 
   const modulesConfigRef = db.collection('_config').doc('modules');
+  const newUserPromotionRef = db.collection('_config').doc('lottery_new_user_promotion');
   const lotteryRef = db.collection('lotteries').doc(lotteryId);
   const entryRef = lotteryRef.collection('entries').doc(toLotteryEntryDocId(selectedNumber));
   const extraTicketsRef = db
@@ -80,12 +81,13 @@ export const enterLotteryInternal = async (
     .limit(LOTTERY_MAX_MAX_NUMBER + 2);
 
   const entryResult = await db.runTransaction(async (tx) => {
-    const [modulesConfigSnap, lotterySnap, entrySnap, userEntriesSnap, extraTicketsSnap] = await Promise.all([
+    const [modulesConfigSnap, lotterySnap, entrySnap, userEntriesSnap, extraTicketsSnap, newUserPromotionSnap] = await Promise.all([
       tx.get(modulesConfigRef),
       tx.get(lotteryRef),
       tx.get(entryRef),
       tx.get(userEntriesQuery),
-      tx.get(extraTicketsRef)
+      tx.get(extraTicketsRef),
+      tx.get(newUserPromotionRef)
     ]);
 
     if (!isLotteryModuleEnabled(modulesConfigSnap.data())) {
@@ -158,7 +160,25 @@ export const enterLotteryInternal = async (
 
     const maxNumber = normalizeLotteryMaxNumber(lotteryData.maxNumber);
     const maxTicketsPerUser = normalizeLotteryMaxTicketsPerUser(lotteryData.maxTicketsPerUser);
-    const extraTickets = normalizeLotteryExtraTickets(extraTicketsSnap.data()?.extraTickets);
+    const promotionData = newUserPromotionSnap.data() || {};
+    const promotionStart = promotionData.startsAt instanceof admin.firestore.Timestamp
+      ? promotionData.startsAt.toMillis()
+      : null;
+    const promotionEnd = promotionData.endsAt instanceof admin.firestore.Timestamp
+      ? promotionData.endsAt.toMillis()
+      : null;
+    const accountCreatedAt = Date.parse(userRecord.metadata.creationTime || '');
+    const promotionEligible = isFree &&
+      promotionData.enabled === true &&
+      promotionStart != null &&
+      promotionEnd != null &&
+      Number.isFinite(accountCreatedAt) &&
+      accountCreatedAt >= promotionStart &&
+      accountCreatedAt <= promotionEnd;
+    const promotionExtraTickets = promotionEligible
+      ? Math.min(5, Math.max(1, Math.floor(Number(promotionData.extraTickets) || 1)))
+      : 0;
+    const extraTickets = normalizeLotteryExtraTickets(extraTicketsSnap.data()?.extraTickets) + promotionExtraTickets;
     const effectiveMaxTicketsPerUser = getLotteryEffectiveMaxTickets(
       maxTicketsPerUser,
       extraTickets,

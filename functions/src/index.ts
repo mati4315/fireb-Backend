@@ -77,6 +77,7 @@ import {
 import { submitSurveyVoteInternal, completeExpiredSurveysInternal } from './surveyRuntimeUtils';
 import { handleAdEventCreatedInternal } from './adRuntimeUtils';
 import {
+  getMyAvailableLotteryTicketsInternal,
   getLotteryUserTicketExtrasInternal,
   listLotteriesForAdminInternal,
   grantLotteryUserExtraTicketsInternal
@@ -1582,13 +1583,68 @@ export const updateMyProfile = functions.https.onCall(async (data, context) => {
         profilePictureUrl,
         isVerified: nextProfile.isVerified,
         stats: mergedStats
-      }
+      },
+      createdProfile: !userSnap.exists
     };
   });
 
+  const { createdProfile, ...profileResult } = result;
+  if (createdProfile) {
+    try {
+      const [userRecord, promotionSnap] = await Promise.all([
+        admin.auth().getUser(userId),
+        db.collection('_config').doc('lottery_new_user_promotion').get()
+      ]);
+      const promotion = promotionSnap.data() || {};
+      const startsAt = promotion.startsAt instanceof admin.firestore.Timestamp
+        ? promotion.startsAt.toMillis()
+        : null;
+      const endsAt = promotion.endsAt instanceof admin.firestore.Timestamp
+        ? promotion.endsAt.toMillis()
+        : null;
+      const accountCreatedAt = Date.parse(userRecord.metadata.creationTime || '');
+      const isEligible = promotion.enabled === true &&
+        startsAt != null &&
+        endsAt != null &&
+        Number.isFinite(accountCreatedAt) &&
+        accountCreatedAt >= startsAt &&
+        accountCreatedAt <= endsAt;
+
+      if (isEligible) {
+        const extraTickets = Math.min(5, Math.max(1, Math.floor(Number(promotion.extraTickets) || 1)));
+        const notificationRef = userRef.collection('notifications').doc('new_user_lottery_bonus');
+        const systemMessage = `¡Bienvenido a CDELU! Por registrarte durante la promoción, recibiste ${extraTickets} ticket(s) extra por cada lotería gratuita. Ya puedes participar en los sorteos disponibles.`;
+        await notificationRef.set({
+          type: 'system',
+          recipientUserId: userId,
+          actorUserId: 'system',
+          actorName: '🎁 Bono de bienvenida',
+          actorUsername: 'cdelu',
+          actorProfilePictureUrl: 'https://bot.cdelu.io/images/logo.png',
+          contentId: '',
+          contentModule: '',
+          contentPublicRef: '',
+          contentSlug: '',
+          commentId: '',
+          replyId: '',
+          targetPath: '/loteria',
+          isRead: false,
+          readAt: null,
+          eventCount: 1,
+          systemMessage,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          lastEventAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+      }
+    } catch (error) {
+      console.warn(`Could not send welcome lottery bonus notice to ${userId}:`, error);
+    }
+  }
+
   return {
     ok: true,
-    ...result
+    ...profileResult
   };
 });
 
@@ -2023,6 +2079,10 @@ export const getUsersSocialConnections = functions.https.onCall(async (data, con
 
 export const getLotteryUserTicketExtras = functions.https.onCall(async (data, context) => {
   return getLotteryUserTicketExtrasInternal(db, data, context);
+});
+
+export const getMyAvailableLotteryTickets = functions.https.onCall(async (_data, context) => {
+  return getMyAvailableLotteryTicketsInternal(db, context);
 });
 
 export const listLotteriesForAdmin = functions.https.onCall(async (_data, context) => {

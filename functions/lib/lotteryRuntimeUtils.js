@@ -43,6 +43,7 @@ const enterLotteryInternal = async (db, data, context) => {
     const userUsername = userUsernameRaw.trim().slice(0, 30);
     const userProfilePicUrl = userProfilePicRaw.trim();
     const modulesConfigRef = db.collection('_config').doc('modules');
+    const newUserPromotionRef = db.collection('_config').doc('lottery_new_user_promotion');
     const lotteryRef = db.collection('lotteries').doc(lotteryId);
     const entryRef = lotteryRef.collection('entries').doc((0, lotteryUtils_1.toLotteryEntryDocId)(selectedNumber));
     const extraTicketsRef = db
@@ -54,12 +55,13 @@ const enterLotteryInternal = async (db, data, context) => {
         .limit(lotteryUtils_1.LOTTERY_MAX_MAX_NUMBER + 2);
     const entryResult = await db.runTransaction(async (tx) => {
         var _a;
-        const [modulesConfigSnap, lotterySnap, entrySnap, userEntriesSnap, extraTicketsSnap] = await Promise.all([
+        const [modulesConfigSnap, lotterySnap, entrySnap, userEntriesSnap, extraTicketsSnap, newUserPromotionSnap] = await Promise.all([
             tx.get(modulesConfigRef),
             tx.get(lotteryRef),
             tx.get(entryRef),
             tx.get(userEntriesQuery),
-            tx.get(extraTicketsRef)
+            tx.get(extraTicketsRef),
+            tx.get(newUserPromotionRef)
         ]);
         if (!(0, moduleUtils_1.isLotteryModuleEnabled)(modulesConfigSnap.data())) {
             throw new functions.https.HttpsError('failed-precondition', 'module-disabled: El modulo de loteria esta deshabilitado.');
@@ -101,7 +103,25 @@ const enterLotteryInternal = async (db, data, context) => {
             : 0;
         const maxNumber = (0, lotteryUtils_1.normalizeLotteryMaxNumber)(lotteryData.maxNumber);
         const maxTicketsPerUser = (0, lotteryUtils_1.normalizeLotteryMaxTicketsPerUser)(lotteryData.maxTicketsPerUser);
-        const extraTickets = (0, lotteryUtils_1.normalizeLotteryExtraTickets)((_a = extraTicketsSnap.data()) === null || _a === void 0 ? void 0 : _a.extraTickets);
+        const promotionData = newUserPromotionSnap.data() || {};
+        const promotionStart = promotionData.startsAt instanceof admin.firestore.Timestamp
+            ? promotionData.startsAt.toMillis()
+            : null;
+        const promotionEnd = promotionData.endsAt instanceof admin.firestore.Timestamp
+            ? promotionData.endsAt.toMillis()
+            : null;
+        const accountCreatedAt = Date.parse(userRecord.metadata.creationTime || '');
+        const promotionEligible = isFree &&
+            promotionData.enabled === true &&
+            promotionStart != null &&
+            promotionEnd != null &&
+            Number.isFinite(accountCreatedAt) &&
+            accountCreatedAt >= promotionStart &&
+            accountCreatedAt <= promotionEnd;
+        const promotionExtraTickets = promotionEligible
+            ? Math.min(5, Math.max(1, Math.floor(Number(promotionData.extraTickets) || 1)))
+            : 0;
+        const extraTickets = (0, lotteryUtils_1.normalizeLotteryExtraTickets)((_a = extraTicketsSnap.data()) === null || _a === void 0 ? void 0 : _a.extraTickets) + promotionExtraTickets;
         const effectiveMaxTicketsPerUser = (0, lotteryUtils_1.getLotteryEffectiveMaxTickets)(maxTicketsPerUser, extraTickets, maxNumber);
         if (selectedNumber < 1 || selectedNumber > maxNumber) {
             throw new functions.https.HttpsError('failed-precondition', `out-of-range: Debes seleccionar un numero entre 1 y ${maxNumber}.`);

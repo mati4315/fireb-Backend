@@ -1,7 +1,18 @@
 "use strict";
+var __rest = (this && this.__rest) || function (s, e) {
+    var t = {};
+    for (var p in s) if (Object.prototype.hasOwnProperty.call(s, p) && e.indexOf(p) < 0)
+        t[p] = s[p];
+    if (s != null && typeof Object.getOwnPropertySymbols === "function")
+        for (var i = 0, p = Object.getOwnPropertySymbols(s); i < p.length; i++) {
+            if (e.indexOf(p[i]) < 0 && Object.prototype.propertyIsEnumerable.call(s, p[i]))
+                t[p[i]] = s[p[i]];
+        }
+    return t;
+};
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onCommunityPostsReceived = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.grantLotteryUserExtraTickets = exports.listLotteriesForAdmin = exports.getLotteryUserTicketExtras = exports.getUsersSocialConnections = exports.updateUserManagement = exports.markAllNotificationsRead = exports.markNotificationRead = exports.sendTestPushToAllUsers = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateHomeFeedPreference = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.refreshSecretRankings = exports.refreshSecretRankingsCallable = exports.deleteSecretAdminCallable = exports.moderateSecretReportCallable = exports.getSecretReportsCallable = exports.moderateSecretCallable = exports.getSecretModerationQueueCallable = exports.reportContentCallable = exports.reportSecretCallable = exports.createSecretCommentCallable = exports.voteSecretCallable = exports.createSecretCallable = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = exports.onLotteryCreatedNotifyUsers = exports.privateMcp = exports.publicApi = void 0;
-exports.onAdEventCreated = exports.purgeOldNotifications = void 0;
+exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onCommunityPostsReceived = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.grantLotteryUserExtraTickets = exports.listLotteriesForAdmin = exports.getMyAvailableLotteryTickets = exports.getLotteryUserTicketExtras = exports.getUsersSocialConnections = exports.updateUserManagement = exports.markAllNotificationsRead = exports.markNotificationRead = exports.sendTestPushToAllUsers = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateHomeFeedPreference = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.refreshSecretRankings = exports.refreshSecretRankingsCallable = exports.deleteSecretAdminCallable = exports.moderateSecretReportCallable = exports.getSecretReportsCallable = exports.moderateSecretCallable = exports.getSecretModerationQueueCallable = exports.reportContentCallable = exports.reportSecretCallable = exports.createSecretCommentCallable = exports.voteSecretCallable = exports.createSecretCallable = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = exports.onLotteryCreatedNotifyUsers = exports.privateMcp = exports.publicApi = void 0;
+exports.onAdEventCreated = exports.purgeOldNotifications = exports.completeExpiredSurveys = void 0;
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const contentUtils_1 = require("./contentUtils");
@@ -1240,10 +1251,64 @@ exports.updateMyProfile = functions.https.onCall(async (data, context) => {
                 profilePictureUrl,
                 isVerified: nextProfile.isVerified,
                 stats: mergedStats
-            }
+            },
+            createdProfile: !userSnap.exists
         };
     });
-    return Object.assign({ ok: true }, result);
+    const { createdProfile } = result, profileResult = __rest(result, ["createdProfile"]);
+    if (createdProfile) {
+        try {
+            const [userRecord, promotionSnap] = await Promise.all([
+                admin.auth().getUser(userId),
+                db.collection('_config').doc('lottery_new_user_promotion').get()
+            ]);
+            const promotion = promotionSnap.data() || {};
+            const startsAt = promotion.startsAt instanceof admin.firestore.Timestamp
+                ? promotion.startsAt.toMillis()
+                : null;
+            const endsAt = promotion.endsAt instanceof admin.firestore.Timestamp
+                ? promotion.endsAt.toMillis()
+                : null;
+            const accountCreatedAt = Date.parse(userRecord.metadata.creationTime || '');
+            const isEligible = promotion.enabled === true &&
+                startsAt != null &&
+                endsAt != null &&
+                Number.isFinite(accountCreatedAt) &&
+                accountCreatedAt >= startsAt &&
+                accountCreatedAt <= endsAt;
+            if (isEligible) {
+                const extraTickets = Math.min(5, Math.max(1, Math.floor(Number(promotion.extraTickets) || 1)));
+                const notificationRef = userRef.collection('notifications').doc('new_user_lottery_bonus');
+                const systemMessage = `¡Bienvenido a CDELU! Por registrarte durante la promoción, recibiste ${extraTickets} ticket(s) extra por cada lotería gratuita. Ya puedes participar en los sorteos disponibles.`;
+                await notificationRef.set({
+                    type: 'system',
+                    recipientUserId: userId,
+                    actorUserId: 'system',
+                    actorName: '🎁 Bono de bienvenida',
+                    actorUsername: 'cdelu',
+                    actorProfilePictureUrl: 'https://bot.cdelu.io/images/logo.png',
+                    contentId: '',
+                    contentModule: '',
+                    contentPublicRef: '',
+                    contentSlug: '',
+                    commentId: '',
+                    replyId: '',
+                    targetPath: '/loteria',
+                    isRead: false,
+                    readAt: null,
+                    eventCount: 1,
+                    systemMessage,
+                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                    lastEventAt: admin.firestore.FieldValue.serverTimestamp()
+                }, { merge: true });
+            }
+        }
+        catch (error) {
+            console.warn(`Could not send welcome lottery bonus notice to ${userId}:`, error);
+        }
+    }
+    return Object.assign({ ok: true }, profileResult);
 });
 exports.updateNotificationPreferences = functions.https.onCall(async (data, context) => {
     var _a, _b;
@@ -1563,6 +1628,9 @@ exports.getUsersSocialConnections = functions.https.onCall(async (data, context)
 });
 exports.getLotteryUserTicketExtras = functions.https.onCall(async (data, context) => {
     return (0, lotteryAdminRuntimeUtils_1.getLotteryUserTicketExtrasInternal)(db, data, context);
+});
+exports.getMyAvailableLotteryTickets = functions.https.onCall(async (_data, context) => {
+    return (0, lotteryAdminRuntimeUtils_1.getMyAvailableLotteryTicketsInternal)(db, context);
 });
 exports.listLotteriesForAdmin = functions.https.onCall(async (_data, context) => {
     return (0, lotteryAdminRuntimeUtils_1.listLotteriesForAdminInternal)(db, context);

@@ -2,6 +2,103 @@ import * as admin from 'firebase-admin';
 import * as functions from 'firebase-functions';
 import { normalizeLotteryExtraTickets, normalizeLotteryMaxNumber, normalizeLotteryMaxTicketsPerUser, getLotteryEffectiveMaxTickets, toLotteryUserExtraDocId, LOTTERY_MAX_EXTRA_TICKETS_PER_USER, LOTTERY_USER_EXTRA_TICKETS_COLLECTION } from './lotteryUtils';
 import { assertAdminUser, sanitizeBoundedString } from './userUtils';
+import { isLotteryModuleEnabled } from './moduleUtils';
+
+export const getMyAvailableLotteryTicketsInternal = async (
+  db: FirebaseFirestore.Firestore,
+  context: functions.https.CallableContext
+): Promise<{ ok: true; availableTickets: number; eligibleLotteries: number }> => {
+  const userId = context.auth?.uid || '';
+  if (!userId) {
+    throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para consultar tus tickets.');
+  }
+
+  const [modulesSnap, userSnap, userRecord, lotteriesSnap, entriesSnap, extrasSnap, promotionSnap] = await Promise.all([
+    db.collection('_config').doc('modules').get(),
+    db.collection('users').doc(userId).get(),
+    admin.auth().getUser(userId),
+    db.collection('lotteries')
+      .where('deletedAt', '==', null)
+      .orderBy('createdAt', 'desc')
+      .limit(300)
+      .get(),
+    db.collectionGroup('entries').where('userId', '==', userId).get(),
+    db.collection(LOTTERY_USER_EXTRA_TICKETS_COLLECTION).where('userId', '==', userId).limit(400).get(),
+    db.collection('_config').doc('lottery_new_user_promotion').get()
+  ]);
+
+  if (!isLotteryModuleEnabled(modulesSnap.data())) {
+    return { ok: true, availableTickets: 0, eligibleLotteries: 0 };
+  }
+
+  const userData = userSnap.data() || {};
+  const providerIds = (userRecord.providerData || []).map((provider) => provider.providerId);
+  const canEnterFreeLotteries = userData.isVerified === true ||
+    providerIds.includes('google.com') ||
+    providerIds.includes('facebook.com');
+  const accountCreatedAt = Date.parse(userRecord.metadata.creationTime || '');
+  const promotion = promotionSnap.data() || {};
+  const promotionStart = promotion.startsAt instanceof admin.firestore.Timestamp
+    ? promotion.startsAt.toMillis()
+    : null;
+  const promotionEnd = promotion.endsAt instanceof admin.firestore.Timestamp
+    ? promotion.endsAt.toMillis()
+    : null;
+  const promotionEligible = promotion.enabled === true &&
+    promotionStart != null &&
+    promotionEnd != null &&
+    Number.isFinite(accountCreatedAt) &&
+    accountCreatedAt >= promotionStart &&
+    accountCreatedAt <= promotionEnd;
+  const promotionExtra = promotionEligible
+    ? Math.min(5, Math.max(1, Math.floor(Number(promotion.extraTickets) || 1)))
+    : 0;
+
+  const usedByLottery = new Map<string, number>();
+  for (const entry of entriesSnap.docs) {
+    const row = entry.data() || {};
+    const lotteryId = sanitizeBoundedString(row.lotteryId, 128) || entry.ref.parent.parent?.id || '';
+    if (lotteryId) usedByLottery.set(lotteryId, (usedByLottery.get(lotteryId) || 0) + 1);
+  }
+
+  const extrasByLottery = new Map<string, number>();
+  for (const extraDoc of extrasSnap.docs) {
+    const row = extraDoc.data() || {};
+    const lotteryId = sanitizeBoundedString(row.lotteryId, 128);
+    if (lotteryId) extrasByLottery.set(lotteryId, normalizeLotteryExtraTickets(row.extraTickets));
+  }
+
+  const now = Date.now();
+  let availableTickets = 0;
+  let eligibleLotteries = 0;
+  for (const lotteryDoc of lotteriesSnap.docs) {
+    const lottery = lotteryDoc.data() || {};
+    if (lottery.deletedAt != null || lottery.status !== 'active' || lottery.winner) continue;
+    const startsAt = lottery.startsAt instanceof admin.firestore.Timestamp ? lottery.startsAt.toMillis() : 0;
+    const endsAt = lottery.endsAt instanceof admin.firestore.Timestamp ? lottery.endsAt.toMillis() : Number.MAX_SAFE_INTEGER;
+    if (startsAt > now || endsAt <= now) continue;
+
+    const isFree = lottery.isFree !== false;
+    if (isFree && !canEnterFreeLotteries) continue;
+
+    const maxNumber = normalizeLotteryMaxNumber(lottery.maxNumber);
+    const baseLimit = normalizeLotteryMaxTicketsPerUser(lottery.maxTicketsPerUser);
+    const promotionBonus = isFree ? promotionExtra : 0;
+    const totalExtraTickets = extrasByLottery.get(lotteryDoc.id) || 0;
+    const effectiveLimit = getLotteryEffectiveMaxTickets(
+      baseLimit,
+      totalExtraTickets + promotionBonus,
+      maxNumber
+    );
+    const remaining = Math.max(0, effectiveLimit - (usedByLottery.get(lotteryDoc.id) || 0));
+    if (remaining > 0) {
+      eligibleLotteries += 1;
+      availableTickets += remaining;
+    }
+  }
+
+  return { ok: true, availableTickets, eligibleLotteries };
+};
 
 export const getLotteryUserTicketExtrasInternal = async (
   db: FirebaseFirestore.Firestore,

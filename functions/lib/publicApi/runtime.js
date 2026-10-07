@@ -16,7 +16,11 @@ const DEFAULT_ORIGIN = [
     'https://cdelu.ar',
     'https://www.cdelu.ar',
     'https://cdelu-ar.web.app',
-    'https://cdelu-ar.firebaseapp.com'
+    'https://cdelu-ar.firebaseapp.com',
+    // Capacitor serves bundled Android assets from https://localhost.
+    'https://localhost',
+    'http://localhost',
+    'capacitor://localhost'
 ].join(',');
 const MAX_RESPONSE_BYTES = 900000;
 const CACHE_TTL_SECONDS = { list: 30, detail: 60, categories: 120, search: 15 };
@@ -43,10 +47,18 @@ const getClientIp = (req) => {
     const forwarded = getString(req.get('x-forwarded-for')).split(',')[0].trim();
     return forwarded || getString(req.ip) || 'unknown';
 };
-const allowedOrigins = () => new Set((process.env.PUBLIC_API_ALLOWED_ORIGINS || DEFAULT_ORIGIN)
-    .split(',')
-    .map((origin) => origin.trim())
-    .filter(Boolean));
+const allowedOrigins = () => new Set([
+    ...(process.env.PUBLIC_API_ALLOWED_ORIGINS || DEFAULT_ORIGIN)
+        .split(',')
+        .map((origin) => origin.trim())
+        .filter(Boolean),
+    // Keep the public read-only API usable by the local Vue dev server and Capacitor.
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+    'http://localhost:4173',
+    'https://localhost',
+    'capacitor://localhost'
+]);
 const applyCors = (req, res) => {
     const origin = getString(req.get('origin'));
     if (origin && allowedOrigins().has(origin)) {
