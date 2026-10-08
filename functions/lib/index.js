@@ -11,8 +11,8 @@ var __rest = (this && this.__rest) || function (s, e) {
     return t;
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onCommunityPostsReceived = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.grantLotteryUserExtraTickets = exports.listLotteriesForAdmin = exports.getMyAvailableLotteryTickets = exports.getLotteryUserTicketExtras = exports.getUsersSocialConnections = exports.updateUserManagement = exports.markAllNotificationsRead = exports.markNotificationRead = exports.sendTestPushToAllUsers = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateHomeFeedPreference = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.refreshSecretRankings = exports.refreshSecretRankingsCallable = exports.deleteSecretAdminCallable = exports.moderateSecretReportCallable = exports.getSecretReportsCallable = exports.moderateSecretCallable = exports.getSecretModerationQueueCallable = exports.reportContentCallable = exports.reportSecretCallable = exports.createSecretCommentCallable = exports.voteSecretCallable = exports.createSecretCallable = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = exports.onLotteryCreatedNotifyUsers = exports.privateMcp = exports.publicApi = void 0;
-exports.onAdEventCreated = exports.purgeOldNotifications = exports.completeExpiredSurveys = void 0;
+exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onCommunityPostsReceived = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.grantLotteryUserExtraTickets = exports.listLotteriesForAdmin = exports.getMyAvailableLotteryTickets = exports.getLotteryUserTicketExtras = exports.getUsersSocialConnections = exports.updateUserManagement = exports.markAllNotificationsRead = exports.markNotificationRead = exports.sendTestPushToAllUsers = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateHomeFeedPreference = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.refreshSecretRankings = exports.refreshSecretRankingsCallable = exports.deleteSecretAdminCallable = exports.moderateSecretReportCallable = exports.saveSecretSettingsCallable = exports.getSecretReportsCallable = exports.moderateSecretCallable = exports.getSecretModerationQueueCallable = exports.reportContentCallable = exports.reportSecretCallable = exports.createSecretCommentCallable = exports.voteSecretCallable = exports.createSecretCallable = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = exports.onLotteryCreatedNotifyUsers = exports.privateMcp = exports.publicApi = void 0;
+exports.onAdEventCreated = exports.purgeOldNotifications = exports.completeExpiredSurveys = exports.submitSurveyVote = void 0;
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const contentUtils_1 = require("./contentUtils");
@@ -888,6 +888,28 @@ exports.getSecretReportsCallable = functions.https.onCall(async (data, context) 
         items,
         fetchedAtMs: Date.now()
     };
+});
+exports.saveSecretSettingsCallable = functions.https.onCall(async (data, context) => {
+    var _a;
+    await (0, userUtils_1.assertStaffUser)(db, context.auth);
+    const boundedInteger = (value, min, max, fallback) => {
+        const numeric = Number(value);
+        return Number.isFinite(numeric)
+            ? Math.max(min, Math.min(max, Math.round(numeric)))
+            : fallback;
+    };
+    const settings = {
+        maxTextLength: boundedInteger(data === null || data === void 0 ? void 0 : data.maxTextLength, 120, 500, 280),
+        minTextLength: boundedInteger(data === null || data === void 0 ? void 0 : data.minTextLength, 1, 80, 12),
+        createCooldownMinutes: boundedInteger(data === null || data === void 0 ? void 0 : data.createCooldownMinutes, 1, 240, 30),
+        commentCooldownSeconds: boundedInteger(data === null || data === void 0 ? void 0 : data.commentCooldownSeconds, 1, 300, 20),
+        dailyLimit: boundedInteger(data === null || data === void 0 ? void 0 : data.dailyLimit, 1, 30, 5),
+        autoHideReportsThreshold: boundedInteger(data === null || data === void 0 ? void 0 : data.autoHideReportsThreshold, 1, 100, 6),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedBy: ((_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid) || null
+    };
+    await db.collection('_config').doc('secret_settings').set(settings, { merge: true });
+    return { status: 'ok', settings: Object.assign(Object.assign({}, settings), { updatedAt: null }) };
 });
 exports.moderateSecretReportCallable = functions.https.onCall(async (data, context) => {
     var _a;
