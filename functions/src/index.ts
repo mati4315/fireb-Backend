@@ -1167,6 +1167,30 @@ export const getSecretReportsCallable = functions.https.onCall(async (data, cont
   };
 });
 
+export const saveSecretSettingsCallable = functions.https.onCall(async (data, context) => {
+  await assertStaffUser(db, context.auth);
+
+  const boundedInteger = (value: unknown, min: number, max: number, fallback: number) => {
+    const numeric = Number(value);
+    return Number.isFinite(numeric)
+      ? Math.max(min, Math.min(max, Math.round(numeric)))
+      : fallback;
+  };
+  const settings = {
+    maxTextLength: boundedInteger(data?.maxTextLength, 120, 500, 280),
+    minTextLength: boundedInteger(data?.minTextLength, 1, 80, 12),
+    createCooldownMinutes: boundedInteger(data?.createCooldownMinutes, 1, 240, 30),
+    commentCooldownSeconds: boundedInteger(data?.commentCooldownSeconds, 1, 300, 20),
+    dailyLimit: boundedInteger(data?.dailyLimit, 1, 30, 5),
+    autoHideReportsThreshold: boundedInteger(data?.autoHideReportsThreshold, 1, 100, 6),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedBy: context.auth?.uid || null
+  };
+
+  await db.collection('_config').doc('secret_settings').set(settings, { merge: true });
+  return { status: 'ok', settings: { ...settings, updatedAt: null } };
+});
+
 export const moderateSecretReportCallable = functions.https.onCall(async (data, context) => {
   await assertAdminUser(db, context.auth);
 
