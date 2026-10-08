@@ -6,7 +6,7 @@ const getDb = () => admin.firestore();
 
 export const SECRET_TEXT_MIN_LENGTH = 12;
 export const SECRET_TEXT_MAX_LENGTH = 280;
-export const SECRET_TEXT_MAX_ABSOLUTE = 500;
+export const SECRET_TEXT_MAX_ABSOLUTE = 2000;
 export const SECRET_NUMERIC_ID_START = 8301641;
 export const SECRET_COMMENT_MIN_LENGTH = 2;
 export const SECRET_COMMENT_MAX_LENGTH = 300;
@@ -211,7 +211,7 @@ export const resolveSecretRuntimeSettings = (
   fallbackDailyLimit = SECRET_DAILY_LIMIT,
   fallbackAutoHide = SECRET_AUTO_HIDE_REPORT_THRESHOLD
 ): SecretRuntimeSettings => {
-  const maxTextLength = clampInteger(data?.maxTextLength, 120, 500, fallbackTextLength);
+  const maxTextLength = clampInteger(data?.maxTextLength, 120, SECRET_TEXT_MAX_ABSOLUTE, fallbackTextLength);
   const minTextLengthRaw = clampInteger(data?.minTextLength, 1, 80, SECRET_TEXT_MIN_LENGTH);
   const minTextLength = Math.min(minTextLengthRaw, maxTextLength);
 

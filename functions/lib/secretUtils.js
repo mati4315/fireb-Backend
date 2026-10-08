@@ -7,7 +7,7 @@ const crypto = require("crypto");
 const getDb = () => admin.firestore();
 exports.SECRET_TEXT_MIN_LENGTH = 12;
 exports.SECRET_TEXT_MAX_LENGTH = 280;
-exports.SECRET_TEXT_MAX_ABSOLUTE = 500;
+exports.SECRET_TEXT_MAX_ABSOLUTE = 2000;
 exports.SECRET_NUMERIC_ID_START = 8301641;
 exports.SECRET_COMMENT_MIN_LENGTH = 2;
 exports.SECRET_COMMENT_MAX_LENGTH = 300;
@@ -179,7 +179,7 @@ const createSecretAlias = (fingerprintHash, scope) => {
 };
 exports.createSecretAlias = createSecretAlias;
 const resolveSecretRuntimeSettings = (data, fallbackTextLength = exports.SECRET_TEXT_MAX_LENGTH, fallbackDailyLimit = exports.SECRET_DAILY_LIMIT, fallbackAutoHide = exports.SECRET_AUTO_HIDE_REPORT_THRESHOLD) => {
-    const maxTextLength = clampInteger(data === null || data === void 0 ? void 0 : data.maxTextLength, 120, 500, fallbackTextLength);
+    const maxTextLength = clampInteger(data === null || data === void 0 ? void 0 : data.maxTextLength, 120, exports.SECRET_TEXT_MAX_ABSOLUTE, fallbackTextLength);
     const minTextLengthRaw = clampInteger(data === null || data === void 0 ? void 0 : data.minTextLength, 1, 80, exports.SECRET_TEXT_MIN_LENGTH);
     const minTextLength = Math.min(minTextLengthRaw, maxTextLength);
     const createCooldownMinutes = clampInteger(data === null || data === void 0 ? void 0 : data.createCooldownMinutes, 1, 240, 30);

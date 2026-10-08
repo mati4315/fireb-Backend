@@ -1177,7 +1177,7 @@ export const saveSecretSettingsCallable = functions.https.onCall(async (data, co
       : fallback;
   };
   const settings = {
-    maxTextLength: boundedInteger(data?.maxTextLength, 120, 500, 280),
+    maxTextLength: boundedInteger(data?.maxTextLength, 120, SECRET_TEXT_MAX_ABSOLUTE, 280),
     minTextLength: boundedInteger(data?.minTextLength, 1, 80, 12),
     createCooldownMinutes: boundedInteger(data?.createCooldownMinutes, 1, 240, 30),
     commentCooldownSeconds: boundedInteger(data?.commentCooldownSeconds, 1, 300, 20),

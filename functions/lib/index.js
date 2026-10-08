@@ -899,7 +899,7 @@ exports.saveSecretSettingsCallable = functions.https.onCall(async (data, context
             : fallback;
     };
     const settings = {
-        maxTextLength: boundedInteger(data === null || data === void 0 ? void 0 : data.maxTextLength, 120, 500, 280),
+        maxTextLength: boundedInteger(data === null || data === void 0 ? void 0 : data.maxTextLength, 120, secretUtils_1.SECRET_TEXT_MAX_ABSOLUTE, 280),
         minTextLength: boundedInteger(data === null || data === void 0 ? void 0 : data.minTextLength, 1, 80, 12),
         createCooldownMinutes: boundedInteger(data === null || data === void 0 ? void 0 : data.createCooldownMinutes, 1, 240, 30),
         commentCooldownSeconds: boundedInteger(data === null || data === void 0 ? void 0 : data.commentCooldownSeconds, 1, 300, 20),
