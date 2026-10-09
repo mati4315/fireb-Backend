@@ -102,6 +102,7 @@ import {
 import { sendTestPushToAllUsersInternal } from './notificationRuntimeUtils';
 export { publicApi } from './publicApi/runtime';
 export { privateMcp } from './privateMcpRuntime';
+export { sharePreview } from './sharePreviewRuntime';
 
 admin.initializeApp();
 const db = admin.firestore();
