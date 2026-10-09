@@ -298,7 +298,7 @@ export const sharePreview = functions.https.onRequest(async (req, res) => {
   }
 
   const requestPath = typeof req.query.path === 'string' ? req.query.path : '';
-  const match = requestPath.match(/^\/(noticia|s)\/([^/?#]+)(?:\/[^?#]*)?$/);
+  const match = requestPath.match(/^\/(noticia|s|c)\/([^/?#]+)(?:\/[^?#]*)?$/);
   if (!match) {
     res.status(400).send('Invalid preview path');
     return;
@@ -332,7 +332,7 @@ export const sharePreview = functions.https.onRequest(async (req, res) => {
       title = cleanText(news.titulo, 180) || 'Noticia en Cdelu.ar';
       description = cleanText(news.descripcion, 300) || 'Lee esta noticia en Cdelu.ar.';
       image = firstImage(news) || DEFAULT_IMAGE;
-    } else {
+    } else if (kind === 's') {
       const secret = await getPublicSecret(reference);
       if (!secret) {
         res.status(404).send('El secreto no está disponible.');
@@ -341,6 +341,21 @@ export const sharePreview = functions.https.onRequest(async (req, res) => {
       title = 'Secreto anónimo | Cdelu.ar';
       description = cleanText(secret.descripcion, 300) || 'Lee este secreto en Cdelu.ar.';
       image = `https://us-central1-cdeluar-ddefc.cloudfunctions.net/secretShareImage?id=${encodeURIComponent(reference)}`;
+    } else {
+      const communityDoc = await admin.firestore().collection('content').doc(reference).get();
+      const community = communityDoc.data();
+      if (
+        !communityDoc.exists || community?.module !== 'community' || community?.deletedAt != null ||
+        (community?.moderation?.status && community.moderation.status !== 'active')
+      ) {
+        res.status(404).send('La publicación no está disponible.');
+        return;
+      }
+      const author = cleanText(community.userName || community.titulo, 100);
+      const postText = cleanText(community.descripcion, 300);
+      title = author ? `Publicación de ${author}` : 'Publicación de la comunidad';
+      description = postText || 'Mira esta publicación en Cdelu.ar.';
+      image = firstImage(community) || DEFAULT_IMAGE;
     }
 
     res.status(200).type('html').send(buildPreviewHtml(canonicalUrl, title, description, image));
