@@ -72,15 +72,15 @@ const publicImageUrl = (value) => {
 const firstImage = (data) => {
     var _a, _b, _c, _d, _e, _f, _g, _h, _j;
     const candidates = [
-        data.imgMiniatura,
+        (_b = (_a = data.imagesV2) === null || _a === void 0 ? void 0 : _a[0]) === null || _b === void 0 ? void 0 : _b.url,
+        (_d = (_c = data.images) === null || _c === void 0 ? void 0 : _c[0]) === null || _d === void 0 ? void 0 : _d.url,
+        (_e = data.images) === null || _e === void 0 ? void 0 : _e[0],
         data.coverImageUrl,
         data.coverImage,
         data.thumbnailUrl,
-        (_b = (_a = data.imagesV2) === null || _a === void 0 ? void 0 : _a[0]) === null || _b === void 0 ? void 0 : _b.thumbUrl,
-        (_d = (_c = data.imagesV2) === null || _c === void 0 ? void 0 : _c[0]) === null || _d === void 0 ? void 0 : _d.url,
-        (_f = (_e = data.images) === null || _e === void 0 ? void 0 : _e[0]) === null || _f === void 0 ? void 0 : _f.thumbUrl,
-        (_h = (_g = data.images) === null || _g === void 0 ? void 0 : _g[0]) === null || _h === void 0 ? void 0 : _h.url,
-        (_j = data.images) === null || _j === void 0 ? void 0 : _j[0]
+        data.imgMiniatura,
+        (_g = (_f = data.imagesV2) === null || _f === void 0 ? void 0 : _f[0]) === null || _g === void 0 ? void 0 : _g.thumbUrl,
+        (_j = (_h = data.images) === null || _h === void 0 ? void 0 : _h[0]) === null || _j === void 0 ? void 0 : _j.thumbUrl
     ];
     for (const candidate of candidates) {
         const image = publicImageUrl(candidate);

@@ -66,15 +66,15 @@ const publicImageUrl = (value: unknown): string => {
 
 const firstImage = (data: FirebaseFirestore.DocumentData): string => {
   const candidates: unknown[] = [
-    data.imgMiniatura,
+    data.imagesV2?.[0]?.url,
+    data.images?.[0]?.url,
+    data.images?.[0],
     data.coverImageUrl,
     data.coverImage,
     data.thumbnailUrl,
+    data.imgMiniatura,
     data.imagesV2?.[0]?.thumbUrl,
-    data.imagesV2?.[0]?.url,
-    data.images?.[0]?.thumbUrl,
-    data.images?.[0]?.url,
-    data.images?.[0]
+    data.images?.[0]?.thumbUrl
   ];
   for (const candidate of candidates) {
     const image = publicImageUrl(candidate);
