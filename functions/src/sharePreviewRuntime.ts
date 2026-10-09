@@ -1,8 +1,11 @@
 import * as admin from 'firebase-admin';
 import * as functions from 'firebase-functions';
+import sharp = require('sharp');
 
 const PUBLIC_ORIGIN = 'https://cdelu.ar';
 const DEFAULT_IMAGE = `${PUBLIC_ORIGIN}/logo.jpg?v=20260522`;
+const SECRET_IMAGE_WIDTH = 1200;
+const SECRET_IMAGE_HEIGHT = 630;
 
 const escapeHtml = (value: string): string => value
   .replace(/&/g, '&amp;')
@@ -10,6 +13,13 @@ const escapeHtml = (value: string): string => value
   .replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;')
   .replace(/'/g, '&#39;');
+
+const escapeXml = (value: string): string => value
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&apos;');
 
 const cleanText = (value: unknown, maxLength: number): string => {
   if (typeof value !== 'string') return '';
@@ -137,6 +147,70 @@ const buildPreviewHtml = (
 <body><p><a href="${safeUrl}">Abrir en Cdelu.ar</a></p></body></html>`;
 };
 
+const wrapSecretText = (text: string, maxCharsPerLine: number, maxLines: number): string[] => {
+  const words = text.split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let line = '';
+
+  for (const word of words) {
+    const next = line ? `${line} ${word}` : word;
+    if (next.length <= maxCharsPerLine) {
+      line = next;
+      continue;
+    }
+    if (line) lines.push(line);
+    line = word;
+    if (lines.length >= maxLines) break;
+  }
+
+  if (lines.length < maxLines && line) lines.push(line);
+  const shownText = lines.join(' ');
+  if (shownText.length < text.length && lines.length) {
+    lines[lines.length - 1] = `${lines[lines.length - 1].replace(/[.,;:!?\s]+$/, '')}…`;
+  }
+  return lines;
+};
+
+const buildSecretImageSvg = (description: string): string => {
+  const lines = wrapSecretText(description || 'Lee este secreto en Cdelu.ar.', 48, 6);
+  const textElements = lines.map((line, index) =>
+    `<text x="112" y="${263 + index * 43}" class="body">${escapeXml(line)}</text>`
+  ).join('');
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${SECRET_IMAGE_WIDTH}" height="${SECRET_IMAGE_HEIGHT}" viewBox="0 0 ${SECRET_IMAGE_WIDTH} ${SECRET_IMAGE_HEIGHT}">
+    <defs>
+      <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fff7ed"/><stop offset="1" stop-color="#f1f5f9"/></linearGradient>
+      <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#ff8a00"/><stop offset="1" stop-color="#ffb020"/></linearGradient>
+      <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#172033" flood-opacity=".16"/></filter>
+    </defs>
+    <style>
+      .label{font:700 24px Arial,sans-serif;letter-spacing:3px;fill:#e87500}
+      .title{font:700 42px Arial,sans-serif;fill:#172033}
+      .body{font:400 32px Arial,sans-serif;fill:#354052}
+      .brand{font:700 23px Arial,sans-serif;fill:#667085}
+    </style>
+    <rect width="1200" height="630" fill="url(#bg)"/>
+    <circle cx="1112" cy="74" r="155" fill="#ff9a1f" opacity=".08"/>
+    <rect x="48" y="42" width="1104" height="546" rx="28" fill="#fff" filter="url(#shadow)"/>
+    <rect x="48" y="42" width="1104" height="12" rx="6" fill="url(#accent)"/>
+    <text x="112" y="132" class="label">EL MURO ANÓNIMO</text>
+    <text x="112" y="202" class="title">Un secreto de la comunidad</text>
+    ${textElements}
+    <line x1="112" y1="516" x2="1088" y2="516" stroke="#e8edf3" stroke-width="2"/>
+    <text x="112" y="558" class="brand">Cdelu.ar · Concepción del Uruguay</text>
+  </svg>`;
+};
+
+const getPublicSecret = async (reference: string): Promise<FirebaseFirestore.DocumentData | null> => {
+  const secretDoc = await admin.firestore().collection('content').doc(reference).get();
+  const secret = secretDoc.data();
+  if (
+    !secretDoc.exists || secret?.module !== 'secrets' || secret?.deletedAt != null ||
+    (secret?.moderation?.status && secret.moderation.status !== 'active')
+  ) return null;
+  return secret;
+};
+
 export const sharePreview = functions.https.onRequest(async (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.set('X-Content-Type-Options', 'nosniff');
@@ -181,22 +255,60 @@ export const sharePreview = functions.https.onRequest(async (req, res) => {
       description = cleanText(news.descripcion, 300) || 'Lee esta noticia en Cdelu.ar.';
       image = firstImage(news) || DEFAULT_IMAGE;
     } else {
-      const secretDoc = await admin.firestore().collection('content').doc(reference).get();
-      const secret = secretDoc.data();
-      if (
-        !secretDoc.exists || secret?.module !== 'secrets' || secret?.deletedAt != null ||
-        (secret?.moderation?.status && secret.moderation.status !== 'active')
-      ) {
+      const secret = await getPublicSecret(reference);
+      if (!secret) {
         res.status(404).send('El secreto no está disponible.');
         return;
       }
       title = 'Secreto anónimo | Cdelu.ar';
       description = cleanText(secret.descripcion, 300) || 'Lee este secreto en Cdelu.ar.';
+      image = `https://us-central1-cdeluar-ddefc.cloudfunctions.net/secretShareImage?id=${encodeURIComponent(reference)}`;
     }
 
     res.status(200).type('html').send(buildPreviewHtml(canonicalUrl, title, description, image));
   } catch (error) {
     console.error('[share-preview] failed', { kind, reference, error });
     res.status(500).send('No se pudo preparar la vista previa.');
+  }
+});
+
+/** Renders each public secret preview on demand; no image is written to Storage. */
+export const secretShareImage = functions.https.onRequest(async (req, res) => {
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Access-Control-Allow-Origin', '*');
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.status(405).send('Method not allowed');
+    return;
+  }
+
+  const reference = typeof req.query.id === 'string' ? req.query.id.trim() : '';
+  if (!reference || reference.length > 128 || /[\/\\]/.test(reference)) {
+    res.status(400).send('Invalid secret reference');
+    return;
+  }
+
+  try {
+    const secret = await getPublicSecret(reference);
+    if (!secret) {
+      res.status(404).send('El secreto no está disponible.');
+      return;
+    }
+
+    const description = cleanText(secret.descripcion, 500);
+    const png = await sharp(Buffer.from(buildSecretImageSvg(description)))
+      .png({ compressionLevel: 9, palette: true })
+      .toBuffer();
+
+    res.set('Cache-Control', 'public, max-age=3600, s-maxage=86400');
+    res.set('Content-Length', String(png.length));
+    res.type('png').status(200);
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
+    res.send(png);
+  } catch (error) {
+    console.error('[secret-share-image] failed', { reference, error });
+    res.status(500).send('No se pudo generar la vista previa.');
   }
 });
