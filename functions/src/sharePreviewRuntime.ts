@@ -250,7 +250,12 @@ const buildSecretImageSvg = (secret: FirebaseFirestore.DocumentData, reference: 
     <text x="30" y="67" class="header">${genderIcon}${ageLabel ? `  ${escapeXml(ageLabel)}` : ''}</text>
     <text x="600" y="67" text-anchor="middle" class="header-id">${escapeXml(idLabel)}</text>
     <text x="970" y="67" text-anchor="end" class="header-stat">${totalVotes}</text>
-    <text x="1000" y="67" class="header">☹️  🙂</text>
+    <g fill="#fff" stroke="${accent}" stroke-width="2">
+      <circle cx="1015" cy="58" r="15"/><circle cx="1060" cy="58" r="15"/>
+    </g>
+    <g fill="none" stroke="${accent}" stroke-width="2.2" stroke-linecap="round">
+      <path d="M1009 54h1m10 0h1m-12 10q6-7 12 0"/><path d="M1054 54h1m10 0h1m-12 5q6 7 12 0"/>
+    </g>
     <text x="1160" y="67" text-anchor="middle" class="header-stat">⋮</text>
     <text x="30" y="157" class="alias">${escapeXml(alias)}</text>
     <text x="${Math.min(260, 42 + alias.length * 14)}" y="157" class="time">·  ${escapeXml(relativeSecretTime(secret.createdAt))}</text>
@@ -262,8 +267,12 @@ const buildSecretImageSvg = (secret: FirebaseFirestore.DocumentData, reference: 
       <rect x="260" y="559" width="250" height="48" rx="24"/><rect x="520" y="559" width="58" height="48" rx="24"/>
       <rect x="588" y="559" width="105" height="48" rx="24"/>
     </g>
-    <text x="50" y="590" class="button">♧ ${upVotes}</text>
-    <text x="165" y="590" class="button">♧ ${downVotes}</text>
+    <g fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M48 579v15h-6v-15h6zm0 1h5l7-8c2-2 5 0 4 3l-2 5h9c2 0 3 2 2 4l-3 8c-.4 1.5-1.5 2.5-3 2.5H55l-7-2"/>
+      <path d="M163 579v15h-6v-15h6zm0 1h5l7-8c2-2 5 0 4 3l-2 5h9c2 0 3 2 2 4l-3 8c-.4 1.5-1.5 2.5-3 2.5H170l-7-2" transform="rotate(180 174 586)"/>
+    </g>
+    <text x="82" y="590" class="button">${upVotes}</text>
+    <text x="197" y="590" class="button">${downVotes}</text>
     <text x="282" y="590" class="button">Comentarios ${comments}</text>
     <text x="540" y="590" class="button">↗</text>
     <text x="608" y="590" class="button">Abrir</text>
