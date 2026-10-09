@@ -147,10 +147,11 @@ const buildPreviewHtml = (
 <body><p><a href="${safeUrl}">Abrir en Cdelu.ar</a></p></body></html>`;
 };
 
-const wrapSecretText = (text: string, maxCharsPerLine: number, maxLines: number): string[] => {
+const wrapSecretText = (text: string, maxCharsPerLine: number, maxLines: number): { lines: string[]; truncated: boolean } => {
   const words = text.split(/\s+/).filter(Boolean);
   const lines: string[] = [];
   let line = '';
+  let truncated = false;
 
   for (const word of words) {
     const next = line ? `${line} ${word}` : word;
@@ -160,44 +161,112 @@ const wrapSecretText = (text: string, maxCharsPerLine: number, maxLines: number)
     }
     if (line) lines.push(line);
     line = word;
-    if (lines.length >= maxLines) break;
+    if (lines.length >= maxLines) {
+      truncated = true;
+      break;
+    }
   }
 
   if (lines.length < maxLines && line) lines.push(line);
-  const shownText = lines.join(' ');
-  if (shownText.length < text.length && lines.length) {
+  if (!truncated && lines.join(' ').length < text.length) truncated = true;
+  if (truncated && lines.length) {
     lines[lines.length - 1] = `${lines[lines.length - 1].replace(/[.,;:!?\s]+$/, '')}…`;
   }
-  return lines;
+  return { lines, truncated };
 };
 
-const buildSecretImageSvg = (description: string): string => {
-  const lines = wrapSecretText(description || 'Lee este secreto en Cdelu.ar.', 48, 6);
+const relativeSecretTime = (value: unknown): string => {
+  let createdAtMs = 0;
+  if (value && typeof value === 'object' && 'toMillis' in value && typeof value.toMillis === 'function') {
+    createdAtMs = Number(value.toMillis());
+  } else if (value && typeof value === 'object' && '_seconds' in value) {
+    createdAtMs = Number(value._seconds) * 1000;
+  } else if (typeof value === 'string' || typeof value === 'number') {
+    createdAtMs = Date.parse(String(value));
+  }
+  if (!Number.isFinite(createdAtMs) || createdAtMs <= 0) return 'reciente';
+
+  const minutes = Math.max(1, Math.floor((Date.now() - createdAtMs) / 60_000));
+  if (minutes < 60) return `hace ${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `hace ${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `hace ${days}d`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `hace ${months} mes${months === 1 ? '' : 'es'}`;
+  const years = Math.floor(months / 12);
+  return `hace ${years} año${years === 1 ? '' : 's'}`;
+};
+
+const secretCategoryLabel = (value: unknown): string => {
+  const labels: Record<string, string> = {
+    rumores: 'Rumores',
+    relaciones: 'Relaciones',
+    trabajo_negocios: 'Trabajo / negocios',
+    denuncia_light: 'Denuncias light',
+    random_divertido: 'Random / divertido'
+  };
+  const category = typeof value === 'string' ? value.trim() : '';
+  return labels[category] || category;
+};
+
+const buildSecretImageSvg = (secret: FirebaseFirestore.DocumentData, reference: string): string => {
+  const description = cleanText(secret.descripcion, 4000) || 'Lee este secreto en Cdelu.ar.';
+  const hasChips = Boolean(secretCategoryLabel(secret.category) || (typeof secret.zone === 'string' && secret.zone.trim()));
+  const { lines } = wrapSecretText(description, 76, hasChips ? 7 : 8);
   const textElements = lines.map((line, index) =>
-    `<text x="112" y="${263 + index * 43}" class="body">${escapeXml(line)}</text>`
+    `<text x="30" y="${224 + index * 36}" class="body">${escapeXml(line)}</text>`
+  ).join('');
+  const sex = String(secret.sex || 'no_responder');
+  const accent = sex === 'mujer' ? '#ca2a6e' : sex === 'hombre' ? '#1e5fad' : '#586477';
+  const genderIcon = sex === 'mujer' ? '♀' : sex === 'hombre' ? '♂' : '•';
+  const age = Number(secret.age);
+  const ageLabel = Number.isFinite(age) && age > 0 ? `${Math.floor(age)} años` : '';
+  const alias = cleanText(secret.anonAlias, 40) || 'Anonimo';
+  const idLabel = `@${reference.slice(0, 8)}`;
+  const upVotes = Math.max(0, Math.floor(Number(secret.stats?.upVotesCount) || 0));
+  const downVotes = Math.max(0, Math.floor(Number(secret.stats?.downVotesCount) || 0));
+  const totalVotes = upVotes + downVotes;
+  const comments = Math.max(0, Math.floor(Number(secret.stats?.commentsCount) || 0));
+  const category = secretCategoryLabel(secret.category);
+  const zone = typeof secret.zone === 'string' ? cleanText(secret.zone, 28) : '';
+  const chips = [category, zone].filter(Boolean).map((chip, index) =>
+    `<rect x="30" y="${hasChips ? 500 : 0}" width="${Math.max(88, chip.length * 14 + 34)}" height="34" rx="17" fill="#253247" stroke="#46556b" stroke-width="1.5" transform="translate(${index === 1 && category ? Math.max(88, category.length * 14 + 34) + 12 : 0} 0)"/><text x="${47 + (index === 1 && category ? Math.max(88, category.length * 14 + 34) + 12 : 0)}" y="523" class="chip">${escapeXml(chip)}</text>`
   ).join('');
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${SECRET_IMAGE_WIDTH}" height="${SECRET_IMAGE_HEIGHT}" viewBox="0 0 ${SECRET_IMAGE_WIDTH} ${SECRET_IMAGE_HEIGHT}">
-    <defs>
-      <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fff7ed"/><stop offset="1" stop-color="#f1f5f9"/></linearGradient>
-      <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#ff8a00"/><stop offset="1" stop-color="#ffb020"/></linearGradient>
-      <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#172033" flood-opacity=".16"/></filter>
-    </defs>
     <style>
-      .label{font:700 24px Arial,sans-serif;letter-spacing:3px;fill:#e87500}
-      .title{font:700 42px Arial,sans-serif;fill:#172033}
-      .body{font:400 32px Arial,sans-serif;fill:#354052}
-      .brand{font:700 23px Arial,sans-serif;fill:#667085}
+      .header{font:700 25px Arial,sans-serif;fill:#fff}
+      .header-id{font:600 23px Arial,sans-serif;fill:#fff;opacity:.92}
+      .header-stat{font:700 26px Arial,sans-serif;fill:#fff}
+      .body{font:400 28px Arial,sans-serif;fill:#f8fafc}
+      .alias{font:700 23px Arial,sans-serif;fill:#fff}
+      .time{font:400 20px Arial,sans-serif;fill:#b8c2d2}
+      .chip{font:600 18px Arial,sans-serif;fill:#d9e2ef}
+      .button{font:600 18px Arial,sans-serif;fill:#fff}
     </style>
-    <rect width="1200" height="630" fill="url(#bg)"/>
-    <circle cx="1112" cy="74" r="155" fill="#ff9a1f" opacity=".08"/>
-    <rect x="48" y="42" width="1104" height="546" rx="28" fill="#fff" filter="url(#shadow)"/>
-    <rect x="48" y="42" width="1104" height="12" rx="6" fill="url(#accent)"/>
-    <text x="112" y="132" class="label">EL MURO ANÓNIMO</text>
-    <text x="112" y="202" class="title">Un secreto de la comunidad</text>
+    <rect width="1200" height="630" fill="#1e293b"/>
+    <rect width="1200" height="108" fill="${accent}"/>
+    <text x="30" y="67" class="header">${genderIcon}${ageLabel ? `  ${escapeXml(ageLabel)}` : ''}</text>
+    <text x="600" y="67" text-anchor="middle" class="header-id">${escapeXml(idLabel)}</text>
+    <text x="970" y="67" text-anchor="end" class="header-stat">${totalVotes}</text>
+    <text x="1000" y="67" class="header">☹️  🙂</text>
+    <text x="1160" y="67" text-anchor="middle" class="header-stat">⋮</text>
+    <text x="30" y="157" class="alias">${escapeXml(alias)}</text>
+    <text x="${Math.min(260, 42 + alias.length * 14)}" y="157" class="time">·  ${escapeXml(relativeSecretTime(secret.createdAt))}</text>
     ${textElements}
-    <line x1="112" y1="516" x2="1088" y2="516" stroke="#e8edf3" stroke-width="2"/>
-    <text x="112" y="558" class="brand">Cdelu.ar · Concepción del Uruguay</text>
+    ${chips}
+    <rect y="540" width="1200" height="90" fill="${accent}"/>
+    <g fill="rgba(255,255,255,.15)" stroke="rgba(255,255,255,.38)" stroke-width="1.5">
+      <rect x="30" y="559" width="105" height="48" rx="24"/><rect x="145" y="559" width="105" height="48" rx="24"/>
+      <rect x="260" y="559" width="250" height="48" rx="24"/><rect x="520" y="559" width="58" height="48" rx="24"/>
+      <rect x="588" y="559" width="105" height="48" rx="24"/>
+    </g>
+    <text x="50" y="590" class="button">♧ ${upVotes}</text>
+    <text x="165" y="590" class="button">♧ ${downVotes}</text>
+    <text x="282" y="590" class="button">Comentarios ${comments}</text>
+    <text x="540" y="590" class="button">↗</text>
+    <text x="608" y="590" class="button">Abrir</text>
   </svg>`;
 };
 
@@ -294,8 +363,7 @@ export const secretShareImage = functions.https.onRequest(async (req, res) => {
       return;
     }
 
-    const description = cleanText(secret.descripcion, 500);
-    const png = await sharp(Buffer.from(buildSecretImageSvg(description)))
+    const png = await sharp(Buffer.from(buildSecretImageSvg(secret, reference)))
       .png({ compressionLevel: 9, palette: true })
       .toBuffer();
 
