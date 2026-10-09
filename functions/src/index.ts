@@ -39,7 +39,8 @@ import {
   timestampToMillisOrZero
 } from './secretUtils';
 import {
-  clampInteger
+  clampInteger,
+  parseSelectedLotteryNumber
 } from './lotteryUtils';
 import {
   assertAdminUser,
@@ -2108,6 +2109,72 @@ export const getLotteryUserTicketExtras = functions.https.onCall(async (data, co
 
 export const getMyAvailableLotteryTickets = functions.https.onCall(async (_data, context) => {
   return getMyAvailableLotteryTicketsInternal(db, context);
+});
+
+// Public profile data already exposes lottery entries through Firestore rules.
+// This callable avoids collection-group rule ambiguity in browser clients and
+// returns only the fields used by the profile participation modal.
+export const getLotteryParticipationHistory = functions.https.onCall(async (data) => {
+  const userId = sanitizeBoundedString(data?.userId, 128);
+  if (!userId) {
+    throw new functions.https.HttpsError('invalid-argument', 'userId es obligatorio.');
+  }
+
+  const entriesSnap = await db.collectionGroup('entries')
+    .where('userId', '==', userId)
+    .limit(2000)
+    .get();
+
+  const numbersByLottery = new Map<string, number[]>();
+  entriesSnap.docs.forEach((entry) => {
+    const row = entry.data() || {};
+    const lotteryId = sanitizeBoundedString(row.lotteryId, 128) || entry.ref.parent.parent?.id || '';
+    const selectedNumber = parseSelectedLotteryNumber(row.selectedNumber);
+    if (!lotteryId || selectedNumber == null) return;
+    const numbers = numbersByLottery.get(lotteryId) || [];
+    numbers.push(selectedNumber);
+    numbersByLottery.set(lotteryId, numbers);
+  });
+
+  const lotteryIds = Array.from(numbersByLottery.keys());
+  const lotterySnapshots = await Promise.all(
+    Array.from({ length: Math.ceil(lotteryIds.length / 50) }, (_, index) => {
+      const ids = lotteryIds.slice(index * 50, (index + 1) * 50);
+      return db.getAll(...ids.map((id) => db.collection('lotteries').doc(id)));
+    })
+  );
+  const lotteriesById = new Map<string, FirebaseFirestore.DocumentData>();
+  lotterySnapshots.flat().forEach((snapshot) => {
+    if (snapshot.exists) lotteriesById.set(snapshot.id, snapshot.data() || {});
+  });
+
+  const participations = Array.from(numbersByLottery, ([lotteryId, numbers]) => {
+    const lottery = lotteriesById.get(lotteryId) || {};
+    const winnerNumber = parseSelectedLotteryNumber(lottery.winner?.selectedNumber);
+    const rawImageUrl = typeof lottery.imageUrl === 'string' ? lottery.imageUrl : '';
+    const imageUrl = sanitizeOptionalUrl(rawImageUrl, 'imageUrl');
+    let description = '';
+    if (lottery.hasPremio !== false) {
+      description = lottery.premioType === 'dinero'
+        ? (typeof lottery.premioDinero === 'number' ? `Premio: $${lottery.premioDinero}` : 'Premio en Dinero')
+        : (sanitizeBoundedString(lottery.premioOtros, 300) ? `Premio: ${sanitizeBoundedString(lottery.premioOtros, 300)}` : 'Premio Especial');
+    } else {
+      description = sanitizeBoundedString(lottery.description, 500) || '';
+    }
+
+    return {
+      lotteryId,
+      title: sanitizeBoundedString(lottery.title, 180) || sanitizeBoundedString(lottery.nombre, 180) || `Lotería #${lotteryId.slice(0, 6)}`,
+      numbers: Array.from(new Set(numbers)).sort((a, b) => a - b),
+      isWinner: lottery.winner?.userId === userId && winnerNumber != null && numbers.includes(winnerNumber),
+      winningNumber: winnerNumber,
+      status: sanitizeBoundedString(lottery.status, 40) || 'active',
+      imageUrl,
+      description
+    };
+  });
+
+  return { ok: true, total: participations.length, participations };
 });
 
 export const listLotteriesForAdmin = functions.https.onCall(async (_data, context) => {

@@ -11,8 +11,8 @@ var __rest = (this && this.__rest) || function (s, e) {
     return t;
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onCommunityPostsReceived = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.grantLotteryUserExtraTickets = exports.listLotteriesForAdmin = exports.getMyAvailableLotteryTickets = exports.getLotteryUserTicketExtras = exports.getUsersSocialConnections = exports.updateUserManagement = exports.markAllNotificationsRead = exports.markNotificationRead = exports.sendTestPushToAllUsers = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateHomeFeedPreference = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.refreshSecretRankings = exports.refreshSecretRankingsCallable = exports.deleteSecretAdminCallable = exports.moderateSecretReportCallable = exports.saveSecretSettingsCallable = exports.getSecretReportsCallable = exports.moderateSecretCallable = exports.getSecretModerationQueueCallable = exports.reportContentCallable = exports.reportSecretCallable = exports.createSecretCommentCallable = exports.voteSecretCallable = exports.createSecretCallable = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = exports.onLotteryCreatedNotifyUsers = exports.secretShareImage = exports.sharePreview = exports.privateMcp = exports.publicApi = void 0;
-exports.onAdEventCreated = exports.purgeOldNotifications = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = void 0;
+exports.onCommunityPostImageFinalized = exports.onCommunityPostsReceived = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.grantLotteryUserExtraTickets = exports.listLotteriesForAdmin = exports.getLotteryParticipationHistory = exports.getMyAvailableLotteryTickets = exports.getLotteryUserTicketExtras = exports.getUsersSocialConnections = exports.updateUserManagement = exports.markAllNotificationsRead = exports.markNotificationRead = exports.sendTestPushToAllUsers = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateHomeFeedPreference = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.refreshSecretRankings = exports.refreshSecretRankingsCallable = exports.deleteSecretAdminCallable = exports.moderateSecretReportCallable = exports.saveSecretSettingsCallable = exports.getSecretReportsCallable = exports.moderateSecretCallable = exports.getSecretModerationQueueCallable = exports.reportContentCallable = exports.reportSecretCallable = exports.createSecretCommentCallable = exports.voteSecretCallable = exports.createSecretCallable = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = exports.onLotteryCreatedNotifyUsers = exports.secretShareImage = exports.sharePreview = exports.privateMcp = exports.publicApi = void 0;
+exports.onAdEventCreated = exports.purgeOldNotifications = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = void 0;
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const contentUtils_1 = require("./contentUtils");
@@ -1656,6 +1656,68 @@ exports.getLotteryUserTicketExtras = functions.https.onCall(async (data, context
 });
 exports.getMyAvailableLotteryTickets = functions.https.onCall(async (_data, context) => {
     return (0, lotteryAdminRuntimeUtils_1.getMyAvailableLotteryTicketsInternal)(db, context);
+});
+// Public profile data already exposes lottery entries through Firestore rules.
+// This callable avoids collection-group rule ambiguity in browser clients and
+// returns only the fields used by the profile participation modal.
+exports.getLotteryParticipationHistory = functions.https.onCall(async (data) => {
+    const userId = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.userId, 128);
+    if (!userId) {
+        throw new functions.https.HttpsError('invalid-argument', 'userId es obligatorio.');
+    }
+    const entriesSnap = await db.collectionGroup('entries')
+        .where('userId', '==', userId)
+        .limit(2000)
+        .get();
+    const numbersByLottery = new Map();
+    entriesSnap.docs.forEach((entry) => {
+        var _a;
+        const row = entry.data() || {};
+        const lotteryId = (0, userUtils_1.sanitizeBoundedString)(row.lotteryId, 128) || ((_a = entry.ref.parent.parent) === null || _a === void 0 ? void 0 : _a.id) || '';
+        const selectedNumber = (0, lotteryUtils_1.parseSelectedLotteryNumber)(row.selectedNumber);
+        if (!lotteryId || selectedNumber == null)
+            return;
+        const numbers = numbersByLottery.get(lotteryId) || [];
+        numbers.push(selectedNumber);
+        numbersByLottery.set(lotteryId, numbers);
+    });
+    const lotteryIds = Array.from(numbersByLottery.keys());
+    const lotterySnapshots = await Promise.all(Array.from({ length: Math.ceil(lotteryIds.length / 50) }, (_, index) => {
+        const ids = lotteryIds.slice(index * 50, (index + 1) * 50);
+        return db.getAll(...ids.map((id) => db.collection('lotteries').doc(id)));
+    }));
+    const lotteriesById = new Map();
+    lotterySnapshots.flat().forEach((snapshot) => {
+        if (snapshot.exists)
+            lotteriesById.set(snapshot.id, snapshot.data() || {});
+    });
+    const participations = Array.from(numbersByLottery, ([lotteryId, numbers]) => {
+        var _a, _b;
+        const lottery = lotteriesById.get(lotteryId) || {};
+        const winnerNumber = (0, lotteryUtils_1.parseSelectedLotteryNumber)((_a = lottery.winner) === null || _a === void 0 ? void 0 : _a.selectedNumber);
+        const rawImageUrl = typeof lottery.imageUrl === 'string' ? lottery.imageUrl : '';
+        const imageUrl = (0, hostingUtils_1.sanitizeOptionalUrl)(rawImageUrl, 'imageUrl');
+        let description = '';
+        if (lottery.hasPremio !== false) {
+            description = lottery.premioType === 'dinero'
+                ? (typeof lottery.premioDinero === 'number' ? `Premio: $${lottery.premioDinero}` : 'Premio en Dinero')
+                : ((0, userUtils_1.sanitizeBoundedString)(lottery.premioOtros, 300) ? `Premio: ${(0, userUtils_1.sanitizeBoundedString)(lottery.premioOtros, 300)}` : 'Premio Especial');
+        }
+        else {
+            description = (0, userUtils_1.sanitizeBoundedString)(lottery.description, 500) || '';
+        }
+        return {
+            lotteryId,
+            title: (0, userUtils_1.sanitizeBoundedString)(lottery.title, 180) || (0, userUtils_1.sanitizeBoundedString)(lottery.nombre, 180) || `Lotería #${lotteryId.slice(0, 6)}`,
+            numbers: Array.from(new Set(numbers)).sort((a, b) => a - b),
+            isWinner: ((_b = lottery.winner) === null || _b === void 0 ? void 0 : _b.userId) === userId && winnerNumber != null && numbers.includes(winnerNumber),
+            winningNumber: winnerNumber,
+            status: (0, userUtils_1.sanitizeBoundedString)(lottery.status, 40) || 'active',
+            imageUrl,
+            description
+        };
+    });
+    return { ok: true, total: participations.length, participations };
 });
 exports.listLotteriesForAdmin = functions.https.onCall(async (_data, context) => {
     return (0, lotteryAdminRuntimeUtils_1.listLotteriesForAdminInternal)(db, context);
