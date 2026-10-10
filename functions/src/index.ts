@@ -1527,7 +1527,17 @@ export const updateMyProfile = functions.https.onCall(async (data, context) => {
   }
 
   const authToken = (context.auth?.token || {}) as Record<string, unknown>;
-  const emailFromToken = typeof authToken.email === 'string' ? authToken.email : '';
+  const authRecord = await admin.auth().getUser(userId).catch((error: any) => {
+    console.warn(`Could not read Firebase Auth email for ${userId}:`, error);
+    return null;
+  });
+  const emailFromProvider = authRecord?.providerData
+    ?.find((provider) => typeof provider.email === 'string' && provider.email.trim())
+    ?.email || '';
+  const emailFromAuth = authRecord?.email || emailFromProvider;
+  const emailFromToken = typeof authToken.email === 'string' && authToken.email.trim()
+    ? authToken.email
+    : emailFromAuth;
 
   const { username, usernameLower } = normalizeUsernameStrict(data?.username);
   const nombre = sanitizeBoundedString(data?.nombre, 120);

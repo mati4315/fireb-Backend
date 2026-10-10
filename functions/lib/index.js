@@ -1206,13 +1206,21 @@ exports.onFollowRemoved = functions.firestore
     }
 });
 exports.updateMyProfile = functions.https.onCall(async (data, context) => {
-    var _a, _b;
+    var _a, _b, _c, _d;
     const userId = (_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid;
     if (!userId) {
         throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion para actualizar tu perfil.');
     }
     const authToken = (((_b = context.auth) === null || _b === void 0 ? void 0 : _b.token) || {});
-    const emailFromToken = typeof authToken.email === 'string' ? authToken.email : '';
+    const authRecord = await admin.auth().getUser(userId).catch((error) => {
+        console.warn(`Could not read Firebase Auth email for ${userId}:`, error);
+        return null;
+    });
+    const emailFromProvider = ((_d = (_c = authRecord === null || authRecord === void 0 ? void 0 : authRecord.providerData) === null || _c === void 0 ? void 0 : _c.find((provider) => typeof provider.email === 'string' && provider.email.trim())) === null || _d === void 0 ? void 0 : _d.email) || '';
+    const emailFromAuth = (authRecord === null || authRecord === void 0 ? void 0 : authRecord.email) || emailFromProvider;
+    const emailFromToken = typeof authToken.email === 'string' && authToken.email.trim()
+        ? authToken.email
+        : emailFromAuth;
     const { username, usernameLower } = (0, userUtils_1.normalizeUsernameStrict)(data === null || data === void 0 ? void 0 : data.username);
     const nombre = (0, userUtils_1.sanitizeBoundedString)(data === null || data === void 0 ? void 0 : data.nombre, 120);
     if (!nombre) {
