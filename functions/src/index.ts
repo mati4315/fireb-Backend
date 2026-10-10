@@ -101,6 +101,7 @@ import {
   writeNotificationEvent
 } from './notificationRuntimeUtils';
 import { sendTestPushToAllUsersInternal } from './notificationRuntimeUtils';
+import { deleteManagedUserAccountInternal } from './userDeletionRuntime';
 export { publicApi } from './publicApi/runtime';
 export { privateMcp } from './privateMcpRuntime';
 export { sharePreview, secretShareImage } from './sharePreviewRuntime';
@@ -553,6 +554,29 @@ export const createSecretCallable = functions.https.onCall(async (data, context)
       secretId,
       anonAlias: alias
     };
+  });
+});
+
+export const trackSecretShareCallable = functions.https.onCall(async (data, context) => {
+  const secretId = typeof data?.secretId === 'string' ? data.secretId.trim() : '';
+  if (!secretId || secretId.length > 128) {
+    throw new functions.https.HttpsError('invalid-argument', 'secretId no es válido.');
+  }
+
+  const secretRef = db.collection('content').doc(secretId);
+  return db.runTransaction(async (tx) => {
+    const snapshot = await tx.get(secretRef);
+    const secret = snapshot.data();
+    if (!snapshot.exists || secret?.module !== 'secrets' || secret?.deletedAt != null) {
+      throw new functions.https.HttpsError('not-found', 'No se encontró el secreto.');
+    }
+
+    const shareCount = Math.max(0, Math.floor(Number(secret?.stats?.shareCount || 0))) + 1;
+    tx.update(secretRef, {
+      'stats.shareCount': shareCount,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+    return { ok: true, shareCount };
   });
 });
 
@@ -1673,6 +1697,10 @@ export const updateMyProfile = functions.https.onCall(async (data, context) => {
     ...profileResult
   };
 });
+
+export const deleteManagedUserAccount = functions
+  .runWith({ timeoutSeconds: 540, memory: '1GB' })
+  .https.onCall(async (data, context) => deleteManagedUserAccountInternal(db, data, context));
 
 export const updateNotificationPreferences = functions.https.onCall(async (data, context) => {
   const userId = context.auth?.uid;

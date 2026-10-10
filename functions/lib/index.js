@@ -11,8 +11,8 @@ var __rest = (this && this.__rest) || function (s, e) {
     return t;
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.onCommunityPostImageFinalized = exports.onCommunityPostsReceived = exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.grantLotteryUserExtraTickets = exports.listLotteriesForAdmin = exports.getLotteryParticipationHistory = exports.getMyAvailableLotteryTickets = exports.getLotteryUserTicketExtras = exports.getUsersSocialConnections = exports.updateUserManagement = exports.markAllNotificationsRead = exports.markNotificationRead = exports.sendTestPushToAllUsers = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateHomeFeedPreference = exports.updateNotificationPreferences = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.refreshSecretRankings = exports.refreshSecretRankingsCallable = exports.deleteSecretAdminCallable = exports.moderateSecretReportCallable = exports.saveSecretSettingsCallable = exports.getSecretReportsCallable = exports.moderateSecretCallable = exports.getSecretModerationQueueCallable = exports.reportContentCallable = exports.reportSecretCallable = exports.createSecretCommentCallable = exports.voteSecretCallable = exports.createSecretCallable = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = exports.onLotteryCreatedNotifyUsers = exports.secretShareImage = exports.sharePreview = exports.privateMcp = exports.publicApi = void 0;
-exports.onAdEventCreated = exports.purgeOldNotifications = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = void 0;
+exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.grantLotteryUserExtraTickets = exports.listLotteriesForAdmin = exports.getLotteryParticipationHistory = exports.getMyAvailableLotteryTickets = exports.getLotteryUserTicketExtras = exports.getUsersSocialConnections = exports.updateUserManagement = exports.markAllNotificationsRead = exports.markNotificationRead = exports.sendTestPushToAllUsers = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateHomeFeedPreference = exports.updateNotificationPreferences = exports.deleteManagedUserAccount = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.refreshSecretRankings = exports.refreshSecretRankingsCallable = exports.deleteSecretAdminCallable = exports.moderateSecretReportCallable = exports.saveSecretSettingsCallable = exports.getSecretReportsCallable = exports.moderateSecretCallable = exports.getSecretModerationQueueCallable = exports.reportContentCallable = exports.reportSecretCallable = exports.createSecretCommentCallable = exports.voteSecretCallable = exports.trackSecretShareCallable = exports.createSecretCallable = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = exports.onLotteryCreatedNotifyUsers = exports.secretShareImage = exports.sharePreview = exports.privateMcp = exports.publicApi = void 0;
+exports.onAdEventCreated = exports.purgeOldNotifications = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onCommunityPostsReceived = void 0;
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const contentUtils_1 = require("./contentUtils");
@@ -33,6 +33,7 @@ const userAdminRuntimeUtils_1 = require("./userAdminRuntimeUtils");
 const lotteryRuntimeUtils_1 = require("./lotteryRuntimeUtils");
 const notificationRuntimeUtils_1 = require("./notificationRuntimeUtils");
 const notificationRuntimeUtils_2 = require("./notificationRuntimeUtils");
+const userDeletionRuntime_1 = require("./userDeletionRuntime");
 var runtime_1 = require("./publicApi/runtime");
 Object.defineProperty(exports, "publicApi", { enumerable: true, get: function () { return runtime_1.publicApi; } });
 var privateMcpRuntime_1 = require("./privateMcpRuntime");
@@ -399,6 +400,27 @@ exports.createSecretCallable = functions.https.onCall(async (data, context) => {
             secretId,
             anonAlias: alias
         };
+    });
+});
+exports.trackSecretShareCallable = functions.https.onCall(async (data, context) => {
+    const secretId = typeof (data === null || data === void 0 ? void 0 : data.secretId) === 'string' ? data.secretId.trim() : '';
+    if (!secretId || secretId.length > 128) {
+        throw new functions.https.HttpsError('invalid-argument', 'secretId no es válido.');
+    }
+    const secretRef = db.collection('content').doc(secretId);
+    return db.runTransaction(async (tx) => {
+        var _a;
+        const snapshot = await tx.get(secretRef);
+        const secret = snapshot.data();
+        if (!snapshot.exists || (secret === null || secret === void 0 ? void 0 : secret.module) !== 'secrets' || (secret === null || secret === void 0 ? void 0 : secret.deletedAt) != null) {
+            throw new functions.https.HttpsError('not-found', 'No se encontró el secreto.');
+        }
+        const shareCount = Math.max(0, Math.floor(Number(((_a = secret === null || secret === void 0 ? void 0 : secret.stats) === null || _a === void 0 ? void 0 : _a.shareCount) || 0))) + 1;
+        tx.update(secretRef, {
+            'stats.shareCount': shareCount,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        return { ok: true, shareCount };
     });
 });
 exports.voteSecretCallable = functions.https.onCall(async (data, context) => {
@@ -1335,6 +1357,9 @@ exports.updateMyProfile = functions.https.onCall(async (data, context) => {
     }
     return Object.assign({ ok: true }, profileResult);
 });
+exports.deleteManagedUserAccount = functions
+    .runWith({ timeoutSeconds: 540, memory: '1GB' })
+    .https.onCall(async (data, context) => (0, userDeletionRuntime_1.deleteManagedUserAccountInternal)(db, data, context));
 exports.updateNotificationPreferences = functions.https.onCall(async (data, context) => {
     var _a, _b;
     const userId = (_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid;

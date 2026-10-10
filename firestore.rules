@@ -4,7 +4,8 @@ service cloud.firestore {
 
     // Helpers
     function isSignedIn() {
-      return request.auth != null;
+      return request.auth != null &&
+        !exists(/databases/$(database)/documents/_deletedUsers/$(request.auth.uid));
     }
 
     function userRole() {
