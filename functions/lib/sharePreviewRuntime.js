@@ -139,6 +139,8 @@ const buildPreviewHtml = (canonicalUrl, title, description, image) => {
 <meta property="og:title" content="${safeTitle}"><meta property="og:description" content="${safeDescription}">
 <meta property="og:url" content="${safeUrl}"><meta property="og:image" content="${safeImage}">
 <meta property="og:image:secure_url" content="${safeImage}"><meta property="og:image:alt" content="${safeTitle}">
+<meta property="al:android:url" content="${safeUrl}"><meta property="al:android:package" content="cdelu.ar.app">
+<meta property="al:android:app_name" content="Cdelu.ar"><meta property="al:web:url" content="${safeUrl}">
 <meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="${safeTitle}">
 <meta name="twitter:description" content="${safeDescription}"><meta name="twitter:image" content="${safeImage}"></head>
 <body><p><a href="${safeUrl}">Abrir en Cdelu.ar</a></p></body></html>`;
