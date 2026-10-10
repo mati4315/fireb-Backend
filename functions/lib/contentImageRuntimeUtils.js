@@ -1,12 +1,13 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.uploadCommunityImageToHostingInternal = exports.onCommunityPostImageFinalizedInternal = void 0;
+exports.deleteAnormaliaCoverFromHostingInternal = exports.uploadCommunityImageToHostingInternal = exports.onCommunityPostImageFinalizedInternal = void 0;
 const admin = require("firebase-admin");
 const functions = require("firebase-functions");
 const path = require("path");
 const stream_1 = require("stream");
 const hostingUtils_1 = require("./hostingUtils");
 const hostingUtils_2 = require("./hostingUtils");
+const userUtils_1 = require("./userUtils");
 const COMMUNITY_THUMB_MAX_SIDE = 480;
 const COMMUNITY_THUMBNAIL_BUCKET = process.env.COMMUNITY_IMAGES_BUCKET || 'cdeluar-ddefc-storage';
 const onCommunityPostImageFinalizedInternal = async (object) => {
@@ -139,4 +140,40 @@ const uploadCommunityImageToHostingInternal = async (data, context) => {
     };
 };
 exports.uploadCommunityImageToHostingInternal = uploadCommunityImageToHostingInternal;
+const deleteAnormaliaCoverFromHostingInternal = async (data, context) => {
+    await (0, userUtils_1.assertAdminUser)(admin.firestore(), context.auth);
+    const rawPath = typeof (data === null || data === void 0 ? void 0 : data.path) === 'string' ? data.path.trim() : '';
+    const relativePath = (0, hostingUtils_1.sanitizePathSegment)(rawPath);
+    if (relativePath !== rawPath ||
+        !/^posts\/[a-zA-Z0-9_-]{1,128}\/anormalia22\/[a-zA-Z0-9_-]{1,80}\.(?:webp|jpe?g|png)$/i.test(relativePath)) {
+        throw new functions.https.HttpsError('invalid-argument', 'La ruta no corresponde a una portada de Anormalia 22.');
+    }
+    const ftpConfig = (0, hostingUtils_1.getHostingFtpConfig)();
+    const remoteFilePath = `${ftpConfig.basePath}/${relativePath}`.replace(/\\/g, '/').replace(/\/+/g, '/');
+    const { Client } = await (0, hostingUtils_1.loadFtpClient)();
+    const ftpClient = new Client(30000);
+    ftpClient.ftp.verbose = false;
+    try {
+        await ftpClient.access({
+            host: ftpConfig.host,
+            user: ftpConfig.user,
+            password: ftpConfig.password,
+            port: ftpConfig.port,
+            secure: false
+        });
+        await ftpClient.remove(remoteFilePath);
+        return { deleted: true };
+    }
+    catch (error) {
+        const responseCode = Number((error === null || error === void 0 ? void 0 : error.code) || (error === null || error === void 0 ? void 0 : error.statusCode) || 0);
+        if (responseCode === 550)
+            return { deleted: false };
+        console.error('Anormalia cover cleanup failed', { relativePath, error });
+        throw new functions.https.HttpsError('internal', 'No se pudo borrar la portada anterior del hosting.');
+    }
+    finally {
+        ftpClient.close();
+    }
+};
+exports.deleteAnormaliaCoverFromHostingInternal = deleteAnormaliaCoverFromHostingInternal;
 //# sourceMappingURL=contentImageRuntimeUtils.js.map

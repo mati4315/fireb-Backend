@@ -69,7 +69,8 @@ import {
 } from './contentRuntimeUtils';
 import {
   onCommunityPostImageFinalizedInternal,
-  uploadCommunityImageToHostingInternal
+  uploadCommunityImageToHostingInternal,
+  deleteAnormaliaCoverFromHostingInternal
 } from './contentImageRuntimeUtils';
 import {
   onOfficialNewsReceivedInternal,
@@ -3066,6 +3067,10 @@ export const onCommunityPostImageFinalized = functions.storage
 // 7. Hosting FTP image upload fallback for community posts
 export const uploadCommunityImageToHosting = functions.https.onCall(async (data, context) => {
   return uploadCommunityImageToHostingInternal(data, context);
+});
+
+export const deleteAnormaliaCoverFromHosting = functions.https.onCall(async (data, context) => {
+  return deleteAnormaliaCoverFromHostingInternal(data, context);
 });
 
 // 8. Lottery entry callable (number-based entries, supports multiple tickets per user)

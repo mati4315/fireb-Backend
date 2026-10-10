@@ -11,6 +11,7 @@ import {
   sanitizePathSegment
 } from './hostingUtils';
 import { loadSharp } from './hostingUtils';
+import { assertAdminUser } from './userUtils';
 
 const COMMUNITY_THUMB_MAX_SIDE = 480;
 const COMMUNITY_THUMBNAIL_BUCKET = process.env.COMMUNITY_IMAGES_BUCKET || 'cdeluar-ddefc-storage';
@@ -160,4 +161,51 @@ export const uploadCommunityImageToHostingInternal = async (
     sizeBytes: base64Data.length,
     contentType
   };
+};
+
+export const deleteAnormaliaCoverFromHostingInternal = async (
+  data: any,
+  context: functions.https.CallableContext
+): Promise<{ deleted: boolean }> => {
+  await assertAdminUser(admin.firestore(), context.auth);
+
+  const rawPath = typeof data?.path === 'string' ? data.path.trim() : '';
+  const relativePath = sanitizePathSegment(rawPath);
+  if (
+    relativePath !== rawPath ||
+    !/^posts\/[a-zA-Z0-9_-]{1,128}\/anormalia22\/[a-zA-Z0-9_-]{1,80}\.(?:webp|jpe?g|png)$/i.test(relativePath)
+  ) {
+    throw new functions.https.HttpsError(
+      'invalid-argument',
+      'La ruta no corresponde a una portada de Anormalia 22.'
+    );
+  }
+
+  const ftpConfig = getHostingFtpConfig();
+  const remoteFilePath = `${ftpConfig.basePath}/${relativePath}`.replace(/\\/g, '/').replace(/\/+/g, '/');
+  const { Client } = await loadFtpClient();
+  const ftpClient = new Client(30_000);
+  ftpClient.ftp.verbose = false;
+
+  try {
+    await ftpClient.access({
+      host: ftpConfig.host,
+      user: ftpConfig.user,
+      password: ftpConfig.password,
+      port: ftpConfig.port,
+      secure: false
+    });
+    await ftpClient.remove(remoteFilePath);
+    return { deleted: true };
+  } catch (error: any) {
+    const responseCode = Number(error?.code || error?.statusCode || 0);
+    if (responseCode === 550) return { deleted: false };
+    console.error('Anormalia cover cleanup failed', { relativePath, error });
+    throw new functions.https.HttpsError(
+      'internal',
+      'No se pudo borrar la portada anterior del hosting.'
+    );
+  } finally {
+    ftpClient.close();
+  }
 };

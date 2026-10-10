@@ -12,7 +12,7 @@ var __rest = (this && this.__rest) || function (s, e) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.onOfficialNewsReceived = exports.onContentDeleted = exports.onContentCreated = exports.onContentSlugSync = exports.onUserUpdated = exports.syncPublicUserProfile = exports.grantLotteryUserExtraTickets = exports.listLotteriesForAdmin = exports.getLotteryParticipationHistory = exports.getMyAvailableLotteryTickets = exports.getLotteryUserTicketExtras = exports.getUsersSocialConnections = exports.updateUserManagement = exports.markAllNotificationsRead = exports.markNotificationRead = exports.sendTestPushToAllUsers = exports.unregisterNotificationDevice = exports.registerNotificationDevice = exports.updateHomeFeedPreference = exports.updateNotificationPreferences = exports.deleteManagedUserAccount = exports.updateMyProfile = exports.onFollowRemoved = exports.onFollowAdded = exports.onReplyUpdated = exports.onReplyCreated = exports.onCommentUpdated = exports.onCommentCreated = exports.refreshSecretRankings = exports.refreshSecretRankingsCallable = exports.deleteSecretAdminCallable = exports.moderateSecretReportCallable = exports.saveSecretSettingsCallable = exports.getSecretReportsCallable = exports.moderateSecretCallable = exports.getSecretModerationQueueCallable = exports.reportContentCallable = exports.reportSecretCallable = exports.createSecretCommentCallable = exports.voteSecretCallable = exports.trackSecretShareCallable = exports.createSecretCallable = exports.toggleContentLike = exports.onLikeRemoved = exports.onLikeAdded = exports.onLotteryCreatedNotifyUsers = exports.secretShareImage = exports.sharePreview = exports.privateMcp = exports.publicApi = void 0;
-exports.onAdEventCreated = exports.purgeOldNotifications = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onCommunityPostsReceived = void 0;
+exports.onAdEventCreated = exports.purgeOldNotifications = exports.completeExpiredSurveys = exports.submitSurveyVote = exports.drawLotteryWinner = exports.enterLottery = exports.deleteAnormaliaCoverFromHosting = exports.uploadCommunityImageToHosting = exports.onCommunityPostImageFinalized = exports.onCommunityPostsReceived = void 0;
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const contentUtils_1 = require("./contentUtils");
@@ -2521,6 +2521,9 @@ exports.onCommunityPostImageFinalized = functions.storage
 // 7. Hosting FTP image upload fallback for community posts
 exports.uploadCommunityImageToHosting = functions.https.onCall(async (data, context) => {
     return (0, contentImageRuntimeUtils_1.uploadCommunityImageToHostingInternal)(data, context);
+});
+exports.deleteAnormaliaCoverFromHosting = functions.https.onCall(async (data, context) => {
+    return (0, contentImageRuntimeUtils_1.deleteAnormaliaCoverFromHostingInternal)(data, context);
 });
 // 8. Lottery entry callable (number-based entries, supports multiple tickets per user)
 exports.enterLottery = functions.https.onCall(async (data, context) => {
