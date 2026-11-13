@@ -49,6 +49,18 @@ export const setShortLinkOneConfig = functions.https.onCall(async (data, context
   return { url };
 });
 
+export const getShortLinkOnePublic = functions.https.onCall(async () => {
+  const snapshot = await getShortLinkOneConfigRef().get();
+  const url = normalizeShortLinkTarget(snapshot.get('url'));
+  if (!url) {
+    throw new functions.https.HttpsError(
+      'not-found',
+      'El enlace /1 todavía no tiene un destino configurado.'
+    );
+  }
+  return { url };
+});
+
 export const redirectShortLinkOne = functions.https.onRequest(async (req, res) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
   res.set('X-Content-Type-Options', 'nosniff');

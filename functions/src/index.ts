@@ -106,7 +106,7 @@ import { deleteManagedUserAccountInternal } from './userDeletionRuntime';
 export { publicApi } from './publicApi/runtime';
 export { privateMcp } from './privateMcpRuntime';
 export { sharePreview, secretShareImage } from './sharePreviewRuntime';
-export { getShortLinkOneConfig, setShortLinkOneConfig, redirectShortLinkOne } from './shortLinkRuntime';
+export { getShortLinkOneConfig, setShortLinkOneConfig, redirectShortLinkOne, getShortLinkOnePublic } from './shortLinkRuntime';
 
 admin.initializeApp();
 const db = admin.firestore();
